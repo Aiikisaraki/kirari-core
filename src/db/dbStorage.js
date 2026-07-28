@@ -23,7 +23,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_session_id ON messages(session_id);
   CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT, userid INTEGER NOT NULL UNIQUE, token TEXT NOT NULL,
-    view_password TEXT NOT NULL, client_id TEXT, model TEXT NOT NULL DEFAULT 'gpt-5.4-mini', api_endpoint TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    view_password TEXT NOT NULL, client_id TEXT, model TEXT NOT NULL DEFAULT 'gpt-5.4-mini', api_endpoint TEXT, search_key TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_userid ON api_tokens(userid);
   CREATE TABLE IF NOT EXISTS api_clients (
@@ -60,6 +60,7 @@ if (!tokenColumns.includes('view_password')) db.exec("ALTER TABLE api_tokens ADD
 if (!tokenColumns.includes('client_id')) db.exec('ALTER TABLE api_tokens ADD COLUMN client_id TEXT');
 if (!tokenColumns.includes('model')) db.exec("ALTER TABLE api_tokens ADD COLUMN model TEXT NOT NULL DEFAULT 'gpt-5.4-mini'");
 if (!tokenColumns.includes('api_endpoint')) db.exec('ALTER TABLE api_tokens ADD COLUMN api_endpoint TEXT');
+if (!tokenColumns.includes('search_key')) db.exec('ALTER TABLE api_tokens ADD COLUMN search_key TEXT');
 
 // 老库（在 userid 加 UNIQUE 之前创建）没有唯一约束，导致 setApiToken 的
 // ON CONFLICT(userid) 报 "does not match any PRIMARY KEY or UNIQUE constraint"。
@@ -76,13 +77,13 @@ module.exports = {
     return module.exports.getSession(sessionId);
   },
   getRecentMessages: async (sessionId, limit = 5) => db.prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?').all(sessionId, limit * 2).reverse(),
-  getApiToken: async (userid) => db.prepare('SELECT token, client_id, model, api_endpoint FROM api_tokens WHERE userid = ?').get(userid),
+  getApiToken: async (userid) => db.prepare('SELECT token, client_id, model, api_endpoint, search_key FROM api_tokens WHERE userid = ?').get(userid),
   getModelConfig: async (userid) => db.prepare('SELECT model, api_endpoint FROM api_tokens WHERE userid = ?').get(userid) || { model: 'gpt-5.4-mini', api_endpoint: defaultApiEndpoint },
   hasApiToken: async (userid) => !!db.prepare('SELECT 1 FROM api_tokens WHERE userid = ?').get(userid),
-  setApiToken: async (userid, token, viewPassword, clientId, model = 'gpt-5.4-mini', apiEndpoint = defaultApiEndpoint) => {
+  setApiToken: async (userid, token, viewPassword, clientId, model = 'gpt-5.4-mini', apiEndpoint = defaultApiEndpoint, searchKey = '') => {
     const passwordHash = await bcrypt.hash(viewPassword, 12);
-    db.prepare(`INSERT INTO api_tokens (userid, token, view_password, client_id, model, api_endpoint) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(userid) DO UPDATE SET token=excluded.token, view_password=excluded.view_password, client_id=excluded.client_id, model=excluded.model, api_endpoint=excluded.api_endpoint`).run(userid, token, passwordHash, clientId, model, apiEndpoint);
+    db.prepare(`INSERT INTO api_tokens (userid, token, view_password, client_id, model, api_endpoint, search_key) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(userid) DO UPDATE SET token=excluded.token, view_password=excluded.view_password, client_id=excluded.client_id, model=excluded.model, api_endpoint=excluded.api_endpoint, search_key=excluded.search_key`).run(userid, token, passwordHash, clientId, model, apiEndpoint, searchKey || null);
   },
   setModelConfig: async (userid, model) => {
     const result = db.prepare('UPDATE api_tokens SET model = ? WHERE userid = ?').run(model, userid);
@@ -131,7 +132,7 @@ module.exports = {
   getProfile: async (uid) => {
     const u = db.prepare('SELECT uid, username FROM users WHERE uid = ?').get(uid);
     if (!u) return null;
-    const t = db.prepare('SELECT token, model, api_endpoint FROM api_tokens WHERE userid = ?').get(uid);
+    const t = db.prepare('SELECT token, model, api_endpoint, search_key FROM api_tokens WHERE userid = ?').get(uid);
     return {
       uid: u.uid,
       username: u.username,
@@ -139,6 +140,8 @@ module.exports = {
       api_endpoint: t?.api_endpoint || defaultApiEndpoint,
       token_masked: t?.token ? maskToken(t.token) : '',
       hasToken: !!t?.token,
+      search_key_masked: t?.search_key ? maskToken(t.search_key) : '',
+      hasSearchKey: !!t?.search_key,
     };
   },
   setProfile: async (uid, patch) => {
@@ -149,13 +152,14 @@ module.exports = {
       if (patch.model !== undefined) { sets.push('model = ?'); vals.push(patch.model); }
       if (patch.api_endpoint !== undefined) { sets.push('api_endpoint = ?'); vals.push(patch.api_endpoint); }
       if (patch.token !== undefined) { sets.push('token = ?'); vals.push(patch.token); }
+      if (patch.search_key !== undefined) { sets.push('search_key = ?'); vals.push(patch.search_key || null); }
       if (sets.length) {
         vals.push(uid);
         db.prepare(`UPDATE api_tokens SET ${sets.join(', ')} WHERE userid = ?`).run(...vals);
       }
     } else {
-      db.prepare('INSERT INTO api_tokens (userid, token, view_password, client_id, model, api_endpoint) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(uid, patch.token ?? '', '', null, patch.model ?? 'gpt-5.4-mini', patch.api_endpoint ?? defaultApiEndpoint);
+      db.prepare('INSERT INTO api_tokens (userid, token, view_password, client_id, model, api_endpoint, search_key) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(uid, patch.token ?? '', '', null, patch.model ?? 'gpt-5.4-mini', patch.api_endpoint ?? defaultApiEndpoint, patch.search_key || null);
     }
     return true;
   },

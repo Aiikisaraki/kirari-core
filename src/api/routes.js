@@ -222,30 +222,35 @@ function setupHttpRoutes(app) {
         return res.json(profile);
     });
 
-    app.put("/api/profile", async (req, res) => {
-        const auth = resolveAuthUid(req);
-        if (!auth) return res.status(401).json({ message: "未认证" });
-        const { model, api_endpoint, token } = req.body || {};
-        const patch = {};
-        if (model !== undefined) {
-            if (typeof model !== "string" || !model.trim() || model.length > 120)
-                return res.status(400).json({ message: "模型名称无效" });
-            patch.model = model.trim();
-        }
-        if (api_endpoint !== undefined) {
-            const normalized = parseApiEndpoint(api_endpoint);
-            if (!normalized) return res.status(400).json({ message: "模型 API 端点无效" });
-            patch.api_endpoint = normalized;
-        }
-        if (token !== undefined) {
-            if (typeof token !== "string" || !token.trim())
-                return res.status(400).json({ message: "Token 不能为空" });
-            patch.token = token.trim();
-        }
-        await dbStorage.setProfile(auth.uid, patch);
-        const profile = await dbStorage.getProfile(auth.uid);
-        return res.json(profile);
-    });
+  app.put("/api/profile", async (req, res) => {
+    const auth = resolveAuthUid(req);
+    if (!auth) return res.status(401).json({ message: "未认证" });
+    const { model, api_endpoint, token, search_key } = req.body || {};
+    const patch = {};
+    if (model !== undefined) {
+      if (typeof model !== "string" || !model.trim() || model.length > 120)
+        return res.status(400).json({ message: "模型名称无效" });
+      patch.model = model.trim();
+    }
+    if (api_endpoint !== undefined) {
+      const normalized = parseApiEndpoint(api_endpoint);
+      if (!normalized) return res.status(400).json({ message: "模型 API 端点无效" });
+      patch.api_endpoint = normalized;
+    }
+    if (token !== undefined) {
+      if (typeof token !== "string" || !token.trim())
+        return res.status(400).json({ message: "Token 不能为空" });
+      patch.token = token.trim();
+    }
+    if (search_key !== undefined) {
+      if (typeof search_key !== "string" || !search_key.trim())
+        return res.status(400).json({ message: "搜索 API Key 不能为空" });
+      patch.search_key = search_key.trim();
+    }
+    await dbStorage.setProfile(auth.uid, patch);
+    const profile = await dbStorage.getProfile(auth.uid);
+    return res.json(profile);
+  });
 }
 
 module.exports = { setupHttpRoutes };
