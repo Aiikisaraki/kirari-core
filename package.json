@@ -11,7 +11,7 @@
         "pack": "electron-builder --dir",
         "prepack-backend-runtime": "node scripts/prepack-backend-runtime.cjs",
         "predist": "npm run prepack-backend-runtime",
-        "dist": "npm run build && electron-builder"
+        "dist": "npm run build && electron-builder --publish=never"
     },
     "dependencies": {
         "@vue/devtools-api": "^8.1.5",
