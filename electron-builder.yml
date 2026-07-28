@@ -7,6 +7,12 @@ productName: Aki Kirari 桌宠
 executableName: aki-kirari-pet
 copyright: Copyright © 2026 Aki
 
+# 明确禁用 electron-builder 自带的 GitHub 发布器：
+# 发版完全交给 GitHub Actions 的 softprops/action-gh-release 负责，这里只构建安装包、不发布，
+# 避免 electron-builder 尝试读取 GH_TOKEN 而报
+# “GitHub Personal Access Token is not set, neither programmatically, nor using env 'GH_TOKEN'”。
+publish: null
+
 directories:
   output: release
   buildResources: build-resources
