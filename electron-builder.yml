@@ -1,0 +1,54 @@
+# electron-builder 配置：单机版（前后端一体安装包）
+# 构建：npm run dist  （会先 vite build，再打包 NSIS 安装向导）
+appId: com.akisaki.kirari
+productName: Aki Kirari 桌宠
+# 二进制文件名用 ASCII，降低杀软对非 ASCII Electron exe 的启发式扫描/误报
+# （显示名/开始菜单/快捷方式仍由 productName / shortcutName 控制，保持中文）
+executableName: aki-kirari-pet
+copyright: Copyright © 2026 Aki
+
+directories:
+  output: release
+  buildResources: build-resources
+
+# 随应用打包的前端产物（vite 输出 dist + 主进程 dist-electron）
+files:
+  - dist
+  - dist-electron
+  - package.json
+
+# 额外资源：
+#   - 后端 API（不含 node_modules）：从 build-resources/pet-api-bundle（prepack 生成）打包。
+#     node_modules 由 afterPack 钩子强制复制（electron-builder 默认排除 node_modules，与 gitignore 无关）。
+#   - Node 运行时：从 build-resources/backend-runtime 打包进 resources/pet-api/runtime。
+extraResources:
+  - from: build-resources/pet-api-bundle
+    to: pet-api
+    filter:
+      - "**/*"
+      - "!**/*.log"
+      - "!**/node_modules/**"
+  - from: build-resources/backend-runtime
+    to: pet-api/runtime
+
+# 打包完成后钩子：强制注入后端 node_modules（绕过 extraResources 的默认 node_modules 排除规则）
+afterPack: scripts/after-pack.cjs
+
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-Setup-${version}.${ext}
+
+# Windows 安装向导：非一键安装，允许用户选择目录、创建桌面快捷方式。
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Aki Kirari 桌宠
+  installerLanguages:
+    - zh_CN
+    - en
+  # 自定义安装向导页（模型配置）：插入到"选择安装目录"之后、"开始安装"之前
+  include: build-resources/installer.nsh

@@ -1,0 +1,40 @@
+{
+    "name": "akisaki-kirari",
+    "private": true,
+    "version": "0.1.2",
+    "main": "dist-electron/main.js",
+    "scripts": {
+        "dev": "chcp 65001 && vite",
+        "build": "chcp 65001 && vite build",
+        "preview": "chcp 65001 && vite preview",
+        "electron:dev": "chcp 65001 && vite",
+        "pack": "electron-builder --dir",
+        "prepack-backend-runtime": "node scripts/prepack-backend-runtime.cjs",
+        "predist": "npm run prepack-backend-runtime",
+        "dist": "npm run build && electron-builder"
+    },
+    "dependencies": {
+        "@vue/devtools-api": "^8.1.5",
+        "@vue/devtools-kit": "^8.2.1",
+        "@vue/devtools-shared": "^8.2.1",
+        "birpc": "^2.6.1",
+        "dompurify": "^3.4.12",
+        "hookable": "^5.5.3",
+        "marked": "^18.0.7",
+        "nostics": "^1.1.4",
+        "perfect-debounce": "^2.0.0",
+        "pinia": "^4.0.2",
+        "vue": "^3.5.34"
+    },
+    "devDependencies": {
+        "@types/node": "^24.12.3",
+        "@vitejs/plugin-vue": "^6.0.6",
+        "@vue/tsconfig": "^0.9.1",
+        "electron": "^42.7.0",
+        "typescript": "~6.0.2",
+        "vite": "^8.0.12",
+        "vite-plugin-electron": "^1.0.4",
+        "vue-tsc": "^3.2.8",
+        "electron-builder": "^26.0.12"
+    }
+}

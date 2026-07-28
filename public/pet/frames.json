@@ -1,0 +1,50 @@
+{
+  "idle": {
+    "sheet": "idle.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 127,
+    "fps": 12,
+    "loop": true
+  },
+  "blink": {
+    "sheet": "blink.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 133,
+    "fps": 12,
+    "loop": false
+  },
+  "sleepy": {
+    "sheet": "sleepy.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 126,
+    "fps": 10,
+    "loop": true
+  },
+  "speak": {
+    "sheet": "speak.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 53,
+    "fps": 8,
+    "loop": true
+  },
+  "wave": {
+    "sheet": "wave.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 61,
+    "fps": 12,
+    "loop": false
+  },
+  "happy": {
+    "sheet": "happy.png",
+    "frameW": 360,
+    "frameH": 480,
+    "frames": 61,
+    "fps": 12,
+    "loop": false
+  }
+}
