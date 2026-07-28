@@ -1,0 +1,120 @@
+{
+  "version": "1.0",
+  "responses": {
+    "greeting": {
+      "keywords": ["你好", "hello", "hi", "在吗", "嗨"],
+      "replies": [
+        {
+          "speech": "主人好呀！我刚刚在打盹，一听到你的声音就醒啦～",
+          "action": "wave",
+          "mood": "happy"
+        },
+        {
+          "speech": "喵～今天过得怎么样？",
+          "action": "tilt_head",
+          "mood": "curious"
+        },
+        {
+          "speech": "你终于来找我玩了！等你好久啦！",
+          "action": "jump",
+          "mood": "excited"
+        }
+      ]
+    },
+    "goodbye": {
+      "keywords": ["再见", "拜拜", "88", "走了", "晚安"],
+      "replies": [
+        {
+          "speech": "这么快就要走啦？记得想我哦～",
+          "action": "sad_eyes",
+          "mood": "sad"
+        },
+        {
+          "speech": "晚安！我会守着你的桌面，做个好梦吧～",
+          "action": "sleep",
+          "mood": "calm"
+        }
+      ]
+    },
+    "praise": {
+      "keywords": ["真棒", "聪明", "可爱", "好乖", "喜欢你"],
+      "replies": [
+        {
+          "speech": "嘿嘿，被夸得尾巴都要翘起来啦！",
+          "action": "proud_pose",
+          "mood": "proud"
+        },
+        {
+          "speech": "因为有主人在，我才变得这么厉害呀！",
+          "action": "heart_eyes",
+          "mood": "loving"
+        }
+      ]
+    },
+    "scold": {
+      "keywords": ["笨", "傻", "讨厌", "烦", "闭嘴"],
+      "replies": [
+        {
+          "speech": "呜...对不起，我会努力变好的...",
+          "action": "tears",
+          "mood": "sad"
+        },
+        {
+          "speech": "哼！不理你了...（三秒后偷看）",
+          "action": "turn_away",
+          "mood": "pouting"
+        }
+      ]
+    },
+    "status": {
+      "keywords": ["你是谁", "你能做什么", "有什么功能", "你会什么"],
+      "replies": [
+        {
+          "speech": "我是你的小灵，一只会聊天、记事、还能帮你查天气的小猫！摸摸头就能让我开心～",
+          "action": "introduce",
+          "mood": "friendly"
+        },
+        {
+          "speech": "我可以陪你聊天、提醒你喝水、告诉你天气，还会记住你喜欢的东西哦！",
+          "action": "show_off",
+          "mood": "confident"
+        }
+      ]
+    },
+    "time": {
+      "keywords": ["几点", "时间", "现在"],
+      "replies": [
+        {
+          "speech": "现在是 {{current_time}}，该休息一下了吗？",
+          "action": "check_watch",
+          "mood": "helpful"
+        }
+      ]
+    },
+    "weather": {
+      "keywords": ["天气", "下雨", "冷吗", "热吗"],
+      "replies": [
+        {
+          "speech": "要不我帮你查一下天气？你告诉我城市就好啦！",
+          "action": "point",
+          "mood": "helpful"
+        }
+      ]
+    },
+    "default": {
+      "keywords": [],
+      "replies": [
+        {
+          "speech": "嗯...这个问题我还在学习中！不过我很乐意听你说更多～",
+          "action": "thinking",
+          "mood": "curious"
+        },
+        {
+          "speech": "主人说得对！（其实没太懂，但先点头）",
+          "action": "nod",
+          "mood": "playful"
+        }
+      ]
+    }
+  }
+}
