@@ -13,6 +13,9 @@ copyright: Copyright © 2026 Aki
 # “GitHub Personal Access Token is not set, neither programmatically, nor using env 'GH_TOKEN'”。
 publish: null
 
+# 应用图标：嵌入 exe，决定任务栏 / 文件 / 标题栏（有边框窗口）图标
+icon: build-resources/icons/app-icon.ico
+
 directories:
   output: release
   buildResources: build-resources
@@ -22,6 +25,11 @@ files:
   - dist
   - dist-electron
   - package.json
+
+# 桌面快捷方式使用的独立图标：打包进安装根目录，供 NSIS 创建桌面快捷方式时引用
+extraFiles:
+  - from: build-resources/icons/shortcut-icon.ico
+    to: shortcut-icon.ico
 
 # 额外资源：
 #   - 后端 API（不含 node_modules）：从 build-resources/pet-api-bundle（prepack 生成）打包。
@@ -53,6 +61,9 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Aki Kirari 桌宠
+  # 安装包 / 卸载程序图标（与 exe 图标一致，均为软件图标 app-icon.ico）
+  installerIcon: build-resources/icons/app-icon.ico
+  uninstallerIcon: build-resources/icons/app-icon.ico
   installerLanguages:
     - zh_CN
     - en

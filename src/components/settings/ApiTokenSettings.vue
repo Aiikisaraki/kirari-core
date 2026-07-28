@@ -48,6 +48,9 @@ const apiEndpointInput = ref("https://api.chatanywhere.tech/v1");
 const tokenMasked = ref("");
 const hasToken = ref(false);
 const newTokenInput = ref("");
+const searchKeyMasked = ref("");
+const hasSearchKey = ref(false);
+const newSearchKeyInput = ref("");
 const accountName = ref("");
 const saveSuccess = ref(false);
 // 记录打开时从后端/缓存读到的最新值，保存时只发送「发生变更」的字段，
@@ -61,12 +64,16 @@ function applyProfile(p: {
     apiEndpoint: string;
     tokenMasked: string;
     hasToken: boolean;
+    searchKeyMasked?: string;
+    hasSearchKey?: boolean;
 }) {
     accountName.value = p.username;
     modelInput.value = p.model;
     apiEndpointInput.value = p.apiEndpoint;
     tokenMasked.value = p.tokenMasked;
     hasToken.value = p.hasToken;
+    searchKeyMasked.value = p.searchKeyMasked ?? "";
+    hasSearchKey.value = p.hasSearchKey === true;
 }
 
 onMounted(async () => {
@@ -144,6 +151,9 @@ function handleLogout() {
     newTokenInput.value = "";
     hasToken.value = false;
     tokenMasked.value = "";
+    newSearchKeyInput.value = "";
+    hasSearchKey.value = false;
+    searchKeyMasked.value = "";
     baseProfile.value = null;
 }
 
@@ -163,12 +173,13 @@ async function handleSave() {
         return;
     }
     // 仅发送变更过的字段：改一个就只发一个，不必三个一起填。
-    // 字段名必须与 config.json / IPC config:set 保持一致（endpoint/model/key）。
-    const patch: { model?: string; endpoint?: string; key?: string } = {};
+    // 字段名必须与 config.json / IPC config:set 保持一致（endpoint/model/key/searchKey）。
+    const patch: { model?: string; endpoint?: string; key?: string; searchKey?: string } = {};
     if (model !== (baseProfile.value?.model ?? "")) patch.model = model;
     if (endpoint !== (baseProfile.value?.apiEndpoint ?? ""))
         patch.endpoint = endpoint;
     if (newTokenInput.value.trim()) patch.key = newTokenInput.value.trim();
+    if (newSearchKeyInput.value.trim()) patch.searchKey = newSearchKeyInput.value.trim();
 
     if (Object.keys(patch).length === 0) {
         // 没有任何变更，无需请求
@@ -185,11 +196,14 @@ async function handleSave() {
         apiEndpointInput.value = updated.apiEndpoint;
         tokenMasked.value = updated.tokenMasked;
         hasToken.value = updated.hasToken;
+        searchKeyMasked.value = updated.searchKeyMasked;
+        hasSearchKey.value = updated.hasSearchKey;
         baseProfile.value = {
             model: updated.model,
             apiEndpoint: updated.apiEndpoint,
         };
         newTokenInput.value = "";
+        newSearchKeyInput.value = "";
         flashSuccess();
     } catch {
         // error 已由 composable 写入
@@ -378,6 +392,31 @@ async function handleSave() {
                 />
                 <p v-if="hasToken" class="hint">
                     当前 Token：{{ tokenMasked }}（已加密保存，无需查看明文）
+                </p>
+
+                <label for="newSearchKey">搜索 / 新闻 API Key（Tavily）</label>
+                <input
+                    id="newSearchKey"
+                    v-model="newSearchKeyInput"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="选填：填后可联网搜索/查新闻（留空则不修改）"
+                    :disabled="isLoading"
+                />
+                <p class="hint">
+                    用于「联网搜索 / 新闻」工具。天气与时间无需 Key；不填则桌宠只能回答天气、时间。
+                    在
+                    <a
+                        href="https://tavily.com"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="inline-link"
+                        >Tavily</a
+                    >
+                    免费领取（有免费额度，专为 LLM 优化）。
+                </p>
+                <p v-if="hasSearchKey" class="hint">
+                    当前搜索 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
                 </p>
 
                 <button

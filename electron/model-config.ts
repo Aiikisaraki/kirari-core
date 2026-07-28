@@ -10,6 +10,7 @@ export interface ModelConfigFile {
     endpoint?: string;
     model?: string;
     key?: string;
+    searchKey?: string;
     seeded?: boolean;
 }
 

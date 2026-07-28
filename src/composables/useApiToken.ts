@@ -11,6 +11,7 @@ interface ModelConfigFile {
     endpoint?: string;
     model?: string;
     key?: string;
+    searchKey?: string;
     seeded?: boolean;
 }
 
@@ -46,6 +47,8 @@ interface ProfileCache {
     apiEndpoint?: string;
     tokenMasked?: string;
     hasToken?: boolean;
+    searchKeyMasked?: string;
+    hasSearchKey?: boolean;
 }
 
 export function readProfileCache(): ProfileCache | null {
@@ -93,7 +96,7 @@ export function useApiToken() {
         }
     }
 
-    async function getProfile(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean }> {
+    async function getProfile(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean }> {
         try {
             const data = await request('GET', '/api/profile', {});
             const profile = {
@@ -102,6 +105,8 @@ export function useApiToken() {
                 apiEndpoint: typeof data.api_endpoint === 'string' ? data.api_endpoint : 'https://api.chatanywhere.tech/v1',
                 tokenMasked: typeof data.token_masked === 'string' ? data.token_masked : '',
                 hasToken: data.hasToken === true,
+                searchKeyMasked: typeof data.search_key_masked === 'string' ? data.search_key_masked : '',
+                hasSearchKey: data.hasSearchKey === true,
             };
             writeProfileCache(profile);
             return profile;
@@ -115,22 +120,31 @@ export function useApiToken() {
                     apiEndpoint: cached.apiEndpoint ?? 'https://api.chatanywhere.tech/v1',
                     tokenMasked: cached.tokenMasked ?? '',
                     hasToken: cached.hasToken === true,
+                    searchKeyMasked: cached.searchKeyMasked ?? '',
+                    hasSearchKey: cached.hasSearchKey === true,
                 };
             }
             throw err;
         }
     }
 
-    async function updateProfile(patch: { model?: string; apiEndpoint?: string; token?: string }) {
+    async function updateProfile(patch: { model?: string; apiEndpoint?: string; token?: string; searchKey?: string }) {
         isLoading.value = true;
         error.value = '';
         try {
-            const data = await request('PUT', '/api/profile', patch);
+            const body: Record<string, string> = {};
+            if (patch.model !== undefined) body.model = patch.model;
+            if (patch.apiEndpoint !== undefined) body.api_endpoint = patch.apiEndpoint;
+            if (patch.token !== undefined) body.token = patch.token;
+            if (patch.searchKey !== undefined) body.search_key = patch.searchKey;
+            const data = await request('PUT', '/api/profile', body);
             const profile = {
                 model: typeof data.model === 'string' ? data.model : 'gpt-5.4-mini',
                 apiEndpoint: typeof data.api_endpoint === 'string' ? data.api_endpoint : '',
                 tokenMasked: typeof data.token_masked === 'string' ? data.token_masked : '',
                 hasToken: data.hasToken === true,
+                searchKeyMasked: typeof data.search_key_masked === 'string' ? data.search_key_masked : '',
+                hasSearchKey: data.hasSearchKey === true,
             };
             writeProfileCache(profile);
             return profile;
@@ -153,33 +167,39 @@ export function useApiToken() {
         return `${key.slice(0, 3)}${"*".repeat(6)}${key.slice(-4)}`;
     }
 
-    async function getModelConfig(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean }> {
+    async function getModelConfig(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean }> {
         const data = await getBridge().getModelConfig();
         const model = typeof data.model === "string" && data.model.trim() ? data.model.trim() : "gpt-5.4-mini";
         const apiEndpoint = typeof data.endpoint === "string" && data.endpoint.trim() ? data.endpoint.trim() : "https://api.chatanywhere.tech/v1";
         const key = typeof data.key === "string" ? data.key : "";
+        const searchKey = typeof data.searchKey === "string" ? data.searchKey : "";
         const profile = {
             username: "",
             model,
             apiEndpoint,
             tokenMasked: key ? maskKeyLocal(key) : "",
             hasToken: !!key,
+            searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
+            hasSearchKey: !!searchKey,
         };
         writeProfileCache(profile);
         return profile;
     }
 
-    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string }) {
+    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string; searchKey?: string }) {
         isLoading.value = true;
         error.value = "";
         try {
             const data = await getBridge().setModelConfig(patch);
             const key = typeof data.key === "string" ? data.key : "";
+            const searchKey = typeof data.searchKey === "string" ? data.searchKey : "";
             const profile = {
                 model: typeof data.model === "string" && data.model.trim() ? data.model.trim() : "gpt-5.4-mini",
                 apiEndpoint: typeof data.endpoint === "string" && data.endpoint.trim() ? data.endpoint.trim() : "https://api.chatanywhere.tech/v1",
                 tokenMasked: key ? maskKeyLocal(key) : "",
                 hasToken: !!key,
+                searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
+                hasSearchKey: !!searchKey,
             };
             writeProfileCache(profile);
             return profile;
@@ -191,15 +211,18 @@ export function useApiToken() {
         }
     }
 
-    function onModelConfigChanged(cb: (p: { model: string; apiEndpoint: string; hasToken: boolean; tokenMasked: string }) => void) {
+    function onModelConfigChanged(cb: (p: { model: string; apiEndpoint: string; hasToken: boolean; tokenMasked: string; hasSearchKey: boolean; searchKeyMasked: string }) => void) {
         try {
-            getBridge().onModelConfigChanged((cfg: { model?: string; endpoint?: string; key?: string }) => {
+            getBridge().onModelConfigChanged((cfg: { model?: string; endpoint?: string; key?: string; searchKey?: string }) => {
                 const key = typeof cfg.key === "string" ? cfg.key : "";
+                const searchKey = typeof cfg.searchKey === "string" ? cfg.searchKey : "";
                 cb({
                     model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : "gpt-5.4-mini",
                     apiEndpoint: typeof cfg.endpoint === "string" && cfg.endpoint.trim() ? cfg.endpoint.trim() : "https://api.chatanywhere.tech/v1",
                     tokenMasked: key ? maskKeyLocal(key) : "",
                     hasToken: !!key,
+                    searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
+                    hasSearchKey: !!searchKey,
                 });
             });
         } catch {

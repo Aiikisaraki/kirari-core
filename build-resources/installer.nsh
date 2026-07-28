@@ -93,3 +93,19 @@ Function ModelConfigLeave
   FileClose $R0
 FunctionEnd
 !endif
+
+# ============================================================================
+# 桌面快捷方式使用「独立图标」（shortcut-icon.ico），与 exe 图标（app-icon.ico）区分
+#
+# 背景：electron-builder 默认用 exe 图标创建桌面快捷方式；其 addDesktopLink 宏在
+# installSection.nsh 中于本宏之前被调用，且默认宏无法被 include 覆盖（会被重定义）。
+# 因此这里利用 electron-builder 预留的 customInstall 钩子（在桌面快捷方式创建之后触发），
+# 用 shortcut-icon.ico 重建同名桌面快捷方式，覆盖默认图标。
+# $newDesktopLink / $appExe / $INSTDIR / ${APP_ID} / ${APP_DESCRIPTION} 此刻均已就绪。
+# shortcut-icon.ico 由 electron-builder.yml 的 extraFiles 打包进安装根目录（$INSTDIR）。
+# ============================================================================
+!macro customInstall
+  CreateShortCut "$newDesktopLink" "$appExe" "" "$INSTDIR\shortcut-icon.ico" 0 "" "" "${APP_DESCRIPTION}"
+  ClearErrors
+  WinShell::SetLnkAUMI "$newDesktopLink" "${APP_ID}"
+!macroend

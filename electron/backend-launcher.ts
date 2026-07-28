@@ -91,7 +91,7 @@ export async function applyConfigToBackend(): Promise<void> {
       console.log("[backend] 未找到模型配置（config.json），跳过同步");
       return;
     }
-    let cfg: { endpoint?: string; model?: string; key?: string };
+    let cfg: { endpoint?: string; model?: string; key?: string; searchKey?: string };
     try {
       cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
     } catch {
@@ -101,7 +101,8 @@ export async function applyConfigToBackend(): Promise<void> {
     const endpoint = typeof cfg.endpoint === "string" ? cfg.endpoint.trim() : "";
     const model = typeof cfg.model === "string" ? cfg.model.trim() : "";
     const key = typeof cfg.key === "string" ? cfg.key.trim() : "";
-    if (!endpoint && !model && !key) {
+    const searchKey = typeof cfg.searchKey === "string" ? cfg.searchKey.trim() : "";
+    if (!endpoint && !model && !key && !searchKey) {
       console.log("[backend] config.json 未填写模型配置，跳过同步");
       return;
     }
@@ -116,6 +117,7 @@ export async function applyConfigToBackend(): Promise<void> {
     if (key) patch.token = key;
     if (model) patch.model = model;
     if (endpoint) patch.api_endpoint = endpoint;
+    if (searchKey) patch.search_key = searchKey;
 
     const res = await fetch(`http://localhost:${BACKEND_PORT}/api/profile`, {
       method: "PUT",

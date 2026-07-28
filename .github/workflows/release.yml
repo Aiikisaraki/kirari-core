@@ -2,22 +2,19 @@ name: Release (kirari-desktop)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 触发方式
-#   1) 推送 tag  vX.Y.Z        → 自动打包并发布该版本 Release（覆盖同名旧 Release）
-#   2) 推送到 main 且 package.json 的 version 发生了变化（且对应 Release 尚不存在）
-#                              → 自动检测版本号，打包并发布（仅发布一次，不覆盖）
-#   3) 手动在 Actions 页面点击 Run workflow
+#   1) 推送 tag  vX.Y.Z   → 自动打包并发布该版本 Release（覆盖同名旧 Release）
+#   2) 手动在 Actions 页面点击 Run workflow
 #        - version：可填指定版本（如 0.1.2），留空则用 package.json 当前版本
 #        - overwrite：是否覆盖同名旧 Release（默认 true）
 #
-# 产物：Windows NSIS 安装包（本地一键启动版，前后端一体，含 Node 运行时与后端）
-#       命名 Aki Kirari 桌宠-Setup-<version>.exe，上传到 GitHub Release。
+# 注意：推送到 main 不再触发任何构建，避免每次提交都跑 workflow。
+#       要发版请打 tag：  git tag vX.Y.Z && git push origin vX.Y.Z
+#       或到 Actions 页面手动 Run。
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
     tags:
       - "v*"
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       version:
@@ -70,52 +67,22 @@ jobs:
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VER (tag v$VER)"
 
-      # 仅当“推送到 main 且为自动检测”时，若 Release 已存在则跳过（不重复发布）
-      - name: Check existing release (auto-detect on main only)
-        id: check
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists — skipping auto-build."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG not found — will build."
-          fi
-
-      - name: Skip notice
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true'
-        run: echo "::notice::Version ${{ steps.version.outputs.version }} already released, skipping."
-
       - name: Install frontend dependencies
-        if: >-
-          ! (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true')
         run: npm ci
 
       - name: Install backend dependencies (native module for Node 24 / ABI 137)
-        if: >-
-          ! (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true')
         working-directory: _backend
         run: npm ci
 
       - name: Build & package Windows installer (local all-in-one)
-        if: >-
-          ! (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true')
         env:
           PET_API_SOURCE_DIR: ${{ github.workspace }}/_backend
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist
 
-      # 覆盖同名旧 Release：删除旧的 release 与 tag（仅当 overwrite 或 tag 触发时执行）
+      # 覆盖同名旧 Release：删除旧的 release 与 tag
       - name: Delete existing same-version release (overwrite)
-        if: >-
-          (github.event.inputs.overwrite == 'true' || github.event_name == 'push') &&
-          ! (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true')
+        if: github.event.inputs.overwrite == 'true' || github.event_name == 'push'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,8 +93,6 @@ jobs:
           git push --delete origin "$TAG" || true
 
       - name: Create GitHub Release
-        if: >-
-          ! (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.exists == 'true')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

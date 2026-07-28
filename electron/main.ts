@@ -347,11 +347,12 @@ function resetWindowPosition(win: PetWindow) {
 }
 
 function resolveTrayIconPath() {
+  // 使用软件图标 app-icon.ico（与 exe / 任务栏 / 安装包一致），而非旧的 tray.png
   if (process.env.VITE_DEV_SERVER_URL) {
-    return path.resolve(__dirname, "../public/tray.png");
+    return path.resolve(__dirname, "../public/app-icon.ico");
   }
 
-  return path.resolve(__dirname, "../dist/tray.png");
+  return path.resolve(__dirname, "../dist/app-icon.ico");
 }
 
 function getTrayIcon() {
