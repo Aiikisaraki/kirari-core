@@ -8,6 +8,11 @@ import WindowChrome from "../common/WindowChrome.vue";
 const avatarStore = useAvatarStore();
 const isImporting = ref(false);
 const importError = ref("");
+const isZipping = ref(false);
+const zipError = ref("");
+const isRescanning = ref(false);
+const rescanError = ref("");
+const avatarError = ref("");
 
 async function handleImport() {
     importError.value = "";
@@ -19,6 +24,55 @@ async function handleImport() {
         isImporting.value = false;
     }
 }
+
+// 上传形象压缩包：选择 ZIP → 主进程解压到形象目录 → 校验 → 注册并切换。
+async function handleImportZip() {
+    zipError.value = "";
+    isZipping.value = true;
+    try {
+        const r = await avatarStore.importAvatarZip();
+        if (!r.ok) zipError.value = r.message || "上传失败";
+    } finally {
+        isZipping.value = false;
+    }
+}
+
+// 重新扫描形象目录：把用户直接丢进去的形象文件夹注册为可用形象。
+async function handleRescan() {
+    rescanError.value = "";
+    isRescanning.value = true;
+    try {
+        await avatarStore.rescanAvatars();
+    } catch (e) {
+        rescanError.value = e instanceof Error ? e.message : "刷新失败";
+    } finally {
+        isRescanning.value = false;
+    }
+}
+
+// 打开形象目录，方便用户把自定义形象文件夹放进去。
+async function handleOpenFolder() {
+    try {
+        await avatarStore.openAvatarsFolder();
+    } catch {
+        /* 忽略 */
+    }
+}
+
+async function handleSelectAvatar(id: string) {
+    avatarError.value = "";
+    const found = avatarStore.list.find((a) => a.id === id);
+    if (!found) {
+        avatarError.value = `未找到形象 ${id}`;
+        return;
+    }
+    try {
+        await avatarStore.setAvatar(found);
+    } catch (e) {
+        avatarError.value = e instanceof Error ? e.message : "切换形象失败";
+    }
+}
+
 
 const {
     isLoading,
@@ -245,49 +299,70 @@ async function handleSave() {
             <section class="avatar-section">
                 <h3>桌宠形象</h3>
                 <p class="hint">
-                    切换桌宠渲染形象。支持内置精灵帧与
-                    Live2D（即将推出），也可导入你自己的精灵帧形象。
+                    切换桌宠形象。渲染方式由皮肤配置文件（frames.json）里的
+                    <code>type</code> 字段自动决定，无需手动选择。
                 </p>
-                <div class="avatar-grid">
-                    <button
+                <label for="avatar-select">当前形象</label>
+                <select
+                    id="avatar-select"
+                    class="avatar-select"
+                    :value="avatarStore.current.id"
+                    @change="
+                        handleSelectAvatar(($event.target as HTMLSelectElement).value)
+                    "
+                >
+                    <option
                         v-for="a in avatarStore.list"
                         :key="a.id"
-                        type="button"
-                        class="avatar-card"
-                        :class="{
-                            'is-active': avatarStore.isActive(a),
-                            'is-disabled': a.type === 'live2d',
-                        }"
-                        :disabled="a.type === 'live2d'"
-                        @click="a.type !== 'live2d' && avatarStore.setAvatar(a)"
+                        :value="a.id"
                     >
-                        <span class="avatar-type">{{
-                            a.type === "sprite" ? "精灵帧" : "Live2D"
-                        }}</span>
-                        <span class="avatar-label">{{ a.name }}</span>
-                        <span v-if="a.type === 'live2d'" class="avatar-tag"
-                            >即将推出</span
-                        >
-                        <span v-else-if="a.builtin" class="avatar-tag"
-                            >内置</span
-                        >
-                        <span v-else class="avatar-tag">自定义</span>
+                        {{ a.name }}
+                    </option>
+                </select>
+                <div class="avatar-actions">
+                    <button
+                        type="button"
+                        class="import-btn"
+                        :disabled="isImporting"
+                        @click="handleImport"
+                    >
+                        {{ isImporting ? "导入中..." : "导入文件夹" }}
+                    </button>
+                    <button
+                        type="button"
+                        class="import-btn secondary"
+                        :disabled="isZipping"
+                        @click="handleImportZip"
+                    >
+                        {{ isZipping ? "解压中..." : "上传压缩包 (ZIP)" }}
                     </button>
                 </div>
-                <button
-                    type="button"
-                    class="import-btn"
-                    :disabled="isImporting"
-                    @click="handleImport"
+                <div class="avatar-actions">
+                    <button
+                        type="button"
+                        class="ghost-btn"
+                        :disabled="isRescanning"
+                        @click="handleRescan"
+                    >
+                        {{ isRescanning ? "刷新中..." : "刷新形象列表" }}
+                    </button>
+                    <button
+                        type="button"
+                        class="ghost-btn"
+                        @click="handleOpenFolder"
+                    >
+                        打开形象文件夹
+                    </button>
+                </div>
+                <div
+                    v-if="importError || zipError || rescanError || avatarError"
+                    class="error-message"
                 >
-                    {{ isImporting ? "导入中..." : "导入精灵形象文件夹" }}
-                </button>
-                <div v-if="importError" class="error-message">
-                    {{ importError }}
+                    {{ importError || zipError || rescanError || avatarError }}
                 </div>
                 <p class="hint">
-                    导入的文件夹需包含 frames.json 与对应精灵图（如
-                    idle.png），格式参考内置形象。
+                    自定义形象文件夹需包含 <code>frames.json</code> 与对应精灵图。
+                    直接丢进「形象文件夹」点刷新，或用「上传压缩包」自动解压。
                 </p>
             </section>
 
@@ -612,56 +687,23 @@ button:disabled {
     box-shadow: 0 10px 28px rgba(57, 44, 76, 0.1);
     margin-bottom: 20px;
 }
-.avatar-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 10px;
-}
-.avatar-card {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    align-items: flex-start;
-    padding: 12px;
-    border: 1.5px solid var(--pet-border);
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.5);
+.avatar-select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--pet-border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.55);
     color: var(--pet-ink);
+    font-size: 14px;
     cursor: pointer;
-    font-weight: 600;
-    font-size: 13px;
-    text-align: left;
     transition:
         border-color 140ms ease,
-        box-shadow 140ms ease,
-        transform 140ms ease;
+        box-shadow 140ms ease;
 }
-.avatar-card:hover:not(.is-disabled) {
-    transform: translateY(-1px);
-}
-.avatar-card.is-active {
+.avatar-select:focus {
+    outline: none;
     border-color: var(--pet-accent);
     box-shadow: 0 0 0 3px var(--pet-focus-ring);
-}
-.avatar-card.is-disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-}
-.avatar-type {
-    font-size: 11px;
-    color: var(--pet-muted);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-}
-.avatar-label {
-    font-size: 14px;
-}
-.avatar-tag {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--pet-accent-soft);
-    color: var(--pet-accent);
 }
 .import-btn {
     background: var(--pet-accent);
@@ -682,5 +724,42 @@ button:disabled {
 .import-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+.avatar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.import-btn.secondary {
+    background: var(--pet-accent-soft, #e8e0ff);
+    color: var(--pet-accent, #7c3aed);
+}
+.ghost-btn {
+    background: rgba(255, 255, 255, 0.5);
+    color: var(--pet-ink);
+    border: 1.5px solid var(--pet-border);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+        border-color 140ms ease,
+        background 140ms ease;
+}
+.ghost-btn:not(:disabled):hover {
+    border-color: var(--pet-accent);
+    background: rgba(255, 255, 255, 0.7);
+}
+.ghost-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+code {
+    background: rgba(124, 58, 237, 0.12);
+    color: var(--pet-accent);
+    padding: 1px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 </style>

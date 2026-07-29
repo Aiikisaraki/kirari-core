@@ -108,4 +108,16 @@ FunctionEnd
   CreateShortCut "$newDesktopLink" "$appExe" "" "$INSTDIR\shortcut-icon.ico" 0 "" "" "${APP_DESCRIPTION}"
   ClearErrors
   WinShell::SetLnkAUMI "$newDesktopLink" "${APP_ID}"
+
+  # ── 官方皮肤：安装阶段一次性释放到用户数据目录 ──────────────────────
+  # 程序启动后不再替换/更新皮肤；升级时由安装包重新执行本宏处理。
+  nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$INSTDIR\install-avatars.ps1$\"'
+  Pop $R0
+  ${If} $R0 != "0"
+    DetailPrint "官方皮肤安装脚本返回: $R0"
+  ${EndIf}
+  # 注意：此处保留 $INSTDIR\resources\official-avatars 作为 bundled resource。
+  # 它同时作为「主进程首次启动兜底复制」的素材源（ensureDefaultAvatars 在
+  # userData/avatars 为空时从 process.resourcesPath/official-avatars 复制一次）。
+  # 运行时只复制一次、绝不覆盖用户已存在的自定义皮肤。
 !macroend

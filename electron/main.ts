@@ -1,8 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, screen, shell, Tray } from "electron";
 import fs from "fs";
 import path from "path";
+
+// 将自定义协议注册为「标准安全协议」，使渲染进程可以直接用
+// fetch() / new Image() / CSS url() 等方式加载 avatar:// / pet:// 资源，
+// 避免依赖 IPC 兜底，也修复自定义协议在打包后因 file:// origin 被拦截的问题。
+// 必须在 app.ready 之前调用。
+protocol.registerSchemesAsPrivileged([
+  { scheme: "avatar", privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+  { scheme: "pet", privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+]);
+import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
-import { startBackendIfLocal, stopBackend, applyConfigToBackend } from "./backend-launcher";
+import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort } from "./backend-launcher";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
 
@@ -21,16 +31,33 @@ type AvatarConfig = {
   scale?: number;
   id?: string;
   name?: string;
+  author?: string;
+  version?: string;
   builtin?: boolean;
 };
 type AvatarMeta = AvatarConfig & { id: string; name: string; builtin?: boolean };
 
 const DEFAULT_AVATAR: AvatarConfig = {
-  id: "kirari-sprite",
-  name: "Aki Kirari（精灵帧）",
+  id: "custom-" + DEFAULT_SKIN_DIR,
+  name: "Aki Kirari",
+  author: "Aki",
+  version: "1.0.0",
   type: "sprite",
-  src: "pet://frames.json",
+  src: `avatar://${encodeURIComponent(DEFAULT_SKIN_DIR)}/frames.json`,
 };
+
+// 兼容旧版持久化：把旧默认形象（id=kirari-sprite / src=pet://frames.json）
+// 迁移到新的 avatar:// 流程，避免下拉框选不中当前形象。
+function migrateLegacyAvatar(saved: AvatarConfig): AvatarConfig {
+  if (
+    saved.id === "kirari-sprite" ||
+    saved.src === "pet://frames.json" ||
+    (saved.src === DEFAULT_AVATAR.src && saved.id !== DEFAULT_AVATAR.id)
+  ) {
+    return { ...DEFAULT_AVATAR };
+  }
+  return saved;
+}
 
 type DeployConfig = {
   mode: "local" | "remote";
@@ -66,7 +93,9 @@ function loadClientConfig(): DeployConfig {
         },
         builtinToken: raw.builtinToken || DEFAULT_BUILTIN_TOKEN,
         theme: THEME_LIST.includes(raw.theme) ? raw.theme : DEFAULT_THEME,
-        avatar: raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
+        avatar: migrateLegacyAvatar(
+          raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
+        ),
         customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
       };
       }
@@ -87,6 +116,82 @@ function saveClientConfig() {
     );
   } catch (e) {
     console.error("[config] 保存客户端配置失败:", e);
+  }
+}
+
+// 自定义形象统一存放目录（跨平台一致：Windows=AppData/Roaming/<app>/avatars，
+// macOS=Library/Application Support/<app>/avatars，Linux=~/.config/<app>/avatars）。
+// 通过 avatar:// 协议对外服务，也作为"用户把文件夹丢进来即生效"的指定目录。
+function getAvatarsRoot(): string {
+  return path.join(app.getPath("userData"), "avatars");
+}
+
+// 默认（内置）皮肤在 userData/avatars 下的文件夹名。
+const DEFAULT_SKIN_DIR = "kirari";
+
+// 读取皮肤配置（frames.json）的元信息：渲染类型、显示名、作者、版本。
+// 显示名优先取配置里的 `name`，缺省回退为文件夹名（fallbackName）。
+type AvatarMetaInfo = {
+  type: "sprite" | "live2d";
+  name: string;
+  author?: string;
+  version?: string;
+};
+function readAvatarMeta(framesPath: string, fallbackName: string): AvatarMetaInfo {
+  let name = fallbackName;
+  let author: string | undefined;
+  let version: string | undefined;
+  let type: "sprite" | "live2d" = "sprite";
+  try {
+    const parsed = JSON.parse(fs.readFileSync(framesPath, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.name === "string" && parsed.name.trim()) name = parsed.name;
+      if (typeof parsed.author === "string" && parsed.author.trim()) author = parsed.author;
+      if (typeof parsed.version === "string" && parsed.version.trim()) version = parsed.version;
+      if (parsed.type === "live2d") type = "live2d";
+    }
+  } catch {
+    /* 读取/解析失败则用默认值 */
+  }
+  return { type, name, author, version };
+}
+
+// 官方皮肤资源源目录（打包进安装包的 resources/official-avatars，或开发期项目目录）。
+// pet:// 协议与 pet:read-asset 兜底的兜底加载都从这里取文件。
+function getOfficialAvatarsSource(): string {
+  const candidates = [
+    path.join(process.resourcesPath, "official-avatars"),
+    path.resolve(__dirname, "../resources/official-avatars"),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+}
+
+// 默认（官方）皮肤兜底：扫描 userData/avatars，若没有任何含 frames.json 的皮肤目录，
+// 则从「打包进来的官方皮肤源」复制一次。生产环境源为 process.resourcesPath/official-avatars
+// （extraResources 打包进安装包）；开发环境源为项目 resources/official-avatars。
+// 仅当目标缺失时复制一次，绝不覆盖用户已存在的皮肤 —— 满足「只复制一次、不每次替换」。
+function ensureDefaultAvatars(): void {
+  try {
+    const destRoot = getAvatarsRoot();
+    fs.mkdirSync(destRoot, { recursive: true });
+    const hasAnySkin = fs
+      .readdirSync(destRoot, { withFileTypes: true })
+      .some((e) => e.isDirectory() && fs.existsSync(path.join(destRoot, e.name, "frames.json")));
+    if (hasAnySkin) return; // 已有皮肤则不复制，避免覆盖用户自定义
+    const srcRoot = getOfficialAvatarsSource();
+    if (!fs.existsSync(srcRoot)) {
+      console.warn("[avatar] 未找到官方皮肤源，跳过默认皮肤复制:", srcRoot);
+      return;
+    }
+    for (const e of fs.readdirSync(srcRoot, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const srcDir = path.join(srcRoot, e.name);
+      if (!fs.existsSync(path.join(srcDir, "frames.json"))) continue;
+      fs.cpSync(srcDir, path.join(destRoot, e.name), { recursive: true });
+      console.log("[avatar] 已复制默认皮肤到:", path.join(destRoot, e.name));
+    }
+  } catch (e) {
+    console.error("[avatar] 默认皮肤复制失败:", e);
   }
 }
 
@@ -117,9 +222,11 @@ type SettingsApiRequest = {
 const petWindowSize = { width: 360, height: 400 };
 const chatWindowSize = { width: 420, height: 620 };
 const settingsWindowSize = { width: 560, height: 720 };
-const backendUrl = clientConfig.server.wsUrl || "ws://localhost:9089/ws";
-const backendHttpUrl = clientConfig.server.httpUrl || "http://localhost:9089";
-const backendHealthUrl = `${backendHttpUrl.replace(/\/$/, "")}/health`;
+// 后端连接地址。本地模式下，这些值会在 startBackendIfLocal 之后被动态端口刷新
+// （见下方 init 流程），覆盖配置里写死的 9089；远程模式沿用配置中的远端地址。
+let backendUrl = clientConfig.server.wsUrl || "ws://localhost:9089/ws";
+let backendHttpUrl = clientConfig.server.httpUrl || "http://localhost:9089";
+let backendHealthUrl = `${backendHttpUrl.replace(/\/$/, "")}/health`;
 let loggedInUid: number | null = null; // 非本地模式：登录后的 uid（聊天身份）
 let chatServiceUserid: number | null = null; // 已创建的聊天服务所用 uid，便于登录/登出后重建
 
@@ -222,9 +329,225 @@ ipcMain.handle("avatar:get", () => clientConfig.avatar || DEFAULT_AVATAR);
 ipcMain.handle("avatar:custom-get", () => clientConfig.customAvatars || []);
 
 ipcMain.handle("avatar:set", (_event, cfg: AvatarConfig) => {
+  console.log("[main] avatar:set 收到:", cfg?.id, cfg?.name, cfg?.src);
   clientConfig.avatar = cfg;
   saveClientConfig();
   broadcastAvatar();
+});
+
+// 递归确认 dir 内所有解压文件都落在 dir 之内（防止恶意压缩包 zip slip 路径穿越）。
+function allExtractedUnder(dir: string): boolean {
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return false;
+  }
+  const walk = (p: string): boolean => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(p, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const e of entries) {
+      const full = path.join(p, e.name);
+      let r: string;
+      try {
+        r = fs.realpathSync(full);
+      } catch {
+        return false;
+      }
+      if (r !== real && !r.startsWith(real + path.sep)) return false;
+      if (e.isDirectory() && !walk(full)) return false;
+    }
+    return true;
+  };
+  return walk(dir);
+}
+
+// 若解压后 dir 下仅有唯一子目录且该子目录含 frames.json，则把子目录内容上移一层，
+// 去掉压缩包可能多套的一层根目录，使 frames.json 直接落在形象目录下。
+function flattenSingleRoot(dir: string): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory());
+  } catch {
+    return;
+  }
+  if (entries.length !== 1) return;
+  const sub = path.join(dir, entries[0].name);
+  if (!fs.existsSync(path.join(sub, "frames.json"))) return;
+  for (const f of fs.readdirSync(sub)) {
+    fs.renameSync(path.join(sub, f), path.join(dir, f));
+  }
+  fs.rmSync(sub, { recursive: true, force: true });
+}
+
+// 收集 frames.json 中引用但磁盘上缺失的精灵图文件名（兼容 clips 数组与旧扁平格式）。
+function collectMissingSheets(
+  manifest: Record<string, unknown>,
+  dir: string,
+): string[] {
+  const missing: string[] = [];
+  const pushClip = (clip: Record<string, unknown>) => {
+    const sheet = clip.sheet;
+    if (typeof sheet === "string" && !fs.existsSync(path.join(dir, sheet)))
+      missing.push(sheet);
+  };
+  for (const key of Object.keys(manifest)) {
+    const raw = manifest[key] as Record<string, unknown>;
+    if (Array.isArray(raw.clips)) {
+      (raw.clips as unknown[]).forEach((c) =>
+        pushClip(c as Record<string, unknown>),
+      );
+    } else if (typeof raw.sheet === "string") {
+      pushClip(raw);
+    }
+  }
+  return missing;
+}
+
+// 启动扫描：把 userData/avatars 下含 frames.json 的子目录注册为可用形象。
+// 对已有条目会刷新 name/author/version/type/src（方便用户改配置文件后自动同步），
+// 对不再存在的目录会移除对应条目。
+function scanAvatarsIntoConfig(): void {
+  try {
+    const root = getAvatarsRoot();
+    if (!fs.existsSync(root)) {
+      fs.mkdirSync(root, { recursive: true });
+      return;
+    }
+    clientConfig.customAvatars = clientConfig.customAvatars || [];
+    const existingById = new Map(
+      (clientConfig.customAvatars || []).map((a) => [a.id, a]),
+    );
+    const next: AvatarMeta[] = [];
+    let changed = false;
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const framesPath = path.join(root, e.name, "frames.json");
+      if (!fs.existsSync(framesPath)) continue;
+      const id = "custom-" + e.name;
+      const meta = readAvatarMeta(framesPath, e.name);
+      const fresh: AvatarMeta = {
+        id,
+        name: meta.name,
+        author: meta.author,
+        version: meta.version,
+        type: meta.type,
+        src: `avatar://${encodeURIComponent(e.name)}/frames.json`,
+        builtin: false,
+      };
+      const old = existingById.get(id);
+      if (
+        !old ||
+        old.name !== fresh.name ||
+        old.author !== fresh.author ||
+        old.version !== fresh.version ||
+        old.type !== fresh.type ||
+        old.src !== fresh.src
+      ) {
+        changed = true;
+      }
+      next.push(fresh);
+      existingById.delete(id);
+    }
+    // 剩余 existingById 中的条目对应磁盘上已不存在的形象，视为已删除。
+    if (existingById.size > 0) changed = true;
+    if (changed) {
+      clientConfig.customAvatars = next;
+      saveClientConfig();
+    }
+  } catch (e) {
+    console.error("[avatar] 启动扫描失败:", e);
+  }
+}
+
+// 打开形象目录（便于用户找到"指定文件夹"，把自定义形象文件夹丢进去后即可在设置里刷新出现）。
+ipcMain.handle("avatar:open-folder", async () => {
+  const root = getAvatarsRoot();
+  try {
+    fs.mkdirSync(root, { recursive: true });
+  } catch {
+    /* 忽略 */
+  }
+  shell.openPath(root);
+});
+
+// 重新扫描 userData/avatars：把新增的（含 frames.json 的）子目录注册为自定义形象并广播。
+ipcMain.handle("avatar:rescan", () => {
+  scanAvatarsIntoConfig();
+  broadcastAvatar();
+  return clientConfig.customAvatars || [];
+});
+
+// 上传形象压缩包：选择 ZIP → 解压到 userData/avatars/<包名>/ → 校验 frames.json 与精灵图 →
+// 注册 avatar:// 协议并切换到该形象。压缩包内部结构与文件夹一致；
+// 若根目录只有一个文件夹则自动剥掉这层，使 frames.json 直接落在形象目录下。
+ipcMain.handle("avatar:import-zip", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "选择形象压缩包",
+    properties: ["openFile"],
+    filters: [{ name: "形象压缩包", extensions: ["zip"] }],
+  });
+  if (result.canceled || !result.filePaths[0])
+    return { ok: false, message: "已取消" };
+  const zipPath = result.filePaths[0];
+  const baseName = path.basename(zipPath, path.extname(zipPath)) || "avatar";
+  const root = getAvatarsRoot();
+  const destDir = path.join(root, baseName);
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    // 同名形象先清空，避免旧文件残留
+    fs.rmSync(destDir, { recursive: true, force: true });
+    fs.mkdirSync(destDir, { recursive: true });
+    await extract(zipPath, { dir: destDir });
+    // 防 zip slip：校验所有解压文件都落在 destDir 内
+    if (!allExtractedUnder(destDir)) {
+      fs.rmSync(destDir, { recursive: true, force: true });
+      return { ok: false, message: "压缩包包含非法路径，已拒绝" };
+    }
+    // 若解压后仅有一个子目录且内含 frames.json，则上移一层（去掉多余根目录）
+    flattenSingleRoot(destDir);
+    const framesPath = path.join(destDir, "frames.json");
+    if (!fs.existsSync(framesPath)) {
+      fs.rmSync(destDir, { recursive: true, force: true });
+      return { ok: false, message: "压缩包内缺少 frames.json" };
+    }
+    // 校验每个动画片段引用的图片都存在
+    const manifest = JSON.parse(fs.readFileSync(framesPath, "utf8"));
+    const missing = collectMissingSheets(manifest, destDir);
+    if (missing.length) {
+      fs.rmSync(destDir, { recursive: true, force: true });
+      return { ok: false, message: "以下精灵图缺失：" + missing.join(", ") };
+    }
+    const metaInfo = readAvatarMeta(framesPath, baseName);
+    const meta: AvatarMeta = {
+      id: "custom-" + baseName,
+      name: metaInfo.name,
+      author: metaInfo.author,
+      version: metaInfo.version,
+      type: metaInfo.type,
+      src: `avatar://${encodeURIComponent(baseName)}/frames.json`,
+      builtin: false,
+    };
+    clientConfig.customAvatars = clientConfig.customAvatars || [];
+    const idx = clientConfig.customAvatars.findIndex((a) => a.id === meta.id);
+    if (idx >= 0) clientConfig.customAvatars[idx] = meta;
+    else clientConfig.customAvatars.push(meta);
+    clientConfig.avatar = meta;
+    saveClientConfig();
+    broadcastAvatar();
+    return { ok: true, meta };
+  } catch (e) {
+    return {
+      ok: false,
+      message: "解压失败：" + (e instanceof Error ? e.message : ""),
+    };
+  }
 });
 
 // 导入自定义精灵形象：弹出目录选择框，校验 frames.json 后复制到 userData/avatars，
@@ -238,7 +561,7 @@ ipcMain.handle("avatar:import-folder", async () => {
   const srcDir = result.filePaths[0];
   const framesPath = path.join(srcDir, "frames.json");
   if (!fs.existsSync(framesPath)) return { ok: false, message: "该文件夹缺少 frames.json" };
-  let manifest: Record<string, unknown> = {};
+  let manifest: Record<string, unknown> & { type?: unknown } = {};
   try {
     manifest = JSON.parse(fs.readFileSync(framesPath, "utf8"));
   } catch {
@@ -252,10 +575,13 @@ ipcMain.handle("avatar:import-folder", async () => {
   } catch (e) {
     return { ok: false, message: "复制失败：" + (e instanceof Error ? e.message : "") };
   }
+  const metaInfo = readAvatarMeta(framesPath, name);
   const meta: AvatarMeta = {
     id: "custom-" + name,
-    name,
-    type: "sprite",
+    name: metaInfo.name,
+    author: metaInfo.author,
+    version: metaInfo.version,
+    type: metaInfo.type,
     src: `avatar://${encodeURIComponent(name)}/frames.json`,
     builtin: false,
   };
@@ -755,9 +1081,7 @@ app.whenReady().then(async () => {
   protocol.registerFileProtocol("pet", (request, callback) => {
     try {
       const rel = decodeURIComponent(request.url.replace("pet://", ""));
-      const assetDir = process.env.VITE_DEV_SERVER_URL
-        ? path.resolve(__dirname, "../public/pet")
-        : path.resolve(__dirname, "../dist/pet");
+      const assetDir = getOfficialAvatarsSource();
       callback({ filePath: path.join(assetDir, rel) });
     } catch {
       callback({ error: -100 });
@@ -779,10 +1103,12 @@ app.whenReady().then(async () => {
   // 可通过此通道由主进程直接读取 asar 内文件并返回内容。
   ipcMain.handle("pet:read-asset", async (_event, relativePath: string) => {
     try {
-      const assetDir = process.env.VITE_DEV_SERVER_URL
-        ? path.resolve(__dirname, "../public/pet")
-        : path.resolve(__dirname, "../dist/pet");
-      const fullPath = path.join(assetDir, relativePath);
+      const assetDir = getOfficialAvatarsSource();
+      const avatarsDir = getAvatarsRoot();
+      // 优先取官方皮肤资源目录，否则回退到用户自定义形象目录（userData/avatars）
+      const fullPath = fs.existsSync(path.join(assetDir, relativePath))
+        ? path.join(assetDir, relativePath)
+        : path.join(avatarsDir, relativePath);
       const buf = fs.readFileSync(fullPath);
       // 根据扩展名判断返回格式：JSON 返回解析后对象，图片返回 base64 data URL
       const ext = path.extname(relativePath).toLowerCase();
@@ -800,8 +1126,39 @@ app.whenReady().then(async () => {
     await startBackendIfLocal({ isLocal: true });
   }
 
+  // 本地模式（打包版）：主进程已为本次启动动态挑选空闲端口并作为启动参数注入后端子进程，
+  // 这里同步刷新主进程/前端的连接地址，覆盖配置里写死的 9089。
+  // 远程模式不注入动态端口，沿用配置中的远端地址；dev 模式也不覆盖（使用外部独立后端）。
+  if (clientConfig.mode === "local" && app.isPackaged) {
+    const p = getBackendPort();
+    backendUrl = `ws://127.0.0.1:${p}/ws`;
+    backendHttpUrl = `http://127.0.0.1:${p}`;
+    backendHealthUrl = `http://127.0.0.1:${p}/health`;
+    console.log(`[backend] 本地模式使用动态端口 ${p} 连接后端`);
+  }
+
   // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时同步到后端并广播前端。
   startModelConfigWatch();
+
+  // 官方皮肤兜底：生产/开发通用。若 userData/avatars 为空（如 NSIS 安装脚本释放失败、
+  // 或卸载重装后目录被清空），首次启动从打包进来的官方皮肤源复制一次；已有皮肤则跳过，
+  // 绝不覆盖用户自定义。随后扫描注册所有形象。
+  ensureDefaultAvatars();
+  scanAvatarsIntoConfig();
+
+  // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id，或当前形象
+  // 已不在扫描后的形象列表中，则回退到默认形象，避免下拉框选不中。
+  const registeredIds = new Set((clientConfig.customAvatars || []).map((a) => a.id));
+  const current = clientConfig.avatar || DEFAULT_AVATAR;
+  if (
+    current.id === "kirari-sprite" ||
+    current.src === "pet://frames.json" ||
+    (current.src?.startsWith("avatar://kirari/") && current.id !== "custom-kirari") ||
+    !registeredIds.has(current.id)
+  ) {
+    clientConfig.avatar = { ...DEFAULT_AVATAR };
+    saveClientConfig();
+  }
 
   let res = await checkBackendHealth();
   await ensureChatSessionService().init(path.join(app.getPath("userData"), "chat-session.json"));

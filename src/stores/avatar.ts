@@ -1,31 +1,16 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { AvatarConfig, AvatarMeta, AvatarState } from "../pet/avatar/types";
+import type { AvatarConfig, AvatarMeta, AvatarState, AvatarType } from "../pet/avatar/types";
 
-// 内置形象：精灵帧（已就绪）+ Live2D（占位，待后期接入）。
-// 这是前端写死的基线；用户通过"导入"添加的自定义形象存在主进程 config 里。
-const BUILTIN_AVATARS: AvatarMeta[] = [
-  {
-    id: "kirari-sprite",
-    name: "Aki Kirari（精灵帧）",
-    type: "sprite",
-    src: "pet://frames.json",
-    builtin: true,
-  },
-  {
-    id: "live2d-coming",
-    name: "Live2D（即将推出）",
-    type: "live2d",
-    src: "",
-    builtin: true,
-  },
-];
-
+// 形象列表不再由前端写死：默认皮肤在运行时由主进程安装到 userData/avatars/kirari
+// 并经扫描注册，与用户自定义形象走完全相同的流程。前端仅保留一个兜底默认值
+// （当主进程未返回任何形象时使用），且同样指向 avatar:// 协议地址。
+// 形象渲染类型（sprite / live2d）以皮肤配置文件 frames.json 的 `type` 字段为准。
 const DEFAULT_AVATAR: AvatarConfig = {
-  id: "kirari-sprite",
+  id: "custom-kirari",
   name: "Aki Kirari（精灵帧）",
   type: "sprite",
-  src: "pet://frames.json",
+  src: "avatar://kirari/frames.json",
 };
 
 type ElectronApi = {
@@ -33,6 +18,9 @@ type ElectronApi = {
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
     on: (channel: string, listener: (...args: unknown[]) => void) => void;
   };
+  importAvatarZip?: () => Promise<unknown>;
+  rescanAvatars?: () => Promise<unknown>;
+  openAvatarsFolder?: () => Promise<void>;
 };
 
 function getWindow() {
@@ -55,7 +43,16 @@ function normalizeConfig(v: unknown): AvatarConfig {
     (v as Record<string, unknown>).type &&
     typeof (v as Record<string, unknown>).src === "string"
   ) {
-    return v as AvatarConfig;
+    const raw = v as Record<string, unknown>;
+    return {
+      id: typeof raw.id === "string" ? raw.id : DEFAULT_AVATAR.id,
+      name: typeof raw.name === "string" ? raw.name : DEFAULT_AVATAR.name,
+      author: typeof raw.author === "string" ? raw.author : undefined,
+      version: typeof raw.version === "string" ? raw.version : undefined,
+      type: raw.type as AvatarType,
+      src: raw.src as string,
+      scale: typeof raw.scale === "number" ? raw.scale : undefined,
+    };
   }
   return { ...DEFAULT_AVATAR };
 }
@@ -72,7 +69,7 @@ export const useAvatarStore = defineStore("avatar", () => {
   // 由 PetAvatar 加载 frames.json 后回填，供调度器精确衔接"播完回 idle"。
   const durations = ref<Partial<Record<AvatarState, number>>>({});
 
-  const list = computed<AvatarMeta[]>(() => [...BUILTIN_AVATARS, ...customAvatars.value]);
+  const list = computed<AvatarMeta[]>(() => [...customAvatars.value]);
 
   function isActive(meta: AvatarMeta): boolean {
     return current.value.type === meta.type && current.value.src === meta.src;
@@ -86,46 +83,69 @@ export const useAvatarStore = defineStore("avatar", () => {
   async function init() {
     const w = getWindow();
 
-    // 1) 异步读取主进程持久化的当前形象
-    try {
-      if (w.windowApi?.getAvatar) {
-        const saved = await w.windowApi.getAvatar();
-        if (saved) apply(normalizeConfig(saved));
-      }
-    } catch {
-      /* 读取失败则用默认 */
-    }
-
-    // 2) 读取用户导入的自定义形象列表
+    // 1) 先读形象列表（确保后续校验时列表已就绪）
     try {
       if (w.windowApi?.getCustomAvatars) {
         const custom = await w.windowApi.getCustomAvatars();
         if (Array.isArray(custom)) customAvatars.value = custom as AvatarMeta[];
       }
-    } catch {
-      /* 忽略 */
+    } catch (e) {
+      console.warn("[avatar] 读取形象列表失败:", e);
     }
 
-    // 3) 跨窗口同步：监听主进程广播的形象变更（含 current + custom 列表）
+    // 2) 再读持久化的当前形象
     try {
-      if (w.windowApi?.onAvatarChanged) {
-        w.windowApi.onAvatarChanged((payload: unknown) => {
-          const p = payload as { current?: AvatarConfig; custom?: AvatarMeta[] };
-          if (p?.current) apply(normalizeConfig(p.current));
-          if (Array.isArray(p?.custom)) customAvatars.value = p.custom;
-        });
-      } else if (w.require) {
-        w.require("electron").ipcRenderer.on(
-          "avatar:changed",
-          (_e: unknown, payload: unknown) => {
-            const p = payload as { current?: AvatarConfig; custom?: AvatarMeta[] };
-            if (p?.current) apply(normalizeConfig(p.current));
-            if (Array.isArray(p?.custom)) customAvatars.value = p.custom;
-          },
-        );
+      if (w.windowApi?.getAvatar) {
+        const saved = await w.windowApi.getAvatar();
+        if (saved) {
+          const cfg = normalizeConfig(saved);
+          console.log("[avatar] init 读取当前形象:", cfg.id, cfg.name);
+          apply(cfg);
+        }
       }
-    } catch {
-      /* 控件不可用则忽略 */
+    } catch (e) {
+      console.warn("[avatar] 读取当前形象失败:", e);
+    }
+
+    // 3) 校验当前形象是否仍在列表中：若持久化的 id 已失效（旧数据/皮肤被删），
+    // 回退到默认形象（custom-kirari）或列表第一个，避免设置页下拉框显示空白。
+    const validIds = new Set(customAvatars.value.map((a) => a.id));
+    if (customAvatars.value.length > 0 && !validIds.has(current.value.id)) {
+      const fallback =
+        customAvatars.value.find((a) => a.id === DEFAULT_AVATAR.id) ||
+        customAvatars.value[0] ||
+        { ...DEFAULT_AVATAR };
+      console.warn(
+        "[avatar] 当前形象 id",
+        current.value.id,
+        "不在列表中，回退到:",
+        fallback.id,
+      );
+      apply(fallback);
+      try {
+        await setAvatar(fallback);
+      } catch {
+        /* 持久化失败仅影响本次，本窗口已应用 */
+      }
+    }
+
+    // 4) 跨窗口同步：监听主进程广播的形象变更（含 current + custom 列表）
+    try {
+      const handler = (payload: unknown) => {
+        const p = payload as { current?: AvatarConfig; custom?: AvatarMeta[] };
+        if (p?.current) {
+          console.log("[avatar] 收到广播 current:", (p.current as AvatarConfig).id);
+          apply(normalizeConfig(p.current));
+        }
+        if (Array.isArray(p?.custom)) customAvatars.value = p.custom;
+      };
+      if (w.windowApi?.onAvatarChanged) {
+        w.windowApi.onAvatarChanged(handler);
+      } else if (w.require) {
+        w.require("electron").ipcRenderer.on("avatar:changed", handler);
+      }
+    } catch (e) {
+      console.warn("[avatar] 订阅形象变更广播失败:", e);
     }
 
     ready.value = true;
@@ -134,11 +154,24 @@ export const useAvatarStore = defineStore("avatar", () => {
   async function setAvatar(cfg: AvatarConfig) {
     apply(cfg);
     const w = getWindow();
+    // 净化：去掉 Vue Proxy 包装与不可序列化字段，确保能通过 Electron 结构化克隆。
+    const plain: AvatarConfig = JSON.parse(JSON.stringify(cfg));
+    console.log("[avatar] setAvatar 调用:", plain.id, plain.name);
     try {
-      if (w.windowApi?.setAvatar) await w.windowApi.setAvatar(cfg);
-      else if (w.require) await w.require("electron").ipcRenderer.invoke("avatar:set", cfg);
-    } catch {
-      /* 持久化失败则忽略（本窗口已应用） */
+      if (w.windowApi?.setAvatar) {
+        await w.windowApi.setAvatar(plain);
+        console.log("[avatar] setAvatar 持久化成功:", plain.id);
+        return;
+      }
+      if (w.require) {
+        await w.require("electron").ipcRenderer.invoke("avatar:set", plain);
+        console.log("[avatar] setAvatar 持久化成功:", plain.id);
+        return;
+      }
+      throw new Error("windowApi.setAvatar 不可用");
+    } catch (e) {
+      console.error("[avatar] setAvatar 持久化失败:", e);
+      throw e;
     }
   }
 
@@ -161,7 +194,10 @@ export const useAvatarStore = defineStore("avatar", () => {
       else if (w.require) r = await w.require("electron").ipcRenderer.invoke("avatar:import-folder");
       const res = r as { ok: boolean; meta?: AvatarMeta; message?: string };
       if (res?.ok && res.meta) {
-        customAvatars.value = [...customAvatars.value, res.meta];
+        customAvatars.value = [
+          ...customAvatars.value.filter((a) => a.id !== res.meta!.id),
+          res.meta,
+        ];
         await setAvatar(res.meta);
         return { ok: true };
       }
@@ -171,5 +207,49 @@ export const useAvatarStore = defineStore("avatar", () => {
     }
   }
 
-  return { current, currentState, ready, customAvatars, durations, list, isActive, init, setAvatar, setState, setDurations, importAvatarFolder };
+  // 上传形象压缩包：选择 ZIP → 主进程解压到 userData/avatars/<包名>/ → 校验 → 注册并切换。
+  async function importAvatarZip(): Promise<{ ok: boolean; message?: string }> {
+    const w = getWindow();
+    try {
+      let r: unknown = null;
+      if (w.windowApi?.importAvatarZip) r = await w.windowApi.importAvatarZip();
+      else if (w.require) r = await w.require("electron").ipcRenderer.invoke("avatar:import-zip");
+      const res = r as { ok: boolean; meta?: AvatarMeta; message?: string };
+      if (res?.ok && res.meta) {
+        customAvatars.value = [
+          ...customAvatars.value.filter((a) => a.id !== res.meta!.id),
+          res.meta,
+        ];
+        await setAvatar(res.meta);
+        return { ok: true };
+      }
+      return { ok: false, message: res?.message || "上传失败" };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : "上传失败" };
+    }
+  }
+
+  // 重新扫描 userData/avatars 目录：把用户直接丢进去的形象文件夹注册为可用形象。
+  async function rescanAvatars(): Promise<void> {
+    const w = getWindow();
+    try {
+      if (w.windowApi?.rescanAvatars) await w.windowApi.rescanAvatars();
+      else if (w.require) await w.require("electron").ipcRenderer.invoke("avatar:rescan");
+    } catch {
+      /* 控件不可用则忽略 */
+    }
+  }
+
+  // 打开形象目录，方便用户把自定义形象文件夹放进去。
+  async function openAvatarsFolder(): Promise<void> {
+    const w = getWindow();
+    try {
+      if (w.windowApi?.openAvatarsFolder) await w.windowApi.openAvatarsFolder();
+      else if (w.require) await w.require("electron").ipcRenderer.invoke("avatar:open-folder");
+    } catch {
+      /* 控件不可用则忽略 */
+    }
+  }
+
+  return { current, currentState, ready, customAvatars, durations, list, isActive, init, setAvatar, setState, setDurations, importAvatarFolder, importAvatarZip, rescanAvatars, openAvatarsFolder };
 });

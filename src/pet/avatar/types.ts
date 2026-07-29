@@ -7,17 +7,37 @@ export type AvatarState = "idle" | "blink" | "speak" | "wave" | "happy" | "sleep
 
 export type AvatarType = "sprite" | "live2d";
 
-// 单个动作的精灵帧定义（对应 frames.json 中某一 state 的条目）
-export interface SpriteStateDef {
+// 单个动画片段（变体）定义：对应某一 state 下的一段精灵帧。
+// 例如 happy 类型下可以有 happy1、happy2 两段，各自独立成一张 sheet。
+export interface SpriteClipDef {
   sheet: string; // sheet 文件名，相对 frames.json 所在目录
   frameW: number;
   frameH: number;
   frames: number;
   fps: number;
-  loop: boolean;
 }
 
-export type SpriteManifest = Record<string, SpriteStateDef>;
+// 单个动画类型（语义状态，如 idle/wave/happy）对应的定义：
+// 可包含 1..N 个动画片段（变体）。loop 表示基础态（idle/speak/sleepy）是否循环播放。
+export interface SpriteStateDef {
+  loop: boolean;
+  clips: SpriteClipDef[];
+}
+
+// 旧格式兼容：单个动画直接写成扁平结构 {sheet,frameW,frameH,frames,fps,loop}，
+// 加载时会自动包成 clips:[...]（见 SpriteRenderer.normalizeState）。新格式为 {loop, clips:[...]}。
+export type RawSpriteState = SpriteStateDef | (SpriteClipDef & { loop: boolean });
+
+// 皮肤配置文件（frames.json）结构：
+// 顶层可选 `type` 声明该皮肤用什么渲染器（sprite / live2d），缺省回退为 sprite（向后兼容）。
+// 顶层可选 `name`（显示名，缺省回退文件夹名）、`author`（作者）、`version`（版本号）。
+// 其余顶层键为动画状态（idle/blink/...），值为状态定义。
+export type SpriteManifest = Record<string, RawSpriteState> & {
+  type?: AvatarType;
+  name?: string;
+  author?: string;
+  version?: string;
+};
 
 export interface AvatarConfig {
   type: AvatarType;
@@ -28,6 +48,8 @@ export interface AvatarConfig {
   // 仅用于列表展示 / 持久化（以下字段不参与渲染）
   id?: string;
   name?: string;
+  author?: string;
+  version?: string;
   builtin?: boolean;
 }
 

@@ -52,6 +52,9 @@ contextBridge.exposeInMainWorld("windowApi", {
   getCustomAvatars: (): Promise<unknown> => ipcRenderer.invoke("avatar:custom-get"),
   setAvatar: (cfg: Record<string, unknown>): Promise<void> => ipcRenderer.invoke("avatar:set", cfg),
   importAvatarFolder: (): Promise<unknown> => ipcRenderer.invoke("avatar:import-folder"),
+  importAvatarZip: (): Promise<unknown> => ipcRenderer.invoke("avatar:import-zip"),
+  rescanAvatars: (): Promise<unknown> => ipcRenderer.invoke("avatar:rescan"),
+  openAvatarsFolder: (): Promise<void> => ipcRenderer.invoke("avatar:open-folder"),
   onAvatarChanged: (cb: (payload: unknown) => void): void => {
     ipcRenderer.on("avatar:changed", (_event, payload: unknown) => cb(payload));
   },

@@ -46,3 +46,6 @@ build-resources/pet-api-bundle/
 
 # 本地调试脚本（开发期诊断用，不提交）
 scripts/_diag*.cjs
+
+# WorkBuddy 工作目录（记忆 / 自动化等本地文件，不提交）
+.workbuddy/

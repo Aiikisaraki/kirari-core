@@ -1,4 +1,8 @@
 {
+  "type": "sprite",
+  "name": "Aki Kirari",
+  "author": "Aki",
+  "version": "1.0.0",
   "idle": {
     "sheet": "idle.png",
     "frameW": 360,

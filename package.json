@@ -1,7 +1,7 @@
 {
     "name": "akisaki-kirari",
     "private": true,
-    "version": "0.1.10",
+    "version": "0.1.11-fix",
     "main": "dist-electron/main.js",
     "scripts": {
         "dev": "chcp 65001 && vite",
@@ -19,6 +19,7 @@
         "@vue/devtools-shared": "^8.2.1",
         "birpc": "^2.6.1",
         "dompurify": "^3.4.12",
+        "extract-zip": "^2.0.1",
         "hookable": "^5.5.3",
         "marked": "^18.0.7",
         "nostics": "^1.1.4",
@@ -31,10 +32,10 @@
         "@vitejs/plugin-vue": "^6.0.6",
         "@vue/tsconfig": "^0.9.1",
         "electron": "^42.7.0",
+        "electron-builder": "^26.0.12",
         "typescript": "~6.0.2",
         "vite": "^8.0.12",
         "vite-plugin-electron": "^1.0.4",
-        "vue-tsc": "^3.2.8",
-        "electron-builder": "^26.0.12"
+        "vue-tsc": "^3.2.8"
     }
 }

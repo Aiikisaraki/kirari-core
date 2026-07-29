@@ -30,12 +30,22 @@ files:
 extraFiles:
   - from: build-resources/icons/shortcut-icon.ico
     to: shortcut-icon.ico
+  # 官方皮肤安装脚本：由 NSIS 在安装阶段调用，一次性释放到用户数据目录。
+  - from: build-resources/install-avatars.ps1
+    to: install-avatars.ps1
 
 # 额外资源：
 #   - 后端 API（不含 node_modules）：从 build-resources/pet-api-bundle（prepack 生成）打包。
 #     node_modules 由 afterPack 钩子强制复制（electron-builder 默认排除 node_modules，与 gitignore 无关）。
 #   - Node 运行时：从 build-resources/backend-runtime 打包进 resources/pet-api/runtime。
+#   - 官方皮肤：把项目 resources/official-avatars 下所有皮肤子目录打包进安装包的
+#     resources/official-avatars，安装阶段由 NSIS 脚本一次性释放到 userData/avatars。
+#     应用启动后不再替换皮肤（仅开发模式下首次启动且目录为空时兜底复制）。
 extraResources:
+  - from: resources/official-avatars
+    to: official-avatars
+    filter:
+      - "**/*"
   - from: build-resources/pet-api-bundle
     to: pet-api
     filter:
@@ -64,6 +74,8 @@ nsis:
   # 安装包 / 卸载程序图标（与 exe 图标一致，均为软件图标 app-icon.ico）
   installerIcon: build-resources/icons/app-icon.ico
   uninstallerIcon: build-resources/icons/app-icon.ico
+  # 安装向导欢迎页 / 完成页左侧侧边栏图片（164×314 BMP）
+  installerSidebar: build-resources/icons/installer-sidebar.bmp
   installerLanguages:
     - zh_CN
     - en

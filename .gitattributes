@@ -1,0 +1,8 @@
+# ── Git LFS ──────────────────────────────────────────────────────────────
+# 官方皮肤目录（resources/official-avatars）下的二进制精灵图/预览图走 LFS，
+# 避免仓库体积膨胀；文本配置（frames.json / 说明文档）保持普通跟踪。
+# 注意：electron-builder 打包按磁盘 glob，不读 .gitignore，LFS 拉取后文件
+# 仍会正常进入安装包，不影响打包。
+resources/official-avatars/**/*.png  filter=lfs diff=lfs merge=lfs -text
+resources/official-avatars/**/*.webp filter=lfs diff=lfs merge=lfs -text
+resources/official-avatars/**/*.gif  filter=lfs diff=lfs merge=lfs -text

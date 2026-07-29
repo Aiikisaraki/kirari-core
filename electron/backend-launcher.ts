@@ -5,10 +5,17 @@
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { app } from "electron";
 import fs from "fs";
+import net from "net";
 import path from "path";
 
-// 固定端口，需与前端 local 模式（pet-client.config / DEFAULT_LOCAL）及后端严格监听端口一致。
-export const BACKEND_PORT = 9089;
+// 本地模式默认端口（仅当无法动态分配空闲端口时的兜底）。
+const DEFAULT_BACKEND_PORT = 9089;
+// 运行时实际端口：本地模式由 startBackendIfLocal 每次启动动态挑选空闲端口后写入。
+let activeLocalPort = DEFAULT_BACKEND_PORT;
+// 供主进程（main.ts）获取本次实际端口，用于拼接前端连接地址。
+export function getBackendPort(): number {
+  return activeLocalPort;
+}
 
 // 与后端 routes.js / backendEnv 保持一致的本地内置账户令牌。
 // 安装向导写入的 config.json 正是用它注入到 /api/profile。
@@ -49,7 +56,11 @@ function backendEnv(): NodeJS.ProcessEnv {
   const dataDir = path.join(app.getPath("userData"), "pet-api-data");
   return {
     ...process.env,
-    PORT: String(BACKEND_PORT),
+    // 本地模式监听地址：回环 127.0.0.1。仅本机通信，避免 Windows 上绑 0.0.0.0 的 EACCES，
+    // 也不把本地 API 暴露到局域网。分离式部署请直接运行后端（不要走本启动器），由运维自定 HOST。
+    HOST: "127.0.0.1",
+    // 本次启动动态挑选的空闲端口（见 startBackendIfLocal）。
+    PORT: String(getBackendPort()),
     STORAGE_TYPE: process.env.STORAGE_TYPE || "db",
     MODEL_API_ENDPOINT: process.env.MODEL_API_ENDPOINT || "https://api.chatanywhere.tech/v1",
     BUILTIN_ACCOUNT_TOKEN: process.env.BUILTIN_ACCOUNT_TOKEN || "kirari-local-builtin",
@@ -59,9 +70,23 @@ function backendEnv(): NodeJS.ProcessEnv {
   };
 }
 
+// 让 OS 分配一个当前空闲的端口：绑定 127.0.0.1:0，读取内核分配的端口后立即关闭。
+// 后端随后以严格模式绑定同一端口，TOCTOU 窗口极小，本地场景足够稳健。
+function pickFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address() as net.AddressInfo;
+      const port = addr.port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 // 轮询后端 /health，直到就绪或超时。不阻塞主流程太久。
 async function waitForHealth(timeoutMs = 15000): Promise<{ ok: boolean; reason?: string }> {
-  const url = `http://localhost:${BACKEND_PORT}/health`;
+  const url = `http://127.0.0.1:${getBackendPort()}/health`;
   const start = Date.now();
   let lastError: string | undefined;
   while (Date.now() - start < timeoutMs) {
@@ -119,7 +144,7 @@ export async function applyConfigToBackend(): Promise<void> {
     if (endpoint) patch.api_endpoint = endpoint;
     if (searchKey) patch.search_key = searchKey;
 
-    const res = await fetch(`http://localhost:${BACKEND_PORT}/api/profile`, {
+    const res = await fetch(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
       method: "PUT",
       headers,
       body: JSON.stringify(patch),
@@ -147,6 +172,15 @@ export async function startBackendIfLocal(opts: { isLocal: boolean }): Promise<v
   if (!opts.isLocal) return; // 远程模式：连远程服务器，不启动本地后端
   if (isDev()) return; // dev：沿用独立运行的后端
 
+  // 本地模式：每次启动动态挑选一个空闲端口，作为启动参数注入后端子进程，
+  // 主进程也用同一端口连接。避免写死 9089 被占用 / 系统保留导致 EACCES。
+  try {
+    activeLocalPort = await pickFreePort();
+  } catch {
+    console.warn("[backend] 动态选端口失败，回退到默认端口 9089");
+    activeLocalPort = DEFAULT_BACKEND_PORT;
+  }
+
   const backendDir = resolveBackendDir();
   const entryFile = path.join(backendDir, "server.js");
 
@@ -172,9 +206,9 @@ export async function startBackendIfLocal(opts: { isLocal: boolean }): Promise<v
     return;
   }
 
-  console.log(`[backend] 后端将监听端口 ${BACKEND_PORT} | HTTP http://localhost:${BACKEND_PORT} | WS ws://localhost:${BACKEND_PORT}/ws`);
+  console.log(`[backend] 后端将监听端口 ${getBackendPort()} | HTTP http://127.0.0.1:${getBackendPort()} | WS ws://127.0.0.1:${getBackendPort()}/ws`);
   console.log(`[backend] 准备启动: ${nodeBin} server.js (cwd=${backendDir})`);
-  console.log(`[backend] 注入环境变量: PORT=${BACKEND_PORT} MODEL_API_ENDPOINT=${backendEnv().MODEL_API_ENDPOINT}`);
+  console.log(`[backend] 注入环境变量: HOST=127.0.0.1 PORT=${getBackendPort()} MODEL_API_ENDPOINT=${backendEnv().MODEL_API_ENDPOINT}`);
 
   // 用 pipe 捕获输出以便排查问题（之前 ignore 导致启动失败完全无日志）
   child = spawn(nodeBin, ["server.js"], {

@@ -2,6 +2,7 @@ import type {
     AvatarConfig,
     AvatarRenderer,
     AvatarState,
+    SpriteClipDef,
     SpriteManifest,
     SpriteStateDef,
 } from "./types";
@@ -13,6 +14,43 @@ const BASE_STATE: AvatarState = "idle";
 // 命中测试阈值：alpha 低于该值的像素视为"透明"，应透传点击给下方窗口。
 // 取值偏小以保留抗锯齿边缘的点击；可按需调大让羽化边缘也点穿。
 const ALPHA_THRESHOLD = 32;
+
+// 把原始 state 定义归一化为 {loop, clips[]}。兼容两种写法：
+//  - 新格式：显式 {loop, clips:[{sheet,frameW,frameH,frames,fps}, ...]}
+//  - 旧扁平格式：{sheet,frameW,frameH,frames,fps,loop}（自动包成单 clip）
+// 任一变体缺 sheet/尺寸非法则返回 null，加载时跳过该状态。
+function normalizeState(raw: unknown): SpriteStateDef | null {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    // 新格式：显式 clips 数组
+    if (Array.isArray(r.clips)) {
+        const clips = (r.clips as unknown[]).map((c) => {
+            const cc = c as Record<string, unknown>;
+            return {
+                sheet: String(cc.sheet ?? ""),
+                frameW: Number(cc.frameW ?? 0),
+                frameH: Number(cc.frameH ?? 0),
+                frames: Number(cc.frames ?? 0),
+                fps: Number(cc.fps ?? 0),
+            } as SpriteClipDef;
+        });
+        if (clips.length === 0) return null;
+        return { loop: r.loop === true, clips };
+    }
+    // 旧扁平格式
+    if (typeof r.sheet === "string") {
+        const clip: SpriteClipDef = {
+            sheet: r.sheet,
+            frameW: Number(r.frameW ?? 0),
+            frameH: Number(r.frameH ?? 0),
+            frames: Number(r.frames ?? 0),
+            fps: Number(r.fps ?? 0),
+        };
+        if (!clip.sheet) return null;
+        return { loop: r.loop === true, clips: [clip] };
+    }
+    return null;
+}
 
 // 当前活跃的精灵渲染器实例（供 PetStage 的命中测试调用，避免跨组件传递实例）。
 let activeInstance: SpriteRenderer | null = null;
@@ -28,9 +66,13 @@ export function getActiveSpriteRenderer(): SpriteRenderer | null {
 export class SpriteRenderer implements AvatarRenderer {
     private canvas: HTMLCanvasElement | null = null;
     private ctx: CanvasRenderingContext2D | null = null;
-    private manifest: SpriteManifest | null = null;
-    private sheets: Partial<Record<AvatarState, HTMLImageElement>> = {};
+    // 归一化后的清单：每个语义状态对应 {loop, clips[]}（旧格式已包成单 clip）。
+    private manifest: Record<string, SpriteStateDef> | null = null;
+    // 每个状态对应一组图片，索引与 clips 对齐（支持一个状态多个变体）。
+    private sheets: Record<string, (HTMLImageElement | null)[]> = {};
     private state: AvatarState = BASE_STATE;
+    private baseStateName: AvatarState = BASE_STATE; // 实际基础态：idle 优先，缺失则取首个可用状态
+    private clipIndex = 0; // 当前状态随机选中的变体下标
     private frame = 0;
     private acc = 0;
     private last = 0;
@@ -39,13 +81,6 @@ export class SpriteRenderer implements AvatarRenderer {
     private scale = 1;
     private baseDir = "";
     private configSrc = "";
-
-    // 命中测试用的离屏掩膜画布与素材。
-    // 关键：掩膜图源必须是"不污染画布"的图（自定义协议 pet:// / avatar:// 直接画进画布会跨域污染，
-    // 导致 getImageData 抛 SecurityError），因此掩膜固定走 IPC 拿 data: URL（同源、可读像素）。
-    private maskCanvas: HTMLCanvasElement | null = null;
-    private maskCtx: CanvasRenderingContext2D | null = null;
-    private maskSheets: Partial<Record<AvatarState, HTMLImageElement>> = {};
 
     async load(config: AvatarConfig): Promise<void> {
         // ---- 加载 frames.json：先尝试 fetch（自定义协议），失败则走 IPC 兜底 ----
@@ -66,40 +101,44 @@ export class SpriteRenderer implements AvatarRenderer {
             json = (await res.json()) as SpriteManifest;
         }
 
-        this.manifest = json;
         this.configSrc = config.src;
         // sheet 相对 frames.json 所在目录解析
         const idx = config.src.lastIndexOf("/");
         this.baseDir = idx >= 0 ? config.src.slice(0, idx + 1) : "";
 
-        const states = Object.keys(json) as AvatarState[];
-        await Promise.all(
-            states.map(
-                (s) =>
-                    new Promise<void>((resolve) => {
-                        const sheetPath = this.baseDir + json[s].sheet;
-                        this.loadImageWithFallback(sheetPath, s).then((img) => {
-                            if (img) this.sheets[s] = img;
-                            resolve();
-                        });
-                    }),
-            ),
-        );
+        // 归一化每个状态（兼容旧扁平格式），仅保留合法状态。
+        // 跳过顶层保留字段 `type`（渲染类型声明，非动画状态）。
+        this.manifest = {};
+        for (const key of Object.keys(json)) {
+            if (key === "type") continue;
+            const norm = normalizeState(json[key]);
+            if (norm && norm.clips.length > 0) this.manifest[key] = norm;
+        }
+        if (Object.keys(this.manifest).length === 0) {
+            throw new Error(`frames.json 为空或格式无效: ${config.src}`);
+        }
+        // 实际基础态：优先 idle，否则取首个可用状态（保证播完能回到某个站姿）。
+        this.baseStateName = this.manifest[BASE_STATE]
+            ? BASE_STATE
+            : (Object.keys(this.manifest)[0] as AvatarState);
 
-        // 并行加载"掩膜专用"不污染图源（data: URL），供命中测试逐像素读取 alpha。
-        this.maskSheets = {};
-        await Promise.all(
-            states.map(
-                (s) =>
-                    new Promise<void>((resolve) => {
-                        const sheetPath = this.baseDir + json[s].sheet;
-                        this.loadMaskSheet(sheetPath, s).then((img) => {
-                            if (img) this.maskSheets[s] = img;
-                            resolve();
-                        });
+        // 逐状态、逐变体加载精灵图（每个变体一张 sheet）。
+        this.sheets = {};
+        for (const key of Object.keys(this.manifest)) {
+            const def = this.manifest[key];
+            const arr: (HTMLImageElement | null)[] = [];
+            await Promise.all(
+                def.clips.map((clip, i) =>
+                    this.loadImageWithFallback(
+                        this.baseDir + clip.sheet,
+                        key,
+                    ).then((img) => {
+                        arr[i] = img;
                     }),
-            ),
-        );
+                ),
+            );
+            this.sheets[key] = arr;
+        }
 
         if (typeof config.scale === "number" && config.scale > 0)
             this.scale = config.scale;
@@ -142,7 +181,7 @@ export class SpriteRenderer implements AvatarRenderer {
     /** 双通道加载图片：Image() 优先（支持自定义协议），失败则 IPC data URL 兜底 */
     private async loadImageWithFallback(
         src: string,
-        state: AvatarState,
+        stateLabel: string,
     ): Promise<HTMLImageElement | null> {
         return new Promise((resolve) => {
             const img = new Image();
@@ -150,7 +189,7 @@ export class SpriteRenderer implements AvatarRenderer {
             img.onerror = async () => {
                 // Image() 加载失败：尝试 IPC data URL 兜底
                 console.log(
-                    `[sprite] Image() 加载失败 (${state})，尝试 IPC 兜底:`,
+                    `[sprite] Image() 加载失败 (${stateLabel})，尝试 IPC 兜底:`,
                     src,
                 );
                 const ipc = this.getIpc();
@@ -191,51 +230,6 @@ export class SpriteRenderer implements AvatarRenderer {
         });
     }
 
-    /** 加载"掩膜专用"不污染图源：自定义协议(pet:// / avatar://)直接画进画布会跨域污染，
-     *  getImageData 会抛 SecurityError，因此掩膜固定走 IPC 拿 data: URL（同源、可读像素）。
-     *  非自定义协议(http/file)则复用已加载的展示图（同源、天然可读）。 */
-    private async loadMaskSheet(
-        sheetPath: string,
-        state: AvatarState,
-    ): Promise<HTMLImageElement | null> {
-        const isCustom =
-            this.configSrc.startsWith("pet://") ||
-            this.configSrc.startsWith("avatar://");
-        if (!isCustom) {
-            return this.sheets[state] ?? null;
-        }
-        const ipc = this.getIpc();
-        if (!ipc) return this.sheets[state] ?? null;
-        try {
-            const relPath = sheetPath
-                .replace(/^pet:\/\//, "")
-                .replace(/^avatar:\/\//, "");
-            const result = (await ipc.invoke("pet:read-asset", relPath)) as {
-                ok: boolean;
-                data?: string;
-                error?: string;
-            };
-            if (
-                result?.ok &&
-                typeof result.data === "string" &&
-                result.data.startsWith("data:")
-            ) {
-                const img = new Image();
-                await new Promise<void>((resolve) => {
-                    img.onload = () => resolve();
-                    img.onerror = () => resolve();
-                    img.src = result.data as string;
-                });
-                return img.naturalWidth > 0
-                    ? img
-                    : (this.sheets[state] ?? null);
-            }
-        } catch {
-            /* 兜底回退到展示图 */
-        }
-        return this.sheets[state] ?? null;
-    }
-
     /** 获取 ipcRenderer 实例（兼容 nodeIntegration 与 preload 两种模式） */
     private getIpc(): {
         invoke: (ch: string, ...args: unknown[]) => Promise<unknown>;
@@ -263,17 +257,11 @@ export class SpriteRenderer implements AvatarRenderer {
     mount(canvas: HTMLCanvasElement): void {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (this.manifest && this.manifest[BASE_STATE]) {
-            canvas.width = this.manifest[BASE_STATE].frameW;
-            canvas.height = this.manifest[BASE_STATE].frameH;
+        const base = this.manifest?.[this.baseStateName];
+        if (base && base.clips[0]) {
+            canvas.width = base.clips[0].frameW;
+            canvas.height = base.clips[0].frameH;
         }
-        // 掩膜画布与主画布同分辨率（frameW × frameH），用于逐像素命中测试。
-        this.maskCanvas = document.createElement("canvas");
-        this.maskCanvas.width = canvas.width;
-        this.maskCanvas.height = canvas.height;
-        this.maskCtx = this.maskCanvas.getContext("2d", {
-            willReadFrequently: true,
-        });
         activeInstance = this;
         this.start();
         this.draw();
@@ -282,8 +270,16 @@ export class SpriteRenderer implements AvatarRenderer {
     setState(state: AvatarState): void {
         if (!this.manifest) return;
         // 该形象没有此状态则用基础态兜底（如切换后缺少某动作的素材）
-        const target: AvatarState = this.manifest[state] ? state : BASE_STATE;
+        const target: AvatarState = this.manifest[state]
+            ? state
+            : this.baseStateName;
         this.state = target;
+        const def = this.manifest[target];
+        // 多变体：随机选一段播放（每次触发都可能有不同表现，更生动）
+        this.clipIndex =
+            def.clips.length > 1
+                ? Math.floor(Math.random() * def.clips.length)
+                : 0;
         this.frame = 0;
         this.acc = 0;
     }
@@ -293,8 +289,8 @@ export class SpriteRenderer implements AvatarRenderer {
         this.draw();
     }
 
-    // 返回各状态动画时长（ms）：一次性动画 = frames/fps，loop 状态 = 0。
-    // 供调度器精确衔接"播完回基础态"的时机。
+    // 返回各状态动画时长（ms）：一次性动画 = 所有变体中最长的 frames/fps，loop 状态 = 0。
+    // 取最长以保证"播完回 idle"计时器不会提前截断较短的变体。供调度器精确衔接。
     getStateDurations(): Partial<Record<AvatarState, number>> {
         const map: Partial<Record<AvatarState, number>> = {};
         if (this.manifest) {
@@ -302,7 +298,11 @@ export class SpriteRenderer implements AvatarRenderer {
                 const def = this.manifest![s];
                 map[s] = def.loop
                     ? 0
-                    : Math.round((def.frames / def.fps) * 1000);
+                    : Math.max(
+                          ...def.clips.map((c) =>
+                              Math.round((c.frames / c.fps) * 1000),
+                          ),
+                      );
             });
         }
         return map;
@@ -314,10 +314,7 @@ export class SpriteRenderer implements AvatarRenderer {
         this.raf = 0;
         this.ctx = null;
         this.canvas = null;
-        this.maskCtx = null;
-        this.maskCanvas = null;
         this.sheets = {};
-        this.maskSheets = {};
         this.manifest = null;
         if (activeInstance === this) activeInstance = null;
     }
@@ -355,21 +352,22 @@ export class SpriteRenderer implements AvatarRenderer {
             if (!this.running) return;
             const def: SpriteStateDef | undefined = this.manifest?.[this.state];
             if (def) {
+                const clip = def.clips[this.clipIndex];
                 const dt = now - this.last;
                 this.last = now;
                 this.acc += dt;
-                const frameDur = 1000 / def.fps;
+                const frameDur = 1000 / clip.fps;
                 let changed = false;
                 while (this.acc >= frameDur) {
                     this.acc -= frameDur;
                     this.frame += 1;
                     changed = true;
-                    if (this.frame >= def.frames) {
+                    if (this.frame >= clip.frames) {
                         if (def.loop) {
                             this.frame = 0;
                         } else {
                             // 一次性动作播完：平滑回到基础态
-                            this.state = BASE_STATE;
+                            this.state = this.baseStateName;
                             this.frame = 0;
                             this.acc = 0;
                             break;
@@ -386,45 +384,23 @@ export class SpriteRenderer implements AvatarRenderer {
     private draw(): void {
         if (!this.ctx || !this.canvas || !this.manifest) return;
         const def: SpriteStateDef | undefined = this.manifest[this.state];
-        const img = this.sheets[this.state];
+        if (!def) return;
+        const clip = def.clips[this.clipIndex];
+        const img = this.sheets[this.state]?.[this.clipIndex] ?? null;
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        if (def && img && img.complete && img.naturalWidth > 0) {
-            const sx = this.frame * def.frameW;
+        if (clip && img && img.complete && img.naturalWidth > 0) {
+            const sx = this.frame * clip.frameW;
             this.ctx.drawImage(
                 img,
                 sx,
                 0,
-                def.frameW,
-                def.frameH,
+                clip.frameW,
+                clip.frameH,
                 0,
                 0,
-                def.frameW,
-                def.frameH,
+                clip.frameW,
+                clip.frameH,
             );
-        }
-        // 同步绘制掩膜（命中测试用），优先用不污染图源，缺失时回退展示图。
-        if (this.maskCtx && this.maskCanvas) {
-            const mImg = this.maskSheets[this.state] || this.sheets[this.state];
-            this.maskCtx.clearRect(
-                0,
-                0,
-                this.maskCanvas.width,
-                this.maskCanvas.height,
-            );
-            if (def && mImg && mImg.complete && mImg.naturalWidth > 0) {
-                const sx = this.frame * def.frameW;
-                this.maskCtx.drawImage(
-                    mImg,
-                    sx,
-                    0,
-                    def.frameW,
-                    def.frameH,
-                    0,
-                    0,
-                    def.frameW,
-                    def.frameH,
-                );
-            }
         }
     }
 }

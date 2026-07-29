@@ -1,0 +1,18 @@
+{
+  "type": "sprite",
+  "name": "示例精灵皮肤",
+  "author": "Your Name",
+  "version": "1.0.0",
+  "idle":  { "loop": true,  "clips": [ { "sheet": "idle.png",  "frameW": 360, "frameH": 480, "frames": 127, "fps": 12 } ] },
+  "blink": { "loop": false, "clips": [ { "sheet": "blink.png", "frameW": 360, "frameH": 480, "frames": 133, "fps": 12 } ] },
+  "sleepy":{ "loop": true,  "clips": [ { "sheet": "sleepy.png","frameW": 360, "frameH": 480, "frames": 126, "fps": 10 } ] },
+  "speak": { "loop": true,  "clips": [ { "sheet": "speak.png", "frameW": 360, "frameH": 480, "frames": 53,  "fps": 8  } ] },
+  "wave":  { "loop": false, "clips": [
+              { "sheet": "wave1.png", "frameW": 360, "frameH": 480, "frames": 61, "fps": 12 },
+              { "sheet": "wave2.png", "frameW": 360, "frameH": 480, "frames": 70, "fps": 12 }
+            ] },
+  "happy": { "loop": false, "clips": [
+              { "sheet": "happy1.png","frameW": 360, "frameH": 480, "frames": 61, "fps": 12 },
+              { "sheet": "happy2.png","frameW": 360, "frameH": 480, "frames": 65, "fps": 12 }
+            ] }
+}
