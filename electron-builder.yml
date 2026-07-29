@@ -1,7 +1,7 @@
 # electron-builder 配置：单机版（前后端一体安装包）
 # 构建：npm run dist  （会先 vite build，再打包 NSIS 安装向导）
 appId: com.akisaki.kirari
-productName: Aki Kirari 桌宠
+productName: Kirari绮莉
 # 二进制文件名用 ASCII，降低杀软对非 ASCII Electron exe 的启发式扫描/误报
 # （显示名/开始菜单/快捷方式仍由 productName / shortcutName 控制，保持中文）
 executableName: aki-kirari-pet
@@ -70,7 +70,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Aki Kirari 桌宠
+  shortcutName: Kirari绮莉
   # 安装包 / 卸载程序图标（与 exe 图标一致，均为软件图标 app-icon.ico）
   installerIcon: build-resources/icons/app-icon.ico
   uninstallerIcon: build-resources/icons/app-icon.ico

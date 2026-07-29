@@ -95,6 +95,40 @@ FunctionEnd
 !endif
 
 # ============================================================================
+# 安装向导「完成页」：保留默认「运行」复选框，新增「开机自动启动」复选框
+#
+# 通过 electron-builder 预留的 customFinishPage 钩子（替代默认 MUI_PAGE_FINISH）。
+# - MUI_FINISHPAGE_RUN + StartApp：保留「安装完成后运行」勾选（默认勾选）。
+# - MUI_FINISHPAGE_SHOWREADME 复用为「开机自动启动 Kirari绮莉」复选框，
+#   默认【未勾选】（满足用户要求：安装向导默认不开机启动）。
+# - 勾选时触发 AutostartOnFinish：以 --set-auto-launch 一次性拉起本程序，
+#   由主进程写入登录项后自行退出。与设置界面勾选共用同一套 Electron 登录项机制，
+#   保证安装期勾选与设置界面勾选写入的是同一条登录项。
+# 注：函数定义在宏体内，仅安装构建展开该宏时才会生成，卸载构建不会引用，避免未使用告警。
+# ============================================================================
+!macro customFinishPage
+  !define MUI_FINISHPAGE_RUN
+  !define MUI_FINISHPAGE_RUN_FUNCTION "StartApp"
+  !define MUI_FINISHPAGE_SHOWREADME
+  !define MUI_FINISHPAGE_SHOWREADME_TEXT "开机自动启动 Kirari绮莉"
+  !define MUI_FINISHPAGE_SHOWREADME_FUNCTION "AutostartOnFinish"
+  !insertmacro MUI_PAGE_FINISH
+
+  Function StartApp
+    ${If} ${isUpdated}
+      StrCpy $1 "--updated"
+    ${Else}
+      StrCpy $1 ""
+    ${EndIf}
+    ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+  FunctionEnd
+
+  Function AutostartOnFinish
+    Exec '"$INSTDIR\aki-kirari-pet.exe" --set-auto-launch'
+  FunctionEnd
+!macroend
+
+# ============================================================================
 # 桌面快捷方式使用「独立图标」（shortcut-icon.ico），与 exe 图标（app-icon.ico）区分
 #
 # 背景：electron-builder 默认用 exe 图标创建桌面快捷方式；其 addDesktopLink 宏在
@@ -121,3 +155,22 @@ FunctionEnd
   # userData/avatars 为空时从 process.resourcesPath/official-avatars 复制一次）。
   # 运行时只复制一次、绝不覆盖用户已存在的自定义皮肤。
 !macroend
+
+# ============================================================================
+# 卸载前清理：移除「开机自动启动」登录项
+#
+# 通过 electron-builder 预留的 customUnInstall 钩子（卸载区段中被调用）。
+# 以 --clear-auto-launch 一次性拉起本程序，由主进程调用
+# app.setLoginItemSettings({ openAtLogin: false }) 移除 HKCU\...\Run 下的登录项后自行退出，
+# 与设置界面 / 安装向导写入的是同一条登录项，保证清理干净。
+# 仅卸载构建期展开本宏（避免安装构建引用未定义符号触发告警）。
+# ============================================================================
+!ifdef BUILD_UNINSTALLER
+!macro customUnInstall
+  ClearErrors
+  ExecWait '"$INSTDIR\aki-kirari-pet.exe" --clear-auto-launch' $R0
+  ${If} $R0 != "0"
+    DetailPrint "清理开机启动登录项返回: $R0"
+  ${EndIf}
+!macroend
+!endif

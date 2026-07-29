@@ -11,7 +11,7 @@ const isSettingsWindow = windowType === 'settings'
 <template>
   <ApiTokenSettings v-if="isSettingsWindow" />
   <ChatWindow v-else-if="isChatWindow" />
-  <main v-else class="desktop-pet-app" aria-label="Aki Kirari 桌宠">
+  <main v-else class="desktop-pet-app" aria-label="Kirari绮莉 桌宠">
     <PetStage />
   </main>
 </template>

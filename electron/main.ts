@@ -66,6 +66,8 @@ type DeployConfig = {
   theme?: ThemeName;
   avatar?: AvatarConfig;
   customAvatars?: AvatarMeta[];
+  // 桌宠窗口位置（全局坐标）。由主进程在拖动结束/重置时持久化，启动时优先应用。
+  window?: { x: number; y: number };
 };
 const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 const DEFAULT_LOCAL = {
@@ -97,6 +99,11 @@ function loadClientConfig(): DeployConfig {
           raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
         ),
         customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
+        // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
+        window:
+          raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
+            ? { x: raw.window.x, y: raw.window.y }
+            : undefined,
       };
       }
     } catch {
@@ -128,6 +135,10 @@ function getAvatarsRoot(): string {
 
 // 默认（内置）皮肤在 userData/avatars 下的文件夹名。
 const DEFAULT_SKIN_DIR = "kirari";
+
+// 形象目录文件系统监听器：用户/外部程序直接向 userData/avatars 增删形象文件夹时，
+// 主进程自动重新扫描并广播 avatar:changed，设置页无需手动刷新即可看到新形象。
+let avatarFolderWatcher: fs.FSWatcher | null = null;
 
 // 读取皮肤配置（frames.json）的元信息：渲染类型、显示名、作者、版本。
 // 显示名优先取配置里的 `name`，缺省回退为文件夹名（fallbackName）。
@@ -210,6 +221,42 @@ function broadcastAvatar() {
   };
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("avatar:changed", payload);
+  }
+}
+
+// 启动 userData/avatars 目录监听：用户直接增删/替换形象文件夹时自动刷新注册表。
+// 递归监听子目录，并以 300ms 防抖聚合高频事件，避免复制大皮肤时反复扫描。
+function startAvatarFolderWatch(): void {
+  const root = getAvatarsRoot();
+  if (!fs.existsSync(root)) {
+    console.warn("[avatar] 形象目录不存在，跳过监听:", root);
+    return;
+  }
+  if (avatarFolderWatcher) {
+    try {
+      avatarFolderWatcher.close();
+    } catch {
+      /* 忽略重复关闭错误 */
+    }
+    avatarFolderWatcher = null;
+  }
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    avatarFolderWatcher = fs.watch(root, { recursive: true }, (_eventType, filename) => {
+      if (!filename) return;
+      // 只关注 frames.json 与目录级变更，精灵图变更不影响注册表但会触发重载，
+      // 这里一律防抖后重新扫描，简单可靠。
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        console.log("[avatar] 检测到形象目录变化，自动重新扫描:", filename);
+        scanAvatarsIntoConfig();
+        broadcastAvatar();
+        debounceTimer = null;
+      }, 300);
+    });
+    console.log("[avatar] 已启动形象目录监听:", root);
+  } catch (e) {
+    console.error("[avatar] 启动形象目录监听失败:", e);
   }
 }
 
@@ -477,6 +524,27 @@ ipcMain.handle("avatar:open-folder", async () => {
   shell.openPath(root);
 });
 
+// 用系统默认浏览器打开外部链接（而非 Electron 内置窗口）。
+// 仅放行 http/https，避免任意协议（如 file://、cmd 等）被打开造成安全风险。
+ipcMain.handle("app:open-external", (_event, url: unknown) => {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+    console.warn("[open-external] 已拒绝非 http(s) 链接:", url);
+    return;
+  }
+  shell.openExternal(url);
+});
+
+// 开机自启动：读取 / 设置登录项（HKCU\...\Run）。与安装向导 --set-auto-launch 走同一机制，
+// 保证安装期勾选与设置界面勾选写入的是同一条登录项，状态完全一致。
+ipcMain.handle("app:get-auto-launch", (): boolean => {
+  return app.getLoginItemSettings().openAtLogin === true;
+});
+ipcMain.handle("app:set-auto-launch", (_event, enabled: unknown) => {
+  const open = enabled === true;
+  app.setLoginItemSettings({ openAtLogin: open });
+  console.log(`[autostart] 开机自启动已${open ? "开启" : "关闭"}`);
+});
+
 // 重新扫描 userData/avatars：把新增的（含 frames.json 的）子目录注册为自定义形象并广播。
 ipcMain.handle("avatar:rescan", () => {
   scanAvatarsIntoConfig();
@@ -672,6 +740,28 @@ function resetWindowPosition(win: PetWindow) {
   win.moveTop();
 }
 
+// 桌宠窗口位置持久化：把当前窗口左上角坐标写入客户端配置（pet-client.config.json），
+// 下次启动优先恢复，避免每次都回到默认右下角。
+function persistWindowPosition(win: PetWindow) {
+  try {
+    if (win.isDestroyed()) return;
+    const [x, y] = win.getPosition();
+    clientConfig.window = { x, y };
+    saveClientConfig();
+  } catch (e) {
+    console.error("[window] 保存桌宠位置失败:", e);
+  }
+}
+
+// 校验坐标是否落在任一显示器的可见区域内（左上角在某块屏幕 bounds 内即可），
+// 防止多显示器/分辨率变化后持久化坐标跑到屏幕外导致桌宠"消失"。
+function isPositionOnScreen(x: number, y: number, w: number, h: number): boolean {
+  return screen.getAllDisplays().some((d) => {
+    const b = d.bounds;
+    return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
+  });
+}
+
 function resolveTrayIconPath() {
   // 使用软件图标 app-icon.ico（与 exe / 任务栏 / 安装包一致），而非旧的 tray.png
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -823,7 +913,7 @@ function createTray() {
   if (tray) return;
 
   tray = new Tray(getTrayIcon());
-  tray.setToolTip("Aki Kirari 桌宠");
+  tray.setToolTip("Kirari绮莉");
   tray.on("click", () => {
     if (petWindow?.isVisible()) {
       hidePetWindow();
@@ -837,7 +927,7 @@ function createTray() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    title: "Aki Kirari",
+    title: "Kirari绮莉",
     frame: false,
     show: false,
     skipTaskbar: true,
@@ -857,7 +947,13 @@ function createWindow() {
   });
 
   petWindow = win;
-  resetWindowPosition(win);
+  // 优先恢复持久化位置；坐标无效（如屏幕外）则回退默认右下角。
+  const saved = clientConfig.window;
+  if (saved && isPositionOnScreen(saved.x, saved.y, petWindowSize.width, petWindowSize.height)) {
+    win.setPosition(saved.x, saved.y, false);
+  } else {
+    resetWindowPosition(win);
+  }
   win.setAlwaysOnTop(true);
   win.setSkipTaskbar(true);
 
@@ -974,8 +1070,11 @@ ipcMain.on("desktop-pet:drag-move", (event) => {
   win.setPosition(nextX, nextY, false);
 });
 
-ipcMain.on("desktop-pet:drag-end", () => {
+ipcMain.on("desktop-pet:drag-end", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
   dragState = null;
+  // 拖动结束：把最终位置持久化，下次启动恢复。
+  if (win) persistWindowPosition(win);
 });
 
 // 逐像素点穿：渲染进程按光标处像素 alpha 判定后，通知主进程切换窗口的鼠标穿透。
@@ -1015,6 +1114,8 @@ ipcMain.on("desktop-pet:reset-position", (event) => {
   if (!win) return;
 
   resetWindowPosition(win);
+  // 重置后也持久化为默认位置，使下次启动保持右下角。
+  persistWindowPosition(win);
 });
 
 ipcMain.on("desktop-pet:open-chat", () => {
@@ -1064,12 +1165,32 @@ async function checkBackendHealth() {
 }
 
 app.whenReady().then(async () => {
+  // 安装向导「开机自动启动」勾选：以一次性标志拉起本进程，仅写入登录项后退出，
+  // 不创建任何窗口（避免闪窗）。保证与设置界面勾选走同一套 Electron 登录项机制。
+  if (process.argv.includes("--set-auto-launch")) {
+    app.setLoginItemSettings({ openAtLogin: true });
+    console.log("[autostart] 安装向导请求设置开机启动，已写入登录项并退出");
+    app.quit();
+    return;
+  }
+
+  // 卸载清理：由 NSIS customUnInstall 阶段以一次性标志拉起本进程，
+  // 仅移除登录项（HKCU\...\Run 的开机启动注册表项）后退出，不创建任何窗口。
+  // 与设置界面「开机自启动」、安装向导勾选共用同一套 Electron 登录项机制，
+  // 保证写入与清除的是同一条登录项。
+  if (process.argv.includes("--clear-auto-launch")) {
+    app.setLoginItemSettings({ openAtLogin: false });
+    console.log("[autostart] 卸载清理请求，已移除开机启动登录项并退出");
+    app.quit();
+    return;
+  }
+
   // 初始化日志（劫持 console，主进程输出同时落盘到 userData/logs/）。
   // 必须在任何 console.* 输出之前调用，确保调试信息不丢失。
   const logPath = initAppLogger();
   const debug = isDebugMode();
   console.log("========================================");
-  console.log(`Aki Kirari 桌宠 启动`);
+  console.log(`Kirari绮莉 启动`);
   console.log(`调试模式: ${debug ? "开 (--debug)" : "关"}`);
   console.log(`日志文件: ${logPath ?? "(无法写入，请检查 userData 权限)"}`);
   console.log(`工作模式: ${clientConfig.mode}`);
@@ -1146,6 +1267,9 @@ app.whenReady().then(async () => {
   ensureDefaultAvatars();
   scanAvatarsIntoConfig();
 
+  // 启动形象目录监听：用户直接向形象文件夹增删皮肤时自动刷新设置页与桌宠窗口。
+  startAvatarFolderWatch();
+
   // 兼容旧版持久化 + 兜底校验：默认形象若指向旧 pet:// 协议、旧 id，或当前形象
   // 已不在扫描后的形象列表中，则回退到默认形象，避免下拉框选不中。
   const registeredIds = new Set((clientConfig.customAvatars || []).map((a) => a.id));
@@ -1174,6 +1298,14 @@ app.on("before-quit", () => {
   isQuitting = true;
   stopBackend();
   chatSessionService?.dispose();
+  if (avatarFolderWatcher) {
+    try {
+      avatarFolderWatcher.close();
+    } catch {
+      /* 忽略 */
+    }
+    avatarFolderWatcher = null;
+  }
 });
 
 app.on("window-all-closed", () => {

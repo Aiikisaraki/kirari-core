@@ -58,4 +58,9 @@ contextBridge.exposeInMainWorld("windowApi", {
   onAvatarChanged: (cb: (payload: unknown) => void): void => {
     ipcRenderer.on("avatar:changed", (_event, payload: unknown) => cb(payload));
   },
+  // 用系统默认浏览器打开外部链接（避免 Electron 内置窗口打开）
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke("app:open-external", url),
+  // 开机自启动：读取 / 设置登录项
+  getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke("app:get-auto-launch"),
+  setAutoLaunch: (enabled: boolean): Promise<void> => ipcRenderer.invoke("app:set-auto-launch", enabled),
 });

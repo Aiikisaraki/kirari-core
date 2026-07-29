@@ -6,24 +6,9 @@ import { useAvatarStore } from "../../stores/avatar";
 import WindowChrome from "../common/WindowChrome.vue";
 
 const avatarStore = useAvatarStore();
-const isImporting = ref(false);
-const importError = ref("");
 const isZipping = ref(false);
 const zipError = ref("");
-const isRescanning = ref(false);
-const rescanError = ref("");
 const avatarError = ref("");
-
-async function handleImport() {
-    importError.value = "";
-    isImporting.value = true;
-    try {
-        const r = await avatarStore.importAvatarFolder();
-        if (!r.ok) importError.value = r.message || "导入失败";
-    } finally {
-        isImporting.value = false;
-    }
-}
 
 // 上传形象压缩包：选择 ZIP → 主进程解压到形象目录 → 校验 → 注册并切换。
 async function handleImportZip() {
@@ -37,25 +22,51 @@ async function handleImportZip() {
     }
 }
 
-// 重新扫描形象目录：把用户直接丢进去的形象文件夹注册为可用形象。
-async function handleRescan() {
-    rescanError.value = "";
-    isRescanning.value = true;
-    try {
-        await avatarStore.rescanAvatars();
-    } catch (e) {
-        rescanError.value = e instanceof Error ? e.message : "刷新失败";
-    } finally {
-        isRescanning.value = false;
-    }
-}
-
 // 打开形象目录，方便用户把自定义形象文件夹放进去。
 async function handleOpenFolder() {
     try {
         await avatarStore.openAvatarsFolder();
     } catch {
         /* 忽略 */
+    }
+}
+
+// 用系统默认浏览器打开外部链接（经主进程 shell.openExternal，避免 Electron 内置窗口打开）。
+function openExternal(url: string) {
+    const w = window as unknown as {
+        windowApi?: { openExternal?: (u: string) => Promise<void> };
+    };
+    w.windowApi?.openExternal?.(url);
+}
+
+// 开机自启动：读取当前登录项状态，以及切换时写回。
+const autoLaunch = ref(false);
+const autoLaunchBusy = ref(false);
+
+async function loadAutoLaunch() {
+    try {
+        const w = window as unknown as {
+            windowApi?: { getAutoLaunch?: () => Promise<boolean> };
+        };
+        if (w.windowApi?.getAutoLaunch) {
+            autoLaunch.value = await w.windowApi.getAutoLaunch();
+        }
+    } catch {
+        /* 忽略：读取失败则不勾选 */
+    }
+}
+
+async function handleAutoLaunchChange() {
+    autoLaunchBusy.value = true;
+    try {
+        const w = window as unknown as {
+            windowApi?: { setAutoLaunch?: (e: boolean) => Promise<void> };
+        };
+        await w.windowApi?.setAutoLaunch?.(autoLaunch.value);
+    } catch {
+        /* 忽略 */
+    } finally {
+        autoLaunchBusy.value = false;
     }
 }
 
@@ -133,6 +144,8 @@ function applyProfile(p: {
 onMounted(async () => {
     try {
         await avatarStore.init();
+        // 每次打开设置页自动重新扫描形象目录，无需手动刷新。
+        await avatarStore.rescanAvatars();
         const config = await getDeployConfig();
         mode.value = config.mode;
         if (config.mode === "local") {
@@ -150,6 +163,8 @@ onMounted(async () => {
     } catch (err) {
         loginError.value = err instanceof Error ? err.message : "读取配置失败";
     }
+    // 开机自启动状态（与安装向导完成页的勾选共用同一套 Electron 登录项）
+    await loadAutoLaunch();
 });
 
 async function loadProfile() {
@@ -295,74 +310,132 @@ async function handleSave() {
                 </div>
             </section>
 
+            <!-- 通用：开机自启动 -->
+            <section class="general-section">
+                <h3>通用</h3>
+                <label class="checkbox-row">
+                    <input
+                        type="checkbox"
+                        v-model="autoLaunch"
+                        :disabled="autoLaunchBusy"
+                        @change="handleAutoLaunchChange"
+                    />
+                    <span>开机自动启动</span>
+                </label>
+                <p class="hint">
+                    勾选后，系统登录时会自动启动 Kirari绮莉。也可在安装向导的最后一页勾选。
+                </p>
+            </section>
+
             <!-- 桌宠形象管理 -->
             <section class="avatar-section">
-                <h3>桌宠形象</h3>
+                <h3 class="section-title">桌宠形象</h3>
                 <p class="hint">
                     切换桌宠形象。渲染方式由皮肤配置文件（frames.json）里的
                     <code>type</code> 字段自动决定，无需手动选择。
                 </p>
-                <label for="avatar-select">当前形象</label>
-                <select
-                    id="avatar-select"
-                    class="avatar-select"
-                    :value="avatarStore.current.id"
-                    @change="
-                        handleSelectAvatar(($event.target as HTMLSelectElement).value)
-                    "
-                >
-                    <option
-                        v-for="a in avatarStore.list"
-                        :key="a.id"
-                        :value="a.id"
-                    >
-                        {{ a.name }}
-                    </option>
-                </select>
+
+                <div class="avatar-current">
+                    <label for="avatar-select">当前形象</label>
+                    <div class="select-wrap">
+                        <select
+                            id="avatar-select"
+                            class="avatar-select"
+                            :value="avatarStore.current.id"
+                            @change="
+                                handleSelectAvatar(($event.target as HTMLSelectElement).value)
+                            "
+                        >
+                            <option
+                                v-for="a in avatarStore.list"
+                                :key="a.id"
+                                :value="a.id"
+                            >
+                                {{ a.name }}
+                            </option>
+                        </select>
+                        <svg
+                            class="select-caret"
+                            viewBox="0 0 24 24"
+                            width="16"
+                            height="16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2.4"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <path d="M6 9l6 6 6-6" />
+                        </svg>
+                    </div>
+                </div>
+
                 <div class="avatar-actions">
                     <button
                         type="button"
                         class="import-btn"
-                        :disabled="isImporting"
-                        @click="handleImport"
-                    >
-                        {{ isImporting ? "导入中..." : "导入文件夹" }}
-                    </button>
-                    <button
-                        type="button"
-                        class="import-btn secondary"
                         :disabled="isZipping"
                         @click="handleImportZip"
                     >
-                        {{ isZipping ? "解压中..." : "上传压缩包 (ZIP)" }}
-                    </button>
-                </div>
-                <div class="avatar-actions">
-                    <button
-                        type="button"
-                        class="ghost-btn"
-                        :disabled="isRescanning"
-                        @click="handleRescan"
-                    >
-                        {{ isRescanning ? "刷新中..." : "刷新形象列表" }}
+                        <svg
+                            viewBox="0 0 24 24"
+                            width="17"
+                            height="17"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <path d="M12 15V8m0 0L8.5 11.5M12 8l3.5 3.5" />
+                            <path d="M20 16.5A4.5 4.5 0 0 0 17.5 8h-1.3A6 6 0 1 0 6 14.6" />
+                        </svg>
+                        <span>{{ isZipping ? "解压中…" : "上传压缩包" }}</span>
                     </button>
                     <button
                         type="button"
                         class="ghost-btn"
                         @click="handleOpenFolder"
                     >
-                        打开形象文件夹
+                        <svg
+                            viewBox="0 0 24 24"
+                            width="17"
+                            height="17"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <path d="M3 7a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .8.4L10.5 7H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                        </svg>
+                        <span>打开形象文件夹</span>
                     </button>
                 </div>
+
                 <div
-                    v-if="importError || zipError || rescanError || avatarError"
+                    v-if="zipError || avatarError"
                     class="error-message"
                 >
-                    {{ importError || zipError || rescanError || avatarError }}
+                    {{ zipError || avatarError }}
                 </div>
-                <p class="hint">
-                    自定义形象文件夹需包含 <code>frames.json</code> 与对应精灵图。
-                    直接丢进「形象文件夹」点刷新，或用「上传压缩包」自动解压。
+
+                <p class="avatar-tip">
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="15"
+                        height="15"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M12 11v5" />
+                        <path d="M12 7.5h.01" />
+                    </svg>
+                    <span>自定义形象文件夹需包含 <code>frames.json</code> 与对应精灵图。直接丢进「形象文件夹」，或点「上传压缩包」自动解压；打开设置页时会自动刷新列表。</span>
                 </p>
             </section>
 
@@ -446,10 +519,9 @@ async function handleSave() {
                 <p class="hint free-key-hint">
                     没有 API Key？可前往
                     <a
-                        :href="freeKeyUrl"
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        href="#"
                         class="inline-link"
+                        @click.prevent="openExternal(freeKeyUrl)"
                         >chatanywhere</a
                     >
                     免费领取（支持 gpt / deepseek /
@@ -482,10 +554,9 @@ async function handleSave() {
                     用于「联网搜索 / 新闻」工具。天气与时间无需 Key；不填则桌宠只能回答天气、时间。
                     在
                     <a
-                        href="https://tavily.com"
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        href="#"
                         class="inline-link"
+                        @click.prevent="openExternal('https://tavily.com')"
                         >Tavily</a
                     >
                     免费领取（有免费额度，专为 LLM 优化）。
@@ -677,82 +748,190 @@ button:disabled {
 }
 .avatar-section {
     display: grid;
-    gap: 12px;
-    padding: 16px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.45);
+    gap: 14px;
+    padding: 18px 18px 20px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.5);
     backdrop-filter: blur(12px) saturate(140%);
     -webkit-backdrop-filter: blur(12px) saturate(140%);
-    border: 1px solid rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.6);
     box-shadow: 0 10px 28px rgba(57, 44, 76, 0.1);
     margin-bottom: 20px;
 }
+.avatar-section .section-title {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    color: var(--pet-ink);
+}
+.avatar-section .section-title::before {
+    content: "";
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #ff8fb1 0%, #a78bfa 100%);
+    box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.18);
+    flex: 0 0 auto;
+}
+
+/* 当前形象子卡片 */
+.avatar-current {
+    display: grid;
+    gap: 8px;
+    padding: 14px;
+    border-radius: 13px;
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.7),
+        rgba(255, 255, 255, 0.42)
+    );
+    border: 1px solid rgba(167, 139, 250, 0.18);
+}
+.avatar-current label {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--pet-muted);
+}
+.select-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
 .avatar-select {
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--pet-border);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.55);
+    padding: 11px 38px 11px 14px;
+    border: 1.5px solid var(--pet-border);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.85);
     color: var(--pet-ink);
     font-size: 14px;
+    font-weight: 600;
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui,
+        -apple-system, sans-serif;
     cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
     transition:
         border-color 140ms ease,
         box-shadow 140ms ease;
 }
 .avatar-select:focus {
     outline: none;
-    border-color: var(--pet-accent);
-    box-shadow: 0 0 0 3px var(--pet-focus-ring);
+    border-color: #c4a3ff;
+    box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.25);
 }
-.import-btn {
-    background: var(--pet-accent);
-    color: #fff;
-    border: 0;
-    border-radius: 8px;
-    padding: 10px 16px;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: var(--pet-primary-shadow);
-    transition:
-        filter 140ms ease,
-        transform 140ms ease;
-}
-.import-btn:not(:disabled):hover {
-    filter: brightness(1.05);
-}
-.import-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-.avatar-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-}
-.import-btn.secondary {
-    background: var(--pet-accent-soft, #e8e0ff);
+.select-caret {
+    position: absolute;
+    right: 12px;
+    pointer-events: none;
     color: var(--pet-accent, #7c3aed);
 }
+
+/* 操作按钮：等宽胶囊按钮 + 内联图标 */
+.avatar-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.import-btn,
 .ghost-btn {
-    background: rgba(255, 255, 255, 0.5);
-    color: var(--pet-ink);
-    border: 1.5px solid var(--pet-border);
-    border-radius: 8px;
-    padding: 9px 14px;
-    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui,
+        -apple-system, sans-serif;
     cursor: pointer;
     transition:
-        border-color 140ms ease,
-        background 140ms ease;
+        transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
+        box-shadow 160ms ease,
+        filter 160ms ease,
+        background 160ms ease,
+        border-color 160ms ease;
+}
+@media (max-width: 420px) {
+    .avatar-actions {
+        grid-template-columns: 1fr;
+    }
+}
+.import-btn svg,
+.ghost-btn svg {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 auto;
+}
+.import-btn {
+    border: 0;
+    color: #fff;
+    background: linear-gradient(135deg, #ff8fb1 0%, #b07cf0 55%, #8b5cf6 100%);
+    box-shadow: 0 8px 18px rgba(176, 124, 240, 0.4);
+}
+.import-btn:not(:disabled):hover {
+    transform: translateY(-2px) scale(1.02);
+    filter: brightness(1.05);
+    box-shadow: 0 12px 22px rgba(176, 124, 240, 0.5);
+}
+.import-btn:not(:disabled):active {
+    transform: translateY(0) scale(0.97);
+}
+.import-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+.ghost-btn {
+    border: 1.5px solid rgba(167, 139, 250, 0.45);
+    background: rgba(255, 255, 255, 0.7);
+    color: var(--pet-accent, #7c3aed);
 }
 .ghost-btn:not(:disabled):hover {
-    border-color: var(--pet-accent);
-    background: rgba(255, 255, 255, 0.7);
+    background: rgba(167, 139, 250, 0.12);
+    border-color: rgba(167, 139, 250, 0.7);
+    transform: translateY(-2px) scale(1.02);
+}
+.ghost-btn:not(:disabled):active {
+    transform: translateY(0) scale(0.97);
 }
 .ghost-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.55;
     cursor: not-allowed;
+}
+
+/* 底部提示气泡 */
+.avatar-tip {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: rgba(167, 139, 250, 0.1);
+    color: var(--pet-muted);
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+.avatar-tip svg {
+    flex: 0 0 auto;
+    margin-top: 1px;
+    color: var(--pet-accent, #7c3aed);
+}
+.avatar-tip code {
+    background: rgba(124, 58, 237, 0.16);
+    color: var(--pet-accent, #7c3aed);
+    padding: 1px 6px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 code {
     background: rgba(124, 58, 237, 0.12);
