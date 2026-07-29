@@ -49,6 +49,9 @@ export interface AvatarRenderer {
   setScale(scale: number): void;
   // 卸载（切换形象时调用）
   destroy(): void;
+  // 命中测试：画布内部像素坐标 (x, y) 处是否"实心"（alpha >= 阈值）。
+  // 用于桌宠逐像素点穿：透明区透传点击给下方窗口，实心区才可拖动/交互。
+  hitTest(x: number, y: number): boolean;
 }
 
 import { SpriteRenderer } from "./SpriteRenderer";

@@ -7,21 +7,30 @@ import type { AvatarState } from '../../pet/avatar/types'
 import PetAvatar from './PetAvatar.vue'
 import PetBubble from './PetBubble.vue'
 import PetQuickMenu from './PetQuickMenu.vue'
+import { getActiveSpriteRenderer } from '../../pet/avatar/SpriteRenderer'
 type DesktopPetChannel =
   | 'desktop-pet:drag-start'
   | 'desktop-pet:drag-move'
   | 'desktop-pet:drag-end'
   | 'desktop-pet:open-chat'
   | 'desktop-pet:show-context-menu'
+  | 'desktop-pet:open-settings'
+  | 'desktop-pet:hide'
+  | 'desktop-pet:set-ignore-mouse'
 
 type DesktopPetIpc = {
-  send(channel: DesktopPetChannel): void
+  send(channel: DesktopPetChannel, ...args: unknown[]): void
   on(channel: string, listener: (...args: unknown[]) => void): void
+  off(channel: string, listener: (...args: unknown[]) => void): void
+}
+
+type ElectronApi = {
+  ipcRenderer: DesktopPetIpc
 }
 
 declare global {
   interface Window {
-    require?: (module: 'electron') => { ipcRenderer: DesktopPetIpc }
+    require?: (module: 'electron') => ElectronApi
   }
 }
 
@@ -29,7 +38,8 @@ const petStore = usePetStore()
 const avatarStore = useAvatarStore()
 const { isVisible, message, setMessage } = petStore
 const { bubbleMessage, bubbleInteractive, messages, unreadCount } = useChatSocket()
-const ipcRenderer = window.require?.('electron').ipcRenderer
+const electron = window.require?.('electron')
+const ipcRenderer = electron?.ipcRenderer
 
 /* ===================== 状态机调度器 ===================== */
 // 优先级：说话 > 高兴 > 招手 > 瞌睡 > 眨眼 > 待机。
@@ -245,6 +255,9 @@ onMounted(() => {
   scheduleWave()
   scheduleSleepy()
   window.addEventListener('focus', onFocus)
+  // 主进程每 20ms 轮询一次光标位置并广播到本窗口；这里注册接收器做判定。
+  // 不依赖渲染进程能否读取 screen / 能否接收鼠标事件，彻底规避死锁。
+  ipcRenderer?.on('desktop-pet:cursor', onCursorPos)
 })
 
 onBeforeUnmount(() => {
@@ -255,6 +268,7 @@ onBeforeUnmount(() => {
   if (sleepTimer) clearTimeout(sleepTimer)
   if (blinkTimer) clearTimeout(blinkTimer)
   if (tapResetTimer) clearTimeout(tapResetTimer)
+  ipcRenderer?.off('desktop-pet:cursor', onCursorPos)
   window.removeEventListener('focus', onFocus)
 })
 
@@ -333,14 +347,78 @@ function resetPosition() {
 function showContextMenu() {
   ipcRenderer?.send('desktop-pet:show-context-menu')
 }
+
+/* ===================== 逐像素点穿 ===================== */
+// 主进程每 20ms 轮询一次光标位置（主进程 screen 模块可用，渲染进程不可用），
+// 把相对桌宠窗口的视口坐标通过 desktop-pet:cursor 广播过来；onCursorPos 据此判定：
+// 透明像素 → setIgnoreMouseEvents(true) 把点击透传给下方窗口；
+// 实心像素 → 关闭穿透，使拖拽/点击正常作用到桌宠。
+// 用主进程轮询而非渲染进程读 electron.screen，规避了「渲染进程拿不到 screen」导致
+// 轮询失效、窗口永远不点穿（完全挡住后方点击）的问题。
+let lastIgnore: boolean | null = null
+
+// 气泡 / 悬浮菜单 / 按钮等交互控件永远按"实心"处理，保证它们可点击。
+function isInteractiveEl(el: Element | null): boolean {
+  if (!el) return false
+  return !!el.closest('.pet-bubble, .quick-fab, .quick-item, button, a, input, textarea, select')
+}
+
+function evaluateClickThrough(clientX: number, clientY: number) {
+  if (!ipcRenderer) return
+  // 提前取到画布 / 渲染器 / 布局，命中测试与诊断日志共用同一份计算结果。
+  const canvas = document.querySelector(".pet-canvas") as HTMLCanvasElement | null
+  const r = getActiveSpriteRenderer()
+  const rect = canvas ? canvas.getBoundingClientRect() : null
+  let lx = 0
+  let ly = 0
+  let solid = true
+  if (r && canvas && rect && rect.width > 0 && rect.height > 0) {
+    lx = ((clientX - rect.left) / rect.width) * canvas.width
+    ly = ((clientY - rect.top) / rect.height) * canvas.height
+    solid = r.hitTest(lx, ly)
+  }
+
+  let wantIgnore = false
+  // 拖拽中：强制实心（不穿透），否则拖到角色透明部位会中断拖拽
+  if (isDragging.value) {
+    wantIgnore = false
+  }
+  // 落在交互 UI（气泡 / 悬浮菜单 / 按钮）上 → 实心
+  else if (isInteractiveEl(document.elementFromPoint(clientX, clientY))) {
+    wantIgnore = false
+  }
+  // 其余：按画布像素 alpha 判定（映射光标到 canvas 内部像素坐标，直接读显示画布）。
+  // 注意：不再用 isVisible store 控制整窗点穿——桌宠隐藏由主进程 win.hide() 负责，
+  // 渲染侧若误判可见性（如 isVisible 因持久化/初始化为 false 而实际窗口仍显示）
+  // 会把正常桌宠永久点穿，导致"完全点不到"。
+  else {
+    wantIgnore = !solid
+  }
+  // 悬浮态改为「光标是否落在桌宠窗口矩形内」驱动：只要光标还在本无边框窗口内
+  // （含角色透明留白区），就视为悬浮并展示右下角快捷菜单。
+  // 这样即便光标停在角色透明区（窗口已点穿、OS 焦点已离开桌宠），小球仍保持显示，
+  // 用户才能把光标挪过去点中；只有光标真正移出窗口矩形时才隐藏。
+  // 注意：点穿(wantIgnore) 与悬浮态已解耦——点穿仍按角色像素 alpha 判定（透明区可点后方窗口），
+  // 小球能否点中由下方 isInteractiveEl 分支兜底：光标落在小球/菜单上即强制不点穿。
+  const inWindow = clientX >= 0 && clientX <= window.innerWidth && clientY >= 0 && clientY <= window.innerHeight
+  hovering.value = inWindow
+
+  if (lastIgnore !== wantIgnore) {
+    ipcRenderer.send("desktop-pet:set-ignore-mouse", wantIgnore)
+    lastIgnore = wantIgnore
+  }
+}
+
+// 接收主进程广播的光标位置（已是相对桌宠窗口的视口坐标，与 getBoundingClientRect 同坐标系）。
+function onCursorPos(_e: unknown, pt: { x: number; y: number }) {
+  evaluateClickThrough(pt.x, pt.y)
+}
 </script>
 
 <template>
   <section
     class="pet-stage"
     :class="{ 'is-dragging': isDragging }"
-    @pointerenter="hovering = true"
-    @pointerleave="hovering = false"
   >
     <PetBubble
       :message="displayMessage"

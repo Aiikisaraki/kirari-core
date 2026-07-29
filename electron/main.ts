@@ -652,6 +652,38 @@ ipcMain.on("desktop-pet:drag-end", () => {
   dragState = null;
 });
 
+// 逐像素点穿：渲染进程按光标处像素 alpha 判定后，通知主进程切换窗口的鼠标穿透。
+// ignore=true 时桌宠窗口忽略鼠标、事件透传给下方窗口，实现"只有角色实心区才拦截、
+// 透明背景可点穿"。光标位置由主进程轮询（见下方 setInterval）后广播给渲染进程，
+// 不依赖窗口是否接收鼠标事件，从根上规避死锁。
+ipcMain.on("desktop-pet:set-ignore-mouse", (event, ignore: boolean) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  win.setIgnoreMouseEvents(ignore);
+});
+
+// 光标轮询：主进程 screen 模块可用（渲染进程在 Electron 42 下已不可用），
+// 每 20ms 取一次全局光标，换算成相对桌宠窗口的视口坐标，广播给渲染进程做逐像素判定。
+// 关键：轮询在主进程，与桌宠窗口是否处于"点穿"(setIgnoreMouseEvents=true) 无关，
+// 因此光标移回角色实心区时仍能正常广播、关闭点穿，不会陷入"点穿后收不到事件"的死锁。
+let lastCursorSent = { x: Number.NaN, y: Number.NaN };
+setInterval(() => {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const cursor = screen.getCursorScreenPoint();
+  const b = petWindow.getBounds();
+  // 关键修复：screen.getCursorScreenPoint() 返回物理像素，getBounds() 返回逻辑像素。
+  // 必须按光标所在显示器的 scaleFactor 把光标换算成逻辑像素，再与 getBounds 相减，
+  // 否则高 DPI 下坐标被放大，命中测试整片错位/越界 → 永久点穿。
+  const disp = screen.getDisplayNearestPoint(cursor);
+  const scale = disp?.scaleFactor || 1;
+  const lx = cursor.x / scale - b.x;
+  const ly = cursor.y / scale - b.y;
+  // 坐标无变化则跳过，避免无谓 IPC 抖动
+  if (lx === lastCursorSent.x && ly === lastCursorSent.y) return;
+  lastCursorSent = { x: lx, y: ly };
+  petWindow.webContents.send("desktop-pet:cursor", { x: lx, y: ly });
+}, 20);
+
 ipcMain.on("desktop-pet:reset-position", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return;

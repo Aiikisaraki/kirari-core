@@ -36,6 +36,12 @@ export class Live2DRenderer implements AvatarRenderer {
     this.canvas = null;
   }
 
+  // 占位实现：Live2D 暂不做逐像素采样，整体按"实心"处理（不影响点穿逻辑，
+  // 仅意味着 Live2D 形象仍会拦截整个窗口矩形，与旧行为一致）。
+  hitTest(_x: number, _y: number): boolean {
+    return true;
+  }
+
   private drawPlaceholder(): void {
     if (!this.ctx || !this.canvas) return;
     const { width: w, height: h } = this.canvas;
