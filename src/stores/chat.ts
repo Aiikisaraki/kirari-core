@@ -8,6 +8,8 @@ export type ChatMessage = {
   timestamp: number
   // 对话回答携带的情绪标签（来自后端 pet_response.emotion）。无则省略。
   emotion?: 'happy' | 'wave' | null
+  // 关联的图片 URL 或 base64 data URL（用户发送的图片、或 AI 返回的图片）。
+  images?: string[]
 }
 
 export type ChatStateSnapshot = {

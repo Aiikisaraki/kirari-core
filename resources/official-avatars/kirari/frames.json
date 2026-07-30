@@ -15,7 +15,7 @@
     "sheet": "blink.png",
     "frameW": 360,
     "frameH": 480,
-    "frames": 133,
+    "frames": 81,
     "fps": 12,
     "loop": false
   },

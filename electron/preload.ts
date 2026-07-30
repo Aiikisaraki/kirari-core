@@ -63,4 +63,10 @@ contextBridge.exposeInMainWorld("windowApi", {
   // 开机自启动：读取 / 设置登录项
   getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke("app:get-auto-launch"),
   setAutoLaunch: (enabled: boolean): Promise<void> => ipcRenderer.invoke("app:set-auto-launch", enabled),
+  // 桌宠备注名：读取 / 设置 / 订阅跨窗口变更广播
+  getPetName: (): Promise<string> => ipcRenderer.invoke("pet-name:get"),
+  setPetName: (name: string): Promise<void> => ipcRenderer.invoke("pet-name:set", name),
+  onPetNameChanged: (cb: (name: string) => void): void => {
+    ipcRenderer.on("pet-name:changed", (_event, name: string) => cb(name));
+  },
 });

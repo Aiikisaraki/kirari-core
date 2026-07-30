@@ -12,6 +12,8 @@ interface ModelConfigFile {
     model?: string;
     key?: string;
     searchKey?: string;
+    searchEndpoint?: string;
+    searchProvider?: string; // 'uapis' | 'tavily' | 'searxng'
     seeded?: boolean;
 }
 
@@ -49,6 +51,8 @@ interface ProfileCache {
     hasToken?: boolean;
     searchKeyMasked?: string;
     hasSearchKey?: boolean;
+    searchEndpoint?: string;
+    searchProvider?: string;
 }
 
 export function readProfileCache(): ProfileCache | null {
@@ -96,7 +100,7 @@ export function useApiToken() {
         }
     }
 
-    async function getProfile(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean }> {
+    async function getProfile(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean; searchEndpoint: string; searchProvider: string }> {
         try {
             const data = await request('GET', '/api/profile', {});
             const profile = {
@@ -107,6 +111,8 @@ export function useApiToken() {
                 hasToken: data.hasToken === true,
                 searchKeyMasked: typeof data.search_key_masked === 'string' ? data.search_key_masked : '',
                 hasSearchKey: data.hasSearchKey === true,
+                searchEndpoint: typeof data.search_endpoint === 'string' ? data.search_endpoint : '',
+                searchProvider: typeof data.search_provider === 'string' ? data.search_provider : 'uapis',
             };
             writeProfileCache(profile);
             return profile;
@@ -122,13 +128,15 @@ export function useApiToken() {
                     hasToken: cached.hasToken === true,
                     searchKeyMasked: cached.searchKeyMasked ?? '',
                     hasSearchKey: cached.hasSearchKey === true,
+                    searchEndpoint: cached.searchEndpoint ?? '',
+                    searchProvider: cached.searchProvider ?? 'uapis',
                 };
             }
             throw err;
         }
     }
 
-    async function updateProfile(patch: { model?: string; apiEndpoint?: string; token?: string; searchKey?: string }) {
+    async function updateProfile(patch: { model?: string; apiEndpoint?: string; token?: string; searchKey?: string; searchEndpoint?: string; searchProvider?: string }) {
         isLoading.value = true;
         error.value = '';
         try {
@@ -137,6 +145,8 @@ export function useApiToken() {
             if (patch.apiEndpoint !== undefined) body.api_endpoint = patch.apiEndpoint;
             if (patch.token !== undefined) body.token = patch.token;
             if (patch.searchKey !== undefined) body.search_key = patch.searchKey;
+            if (patch.searchEndpoint !== undefined) body.search_endpoint = patch.searchEndpoint;
+            if (patch.searchProvider !== undefined) body.search_provider = patch.searchProvider;
             const data = await request('PUT', '/api/profile', body);
             const profile = {
                 model: typeof data.model === 'string' ? data.model : 'gpt-5.4-mini',
@@ -145,6 +155,8 @@ export function useApiToken() {
                 hasToken: data.hasToken === true,
                 searchKeyMasked: typeof data.search_key_masked === 'string' ? data.search_key_masked : '',
                 hasSearchKey: data.hasSearchKey === true,
+                searchEndpoint: typeof data.search_endpoint === 'string' ? data.search_endpoint : '',
+                searchProvider: typeof data.search_provider === 'string' ? data.search_provider : 'uapis',
             };
             writeProfileCache(profile);
             return profile;
@@ -167,12 +179,14 @@ export function useApiToken() {
         return `${key.slice(0, 3)}${"*".repeat(6)}${key.slice(-4)}`;
     }
 
-    async function getModelConfig(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean }> {
+    async function getModelConfig(): Promise<{ username: string; model: string; apiEndpoint: string; tokenMasked: string; hasToken: boolean; searchKeyMasked: string; hasSearchKey: boolean; searchEndpoint: string; searchProvider: string }> {
         const data = await getBridge().getModelConfig();
         const model = typeof data.model === "string" && data.model.trim() ? data.model.trim() : "gpt-5.4-mini";
         const apiEndpoint = typeof data.endpoint === "string" && data.endpoint.trim() ? data.endpoint.trim() : "https://api.chatanywhere.tech/v1";
         const key = typeof data.key === "string" ? data.key : "";
         const searchKey = typeof data.searchKey === "string" ? data.searchKey : "";
+        const searchEndpoint = typeof data.searchEndpoint === "string" ? data.searchEndpoint : "";
+        const searchProvider = typeof data.searchProvider === "string" ? data.searchProvider : "uapis";
         const profile = {
             username: "",
             model,
@@ -181,18 +195,22 @@ export function useApiToken() {
             hasToken: !!key,
             searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
             hasSearchKey: !!searchKey,
+            searchEndpoint,
+            searchProvider,
         };
         writeProfileCache(profile);
         return profile;
     }
 
-    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string; searchKey?: string }) {
+    async function setModelConfig(patch: { model?: string; endpoint?: string; key?: string; searchKey?: string; searchEndpoint?: string; searchProvider?: string }) {
         isLoading.value = true;
         error.value = "";
         try {
             const data = await getBridge().setModelConfig(patch);
             const key = typeof data.key === "string" ? data.key : "";
             const searchKey = typeof data.searchKey === "string" ? data.searchKey : "";
+            const searchEndpoint = typeof data.searchEndpoint === "string" ? data.searchEndpoint : "";
+            const searchProvider = typeof data.searchProvider === "string" ? data.searchProvider : "uapis";
             const profile = {
                 model: typeof data.model === "string" && data.model.trim() ? data.model.trim() : "gpt-5.4-mini",
                 apiEndpoint: typeof data.endpoint === "string" && data.endpoint.trim() ? data.endpoint.trim() : "https://api.chatanywhere.tech/v1",
@@ -200,6 +218,8 @@ export function useApiToken() {
                 hasToken: !!key,
                 searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
                 hasSearchKey: !!searchKey,
+                searchEndpoint,
+                searchProvider,
             };
             writeProfileCache(profile);
             return profile;
@@ -211,11 +231,13 @@ export function useApiToken() {
         }
     }
 
-    function onModelConfigChanged(cb: (p: { model: string; apiEndpoint: string; hasToken: boolean; tokenMasked: string; hasSearchKey: boolean; searchKeyMasked: string }) => void) {
+    function onModelConfigChanged(cb: (p: { model: string; apiEndpoint: string; hasToken: boolean; tokenMasked: string; hasSearchKey: boolean; searchKeyMasked: string; searchEndpoint: string; searchProvider: string }) => void) {
         try {
-            getBridge().onModelConfigChanged((cfg: { model?: string; endpoint?: string; key?: string; searchKey?: string }) => {
+            getBridge().onModelConfigChanged((cfg: ModelConfigFile) => {
                 const key = typeof cfg.key === "string" ? cfg.key : "";
                 const searchKey = typeof cfg.searchKey === "string" ? cfg.searchKey : "";
+                const searchEndpoint = typeof cfg.searchEndpoint === "string" ? cfg.searchEndpoint : "";
+                const searchProvider = typeof cfg.searchProvider === "string" ? cfg.searchProvider : "uapis";
                 cb({
                     model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : "gpt-5.4-mini",
                     apiEndpoint: typeof cfg.endpoint === "string" && cfg.endpoint.trim() ? cfg.endpoint.trim() : "https://api.chatanywhere.tech/v1",
@@ -223,6 +245,8 @@ export function useApiToken() {
                     hasToken: !!key,
                     searchKeyMasked: searchKey ? maskKeyLocal(searchKey) : "",
                     hasSearchKey: !!searchKey,
+                    searchEndpoint,
+                    searchProvider,
                 });
             });
         } catch {

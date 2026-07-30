@@ -1,15 +1,15 @@
 {
-  "mode": "local",
-  "server": {
-    "wsUrl": "ws://localhost:9089/ws",
-    "httpUrl": "http://localhost:9089"
-  },
-  "builtinToken": "kirari-local-builtin",
-  "avatar": {
-    "id": "kirari-sprite",
-    "name": "Aki Kirari（精灵帧）",
-    "type": "sprite",
-    "src": "/pet/frames.json"
-  },
-  "customAvatars": []
+    "mode": "local",
+    "server": {
+        "wsUrl": "ws://localhost:19089/ws",
+        "httpUrl": "http://localhost:19089"
+    },
+    "builtinToken": "kirari-local-builtin",
+    "avatar": {
+        "id": "kirari-sprite",
+        "name": "Aki Kirari（精灵帧）",
+        "type": "sprite",
+        "src": "/pet/frames.json"
+    },
+    "customAvatars": []
 }

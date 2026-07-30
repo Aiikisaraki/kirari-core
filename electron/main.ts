@@ -66,6 +66,8 @@ type DeployConfig = {
   theme?: ThemeName;
   avatar?: AvatarConfig;
   customAvatars?: AvatarMeta[];
+  // 桌宠备注名（显示在聊天窗口顶部），缺省 Kirari。
+  petName?: string;
   // 桌宠窗口位置（全局坐标）。由主进程在拖动结束/重置时持久化，启动时优先应用。
   window?: { x: number; y: number };
 };
@@ -99,6 +101,7 @@ function loadClientConfig(): DeployConfig {
           raw.avatar && raw.avatar.type && raw.avatar.src ? raw.avatar : DEFAULT_AVATAR,
         ),
         customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
+        petName: typeof raw.petName === "string" && raw.petName.trim() ? raw.petName.trim() : "Kirari",
         // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
         window:
           raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
@@ -221,6 +224,14 @@ function broadcastAvatar() {
   };
   for (const win of [petWindow, chatWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("avatar:changed", payload);
+  }
+}
+
+// 桌宠备注名变更时广播给所有已打开窗口，聊天窗口同步标题与头部显示。
+function broadcastPetName() {
+  const name = clientConfig.petName || "Kirari";
+  for (const win of [petWindow, chatWindow, settingsWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("pet-name:changed", name);
   }
 }
 
@@ -368,6 +379,20 @@ ipcMain.handle("theme:set", (_event, name: string) => {
   clientConfig.theme = next;
   saveClientConfig();
   broadcastTheme(next);
+  return next;
+});
+
+// 桌宠备注名：读取 / 设置 / 持久化 / 广播
+ipcMain.handle("pet-name:get", () => clientConfig.petName || "Kirari");
+ipcMain.handle("pet-name:set", (_event, name: unknown) => {
+  const next = typeof name === "string" && name.trim() ? name.trim() : "Kirari";
+  clientConfig.petName = next;
+  saveClientConfig();
+  broadcastPetName();
+  // 同步刷新聊天窗口的标题栏文字
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.setTitle(`和 ${next} 聊天`);
+  }
   return next;
 });
 
@@ -706,6 +731,9 @@ ipcMain.handle("config:set", (_event, patch: Record<string, unknown>) => {
     endpoint: typeof patch.endpoint === "string" ? patch.endpoint : undefined,
     model: typeof patch.model === "string" ? patch.model : undefined,
     key: typeof patch.key === "string" ? patch.key : undefined,
+    searchKey: typeof patch.searchKey === "string" ? patch.searchKey : undefined,
+    searchEndpoint: typeof patch.searchEndpoint === "string" ? patch.searchEndpoint : undefined,
+    searchProvider: typeof patch.searchProvider === "string" ? patch.searchProvider : undefined,
   });
   // 写文件会触发 fs.watch → 同步后端 + 广播；这里再显式执行一次，确保本进程内保存也能即时生效。
   handleModelConfigChanged(next);
@@ -829,7 +857,7 @@ function showChatWindow() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
-  // 对话框已打开：通知桌宠窗口清零未读（打开即视为已读）。
+  // 聊天窗口已打开：通知桌宠窗口清零未读（打开即视为已读）。
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.webContents.send("chat:open-changed", true);
   }
@@ -875,7 +903,7 @@ function updateTrayMenu() {
       },
       { type: "separator" },
       {
-        label: "打开对话框",
+        label: "打开聊天",
         click: showChatWindow,
       },
       { type: "separator" },
@@ -990,7 +1018,7 @@ function createWindow() {
 
 function createChatWindow() {
   const win = new BrowserWindow({
-    title: "和 Aki 聊天",
+    title: `和 ${clientConfig.petName || "Kirari"} 聊天`,
     width: chatWindowSize.width,
     height: chatWindowSize.height,
     minWidth: 360,
@@ -1009,7 +1037,7 @@ function createChatWindow() {
 
   chatWindow = win;
 
-  // 对话框关闭时通知桌宠窗口（已读状态复位），由 Pinia store 在关闭后
+  // 聊天窗口关闭时通知桌宠窗口（已读状态复位），由 Pinia store 在关闭后
   // 对期间来的新消息重新计入未读。打开即视为已读的逻辑见 showChatWindow。
   win.on("closed", () => {
     if (chatWindow === win) chatWindow = null;
@@ -1041,8 +1069,8 @@ ipcMain.handle("chat:get-state", () => {
   return ensureChatSessionService().getSnapshot();
 });
 
-ipcMain.on("chat:send-message", (_event, content: string) => {
-  void ensureChatSessionService().sendMessage(content);
+ipcMain.on("chat:send-message", (_event, payload: { text: string; images?: string[] }) => {
+  void ensureChatSessionService().sendMessage(payload);
 });
 
 ipcMain.on("desktop-pet:drag-start", (event) => {
@@ -1136,7 +1164,7 @@ ipcMain.on("desktop-pet:show-context-menu", (event) => {
 
   Menu.buildFromTemplate([
     {
-      label: "打开对话框",
+      label: "打开聊天",
       click: showChatWindow,
     },
     {

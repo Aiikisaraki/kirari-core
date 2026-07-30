@@ -11,6 +11,8 @@ export interface ModelConfigFile {
     model?: string;
     key?: string;
     searchKey?: string;
+    searchEndpoint?: string;
+    searchProvider?: string; // 'uapis' | 'tavily' | 'searxng'
     seeded?: boolean;
 }
 

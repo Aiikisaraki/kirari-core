@@ -13,7 +13,7 @@ type DesktopPetInvokeChannel = 'chat:get-state'
 type DesktopPetEventChannel = 'chat:state' | 'chat:open-changed'
 
 type DesktopPetIpc = {
-  send(channel: DesktopPetChannel, payload?: string): void
+  send(channel: DesktopPetChannel, payload?: unknown): void
   invoke(channel: DesktopPetInvokeChannel): Promise<ChatStateSnapshot>
   on(channel: DesktopPetEventChannel, listener: (...args: unknown[]) => void): void
 }
@@ -52,11 +52,16 @@ async function requestState() {
   store.applyState(nextState)
 }
 
-function sendMessage(content: string) {
+function sendMessage(content: string, images?: string[]) {
   const text = content.trim()
-  if (!text || !ipcRenderer) return
+  const imgs = Array.isArray(images)
+    ? images.filter((x) => typeof x === 'string' && x.trim())
+    : []
+  if (!text && imgs.length === 0) return
+  if (!ipcRenderer) return
 
-  ipcRenderer.send('chat:send-message', text)
+  // 经 IPC 把文本与（可选的）图片 base64 data URL 一并发给主进程 → 后端。
+  ipcRenderer.send('chat:send-message', { text, images: imgs })
 }
 
 function openChat() {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useApiToken } from "../../composables/useApiToken";
 import { useThemeStore, THEMES } from "../../stores/theme";
 import { useAvatarStore } from "../../stores/avatar";
@@ -42,18 +42,57 @@ function openExternal(url: string) {
 // 开机自启动：读取当前登录项状态，以及切换时写回。
 const autoLaunch = ref(false);
 const autoLaunchBusy = ref(false);
+const petName = ref("Kirari");
+const petNameSaving = ref(false);
 
 async function loadAutoLaunch() {
-    try {
-        const w = window as unknown as {
-            windowApi?: { getAutoLaunch?: () => Promise<boolean> };
-        };
-        if (w.windowApi?.getAutoLaunch) {
-            autoLaunch.value = await w.windowApi.getAutoLaunch();
-        }
-    } catch {
-        /* 忽略：读取失败则不勾选 */
+  try {
+    const w = window as unknown as {
+      windowApi?: { getAutoLaunch?: () => Promise<boolean> };
+    };
+    if (w.windowApi?.getAutoLaunch) {
+      autoLaunch.value = await w.windowApi.getAutoLaunch();
     }
+  } catch {
+    /* 忽略：读取失败则不勾选 */
+  }
+}
+
+async function loadPetName() {
+  const w = window as unknown as {
+    windowApi?: {
+      getPetName?: () => Promise<string>;
+      onPetNameChanged?: (cb: (name: string) => void) => void;
+    };
+  };
+  try {
+    if (w.windowApi?.getPetName) {
+      petName.value = (await w.windowApi.getPetName()) || "Kirari";
+    }
+    w.windowApi?.onPetNameChanged?.((name) => {
+      petName.value = name || "Kirari";
+    });
+  } catch {
+    /* 忽略 */
+  }
+}
+
+async function handlePetNameChange() {
+  const name = petName.value.trim() || "Kirari";
+  petName.value = name;
+  const w = window as unknown as {
+    windowApi?: { setPetName?: (n: string) => Promise<void> };
+  };
+  if (!w.windowApi?.setPetName) return;
+  petNameSaving.value = true;
+  try {
+    await w.windowApi.setPetName(name);
+    flashSuccess();
+  } catch {
+    // 忽略：保存失败时界面已回写
+  } finally {
+    petNameSaving.value = false;
+  }
 }
 
 async function handleAutoLaunchChange() {
@@ -84,7 +123,6 @@ async function handleSelectAvatar(id: string) {
     }
 }
 
-
 const {
     isLoading,
     error,
@@ -113,14 +151,28 @@ const apiEndpointInput = ref("https://api.chatanywhere.tech/v1");
 const tokenMasked = ref("");
 const hasToken = ref(false);
 const newTokenInput = ref("");
-const searchKeyMasked = ref("");
+const searchProvider = ref<"uapis" | "tavily" | "searxng">("uapis");
+const newCredentialInput = ref("");
 const hasSearchKey = ref(false);
-const newSearchKeyInput = ref("");
+const searchKeyMasked = ref("");
+const searchEndpoint = ref("");
+const isSearxng = computed(() => searchProvider.value === "searxng");
+const credentialLabel = computed(() => {
+    if (searchProvider.value === "searxng") return "自建搜索地址（SearXNG）";
+    if (searchProvider.value === "tavily") return "Tavily API Key";
+    return "UAPI 令牌（选填，提升额度）";
+});
+const credentialPlaceholder = computed(() => {
+    if (searchProvider.value === "searxng") return "如 http://localhost:8080";
+    if (searchProvider.value === "tavily") return "选填：填后改用 Tavily 搜索";
+    return "选填：uapis.cn 登录令牌（留空则用匿名免费额度）";
+});
+const credentialType = computed(() => (searchProvider.value === "searxng" ? "text" : "password"));
 const accountName = ref("");
 const saveSuccess = ref(false);
 // 记录打开时从后端/缓存读到的最新值，保存时只发送「发生变更」的字段，
 // 这样用户改一个就只改一个，不必三个一起填。
-const baseProfile = ref<{ model: string; apiEndpoint: string } | null>(null);
+const baseProfile = ref<{ model: string; apiEndpoint: string; searchProvider: string } | null>(null);
 let clearTimer: ReturnType<typeof setTimeout> | undefined;
 
 function applyProfile(p: {
@@ -131,14 +183,18 @@ function applyProfile(p: {
     hasToken: boolean;
     searchKeyMasked?: string;
     hasSearchKey?: boolean;
+    searchEndpoint?: string;
+    searchProvider?: string;
 }) {
     accountName.value = p.username;
     modelInput.value = p.model;
     apiEndpointInput.value = p.apiEndpoint;
     tokenMasked.value = p.tokenMasked;
     hasToken.value = p.hasToken;
+    searchProvider.value = p.searchProvider || "uapis";
     searchKeyMasked.value = p.searchKeyMasked ?? "";
     hasSearchKey.value = p.hasSearchKey === true;
+    searchEndpoint.value = p.searchEndpoint ?? "";
 }
 
 onMounted(async () => {
@@ -155,6 +211,7 @@ onMounted(async () => {
                 baseProfile.value = {
                     model: p.model,
                     apiEndpoint: p.apiEndpoint,
+                    searchProvider: p.searchProvider,
                 };
             });
             await loadProfile();
@@ -165,6 +222,8 @@ onMounted(async () => {
     }
     // 开机自启动状态（与安装向导完成页的勾选共用同一套 Electron 登录项）
     await loadAutoLaunch();
+    // 桌宠备注名
+    await loadPetName();
 });
 
 async function loadProfile() {
@@ -178,6 +237,8 @@ async function loadProfile() {
                 cached.apiEndpoint ?? "https://api.chatanywhere.tech/v1",
             tokenMasked: cached.tokenMasked ?? "",
             hasToken: cached.hasToken === true,
+            searchEndpoint: cached.searchEndpoint ?? "",
+            searchProvider: cached.searchProvider ?? "uapis",
         });
         authed.value = true;
     }
@@ -191,6 +252,7 @@ async function loadProfile() {
         baseProfile.value = {
             model: profile.model,
             apiEndpoint: profile.apiEndpoint,
+            searchProvider: profile.searchProvider,
         };
         authed.value = true;
     } catch {
@@ -220,9 +282,11 @@ function handleLogout() {
     newTokenInput.value = "";
     hasToken.value = false;
     tokenMasked.value = "";
-    newSearchKeyInput.value = "";
+    newCredentialInput.value = "";
     hasSearchKey.value = false;
     searchKeyMasked.value = "";
+    searchEndpoint.value = "";
+    searchProvider.value = "uapis";
     baseProfile.value = null;
 }
 
@@ -243,12 +307,26 @@ async function handleSave() {
     }
     // 仅发送变更过的字段：改一个就只发一个，不必三个一起填。
     // 字段名必须与 config.json / IPC config:set 保持一致（endpoint/model/key/searchKey）。
-    const patch: { model?: string; endpoint?: string; key?: string; searchKey?: string } = {};
+    const patch: {
+        model?: string;
+        endpoint?: string;
+        key?: string;
+        searchKey?: string;
+        searchEndpoint?: string;
+        searchProvider?: string;
+    } = {};
     if (model !== (baseProfile.value?.model ?? "")) patch.model = model;
     if (endpoint !== (baseProfile.value?.apiEndpoint ?? ""))
         patch.endpoint = endpoint;
     if (newTokenInput.value.trim()) patch.key = newTokenInput.value.trim();
-    if (newSearchKeyInput.value.trim()) patch.searchKey = newSearchKeyInput.value.trim();
+    // 搜索提供商切换
+    if (searchProvider.value !== (baseProfile.value?.searchProvider ?? "uapis"))
+        patch.searchProvider = searchProvider.value;
+    // 动态凭证：按当前 provider 路由到对应字段
+    if (newCredentialInput.value.trim()) {
+        if (searchProvider.value === "searxng") patch.searchEndpoint = newCredentialInput.value.trim();
+        else patch.searchKey = newCredentialInput.value.trim();
+    }
 
     if (Object.keys(patch).length === 0) {
         // 没有任何变更，无需请求
@@ -267,12 +345,15 @@ async function handleSave() {
         hasToken.value = updated.hasToken;
         searchKeyMasked.value = updated.searchKeyMasked;
         hasSearchKey.value = updated.hasSearchKey;
+        searchEndpoint.value = updated.searchEndpoint;
+        if (updated.searchProvider) searchProvider.value = updated.searchProvider;
         baseProfile.value = {
             model: updated.model,
             apiEndpoint: updated.apiEndpoint,
+            searchProvider: updated.searchProvider || "uapis",
         };
         newTokenInput.value = "";
-        newSearchKeyInput.value = "";
+        newCredentialInput.value = "";
         flashSuccess();
     } catch {
         // error 已由 composable 写入
@@ -310,6 +391,25 @@ async function handleSave() {
                 </div>
             </section>
 
+            <!-- 桌宠备注名 -->
+            <section class="general-section">
+                <h3>桌宠备注名</h3>
+                <p class="hint">设置后，聊天窗口顶部会显示这个名字（默认 Kirari）。</p>
+                <div class="pet-name-row">
+                    <input
+                        id="petName"
+                        v-model="petName"
+                        type="text"
+                        autocomplete="off"
+                        placeholder="例如：绮莉、Kirari、小K…"
+                        maxlength="16"
+                        :disabled="petNameSaving"
+                        @change="handlePetNameChange"
+                        @keyup.enter="handlePetNameChange"
+                    />
+                </div>
+            </section>
+
             <!-- 通用：开机自启动 -->
             <section class="general-section">
                 <h3>通用</h3>
@@ -322,9 +422,7 @@ async function handleSave() {
                     />
                     <span>开机自动启动</span>
                 </label>
-                <p class="hint">
-                    勾选后，系统登录时会自动启动 Kirari绮莉。也可在安装向导的最后一页勾选。
-                </p>
+                <p class="hint">勾选后，系统登录时会自动启动 Kirari绮莉。</p>
             </section>
 
             <!-- 桌宠形象管理 -->
@@ -343,7 +441,9 @@ async function handleSave() {
                             class="avatar-select"
                             :value="avatarStore.current.id"
                             @change="
-                                handleSelectAvatar(($event.target as HTMLSelectElement).value)
+                                handleSelectAvatar(
+                                    ($event.target as HTMLSelectElement).value,
+                                )
                             "
                         >
                             <option
@@ -388,7 +488,9 @@ async function handleSave() {
                             stroke-linejoin="round"
                         >
                             <path d="M12 15V8m0 0L8.5 11.5M12 8l3.5 3.5" />
-                            <path d="M20 16.5A4.5 4.5 0 0 0 17.5 8h-1.3A6 6 0 1 0 6 14.6" />
+                            <path
+                                d="M20 16.5A4.5 4.5 0 0 0 17.5 8h-1.3A6 6 0 1 0 6 14.6"
+                            />
                         </svg>
                         <span>{{ isZipping ? "解压中…" : "上传压缩包" }}</span>
                     </button>
@@ -407,16 +509,15 @@ async function handleSave() {
                             stroke-linecap="round"
                             stroke-linejoin="round"
                         >
-                            <path d="M3 7a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .8.4L10.5 7H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                            <path
+                                d="M3 7a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .8.4L10.5 7H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+                            />
                         </svg>
                         <span>打开形象文件夹</span>
                     </button>
                 </div>
 
-                <div
-                    v-if="zipError || avatarError"
-                    class="error-message"
-                >
+                <div v-if="zipError || avatarError" class="error-message">
                     {{ zipError || avatarError }}
                 </div>
 
@@ -435,7 +536,11 @@ async function handleSave() {
                         <path d="M12 11v5" />
                         <path d="M12 7.5h.01" />
                     </svg>
-                    <span>自定义形象文件夹需包含 <code>frames.json</code> 与对应精灵图。直接丢进「形象文件夹」，或点「上传压缩包」自动解压；打开设置页时会自动刷新列表。</span>
+                    <span
+                        >自定义形象文件夹需包含
+                        <code>frames.json</code>
+                        与对应精灵图。直接丢进「形象文件夹」，或点「上传压缩包」自动解压；打开设置页时会自动刷新列表。</span
+                    >
                 </p>
             </section>
 
@@ -541,28 +646,65 @@ async function handleSave() {
                     当前 Token：{{ tokenMasked }}（已加密保存，无需查看明文）
                 </p>
 
-                <label for="newSearchKey">搜索 / 新闻 API Key（Tavily）</label>
+                <label>联网搜索提供商</label>
+                <div class="provider-row">
+                    <label class="provider-option">
+                        <input type="radio" value="uapis" v-model="searchProvider" />
+                        <span>UAPI（内置免费）</span>
+                    </label>
+                    <label class="provider-option">
+                        <input type="radio" value="tavily" v-model="searchProvider" />
+                        <span>Tavily</span>
+                    </label>
+                    <label class="provider-option">
+                        <input type="radio" value="searxng" v-model="searchProvider" />
+                        <span>SearXNG（自建）</span>
+                    </label>
+                </div>
+                <p class="hint">
+                    默认使用内置 UAPI 免费搜索，<strong>无需任何配置即可联网</strong>；选
+                    Tavily 需填其 API Key；选 SearXNG 需填自建实例地址（隐私可控、零成本）。
+                </p>
+
+                <label for="searchCredential">{{ credentialLabel }}</label>
                 <input
-                    id="newSearchKey"
-                    v-model="newSearchKeyInput"
-                    type="password"
+                    id="searchCredential"
+                    v-model="newCredentialInput"
+                    :type="credentialType"
                     autocomplete="new-password"
-                    placeholder="选填：填后可联网搜索/查新闻（留空则不修改）"
+                    :placeholder="credentialPlaceholder"
                     :disabled="isLoading"
                 />
-                <p class="hint">
-                    用于「联网搜索 / 新闻」工具。天气与时间无需 Key；不填则桌宠只能回答天气、时间。
-                    在
+                <p v-if="!isSearxng && hasSearchKey" class="hint">
+                    当前 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
+                </p>
+                <p v-if="isSearxng && searchEndpoint" class="hint">
+                    当前地址：{{ searchEndpoint }}
+                </p>
+                <p v-if="searchProvider === 'uapis'" class="hint">
+                    免 key 即可用（匿名每月约 375 次）。在
+                    <a
+                        href="#"
+                        class="inline-link"
+                        @click.prevent="openExternal('https://uapis.cn')"
+                        >uapis.cn</a
+                    >
+                    登录获取令牌填到此处，额度可提升至约 875 次/月。
+                </p>
+                <p v-if="searchProvider === 'tavily'" class="hint">
+                    Tavily 结果质量更高，在
                     <a
                         href="#"
                         class="inline-link"
                         @click.prevent="openExternal('https://tavily.com')"
                         >Tavily</a
                     >
-                    免费领取（有免费额度，专为 LLM 优化）。
+                    免费领取 Key。
                 </p>
-                <p v-if="hasSearchKey" class="hint">
-                    当前搜索 Key：{{ searchKeyMasked }}（已加密保存，无需查看明文）
+                <p v-if="searchProvider === 'searxng'" class="hint">
+                    填后改用你自建的 SearXNG 实例（隐私可控、零成本）。需开启 JSON API：
+                    <code>settings.yml</code> 中
+                    <code>search.formats: [json]</code> 且 <code>limiter: false</code>。
                 </p>
 
                 <button
@@ -669,6 +811,27 @@ button:disabled {
 .hint {
     color: var(--pet-muted);
     font-size: 13px;
+}
+.provider-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+.provider-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--pet-ink);
+    cursor: pointer;
+}
+.provider-option input {
+    width: auto;
+    flex: 0 0 auto;
+    margin: 0;
+    accent-color: var(--pet-accent, #7c3aed);
 }
 .free-key-hint {
     line-height: 1.5;
@@ -810,8 +973,13 @@ button:disabled {
     color: var(--pet-ink);
     font-size: 14px;
     font-weight: 600;
-    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui,
-        -apple-system, sans-serif;
+    font-family:
+        "PingFang SC",
+        "Microsoft YaHei",
+        "Segoe UI",
+        system-ui,
+        -apple-system,
+        sans-serif;
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
@@ -849,8 +1017,13 @@ button:disabled {
     font-weight: 700;
     letter-spacing: 0.3px;
     white-space: nowrap;
-    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui,
-        -apple-system, sans-serif;
+    font-family:
+        "PingFang SC",
+        "Microsoft YaHei",
+        "Segoe UI",
+        system-ui,
+        -apple-system,
+        sans-serif;
     cursor: pointer;
     transition:
         transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
@@ -940,5 +1113,15 @@ code {
     border-radius: 6px;
     font-size: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.pet-name-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.pet-name-row input {
+    max-width: 260px;
 }
 </style>

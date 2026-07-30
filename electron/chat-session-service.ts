@@ -14,6 +14,8 @@ export type ChatMessage = {
     timestamp: number;
     // 可选情绪标签（仅 pet 消息可能携带）。无则省略，前端退化为直接说话。
     emotion?: PetEmotion | null;
+    // 关联图片（用户发送的图片、或 AI 返回的图片），URL 或 base64 data URL。
+    images?: string[];
 };
 
 export type ChatStateSnapshot = {
@@ -93,9 +95,12 @@ export class ChatSessionService {
         return this.cloneState();
     }
 
-    async sendMessage(content: string) {
-        const text = content.trim();
-        if (!text) {
+    async sendMessage(payload: { text: string; images?: string[] }) {
+        const text = (payload.text || "").trim();
+        const images = Array.isArray(payload.images)
+            ? payload.images.filter((x) => typeof x === "string" && x.trim())
+            : [];
+        if (!text && images.length === 0) {
             return false;
         }
 
@@ -104,14 +109,15 @@ export class ChatSessionService {
             return false;
         }
 
-        const payload = JSON.stringify({
+        const msgPayload = JSON.stringify({
             userid: this.userid,
             content: text,
+            images,
             session_id: this.state.sessionId,
         });
 
         try {
-            this.socket.send(payload);
+            this.socket.send(msgPayload);
         } catch {
             this.setConnectionError("发送失败");
             return false;
@@ -119,7 +125,7 @@ export class ChatSessionService {
 
         this.state.waitingForReply = true;
         this.state.lastError = "";
-        this.state.messages.push(this.createMessage("user", text));
+        this.state.messages.push(this.createMessage("user", text, undefined, images));
         this.persist();
         this.emit();
         return true;
@@ -229,7 +235,10 @@ export class ChatSessionService {
                 const rawEmotion = payload.emotion;
                 const emotion: PetEmotion | null | undefined =
                     rawEmotion === "happy" || rawEmotion === "wave" ? rawEmotion : undefined;
-                this.state.messages.push(this.createMessage("pet", speech, emotion));
+                const images = Array.isArray(payload.images)
+                    ? payload.images.filter((x) => typeof x === "string" && x.trim())
+                    : [];
+                this.state.messages.push(this.createMessage("pet", speech, emotion, images));
                 this.state.waitingForReply = false;
                 this.state.bubbleMessage = speech.length <= 10 ? speech : LONG_REPLY_PROMPT;
                 this.state.bubbleInteractive = speech.length > 10;
@@ -306,13 +315,14 @@ export class ChatSessionService {
         return !!this.socket && (this.socket.readyState === 0 || this.socket.readyState === 1);
     }
 
-    private createMessage(author: ChatAuthor, text: string, emotion?: PetEmotion | null): ChatMessage {
+    private createMessage(author: ChatAuthor, text: string, emotion?: PetEmotion | null, images?: string[]): ChatMessage {
         return {
             id: crypto.randomUUID(),
             author,
             text,
             timestamp: Date.now(),
             emotion: emotion ?? null,
+            images: images && images.length ? images : undefined,
         };
     }
 
