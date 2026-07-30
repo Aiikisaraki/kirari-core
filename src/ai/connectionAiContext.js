@@ -19,7 +19,9 @@ async function createConnectionAiContext(userid) {
   return {
     userid,
     model: tokenConfig.model,
+    searchProvider: tokenConfig.search_provider || 'uapis',
     searchKey: tokenConfig.search_key || '',
+    searchEndpoint: tokenConfig.search_endpoint || '',
     openai: new OpenAI({
       apiKey: tokenConfig.token,
       baseURL: tokenConfig.api_endpoint,

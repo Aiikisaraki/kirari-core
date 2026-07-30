@@ -225,7 +225,7 @@ function setupHttpRoutes(app) {
   app.put("/api/profile", async (req, res) => {
     const auth = resolveAuthUid(req);
     if (!auth) return res.status(401).json({ message: "未认证" });
-    const { model, api_endpoint, token, search_key } = req.body || {};
+    const { model, api_endpoint, token, search_key, search_endpoint, search_provider } = req.body || {};
     const patch = {};
     if (model !== undefined) {
       if (typeof model !== "string" || !model.trim() || model.length > 120)
@@ -246,6 +246,18 @@ function setupHttpRoutes(app) {
       if (typeof search_key !== "string" || !search_key.trim())
         return res.status(400).json({ message: "搜索 API Key 不能为空" });
       patch.search_key = search_key.trim();
+    }
+    if (search_endpoint !== undefined) {
+      if (typeof search_endpoint !== "string" || !search_endpoint.trim())
+        return res.status(400).json({ message: "搜索服务地址不能为空" });
+      // 归一化为不含末尾斜杠的 base URL
+      patch.search_endpoint = search_endpoint.trim().replace(/\/+$/, '');
+    }
+    if (search_provider !== undefined) {
+      const allowed = ['uapis', 'tavily', 'searxng'];
+      if (typeof search_provider !== 'string' || !allowed.includes(search_provider))
+        return res.status(400).json({ message: "搜索提供商无效" });
+      patch.search_provider = search_provider;
     }
     await dbStorage.setProfile(auth.uid, patch);
     const profile = await dbStorage.getProfile(auth.uid);
