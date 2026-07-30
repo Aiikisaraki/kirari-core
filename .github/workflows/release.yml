@@ -38,6 +38,27 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 关键：官方皮肤精灵图走 Git LFS，必须拉取真实二进制。否则安装包里只是 LFS 指针文本，
+          # 运行时加载不出任何皮肤形象（历史踩坑：CI 发出的安装包找不到皮肤）。
+          lfs: true
+
+      # 防御性校验：确保 official-avatars 下是真实图片而非 LFS 指针残留。
+      # 若 CI 没拉到 LFS 对象，这里直接让构建失败，避免再次发出"无皮肤"的安装包。
+      - name: Verify official-avatars are real (not LFS pointers)
+        shell: bash
+        run: |
+          echo "Checking resources/official-avatars for LFS pointer stubs..."
+          bad=0
+          for f in $(find resources/official-avatars -type f \( -name '*.png' -o -name '*.webp' -o -name '*.gif' \)); do
+            if head -c 64 "$f" | grep -q "git-lfs"; then
+              echo "LFS POINTER DETECTED: $f"; bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "ERROR: Git LFS files were not pulled. Installer would ship broken avatars."
+            exit 1
+          fi
+          echo "All official-avatars assets are real binaries."
 
       - name: Checkout backend (kirari-core)
         uses: actions/checkout@v4
