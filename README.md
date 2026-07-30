@@ -25,14 +25,6 @@ rm -rf release
 npm run dist         # vite build + electron-builder，产出 release/*.exe
 ```
 
-## 发布（GitHub Actions 自动构建）
-
-- 推送 tag `vX.Y.Z` → 自动打包并发布该版本 Release（覆盖同名旧 Release）。
-- 推送到 `main` 且 `package.json` 的 `version` 变化 → 自动检测版本号并发布一次。
-- 也可在 Actions 页面手动触发，支持指定版本与覆盖同名 Release。
-
-构建时工作流会自动拉取 `kirari-core` 作为后端，打包进安装包。
-
 ## 仓库结构
 
 - 本仓库为**前端/客户端**（Electron 应用）。
