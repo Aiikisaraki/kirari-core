@@ -100,7 +100,8 @@ FunctionEnd
 # 通过 electron-builder 预留的 customFinishPage 钩子（替代默认 MUI_PAGE_FINISH）。
 # - MUI_FINISHPAGE_RUN + StartApp：保留「安装完成后运行」勾选（默认勾选）。
 # - MUI_FINISHPAGE_SHOWREADME 复用为「开机自动启动 Kirari绮莉」复选框，
-#   默认【未勾选】（满足用户要求：安装向导默认不开机启动）。
+#   配合 MUI_FINISHPAGE_SHOWREADME_NOTCHECKED 使默认【未勾选】
+#   （满足用户要求：安装向导默认不开机启动；MUI 该框默认是勾选的，必须显式 NOTCHECKED）。
 # - 勾选时触发 AutostartOnFinish：以 --set-auto-launch 一次性拉起本程序，
 #   由主进程写入登录项后自行退出。与设置界面勾选共用同一套 Electron 登录项机制，
 #   保证安装期勾选与设置界面勾选写入的是同一条登录项。
@@ -112,6 +113,8 @@ FunctionEnd
   !define MUI_FINISHPAGE_SHOWREADME
   !define MUI_FINISHPAGE_SHOWREADME_TEXT "开机自动启动 Kirari绮莉"
   !define MUI_FINISHPAGE_SHOWREADME_FUNCTION "AutostartOnFinish"
+  # MUI 的 SHOWREADME 复选框默认【勾选】；必须用 NOTCHECKED 才能默认不勾选
+  !define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
   !insertmacro MUI_PAGE_FINISH
 
   Function StartApp
