@@ -55,48 +55,62 @@ function setupWebSocket(server, options = {}) {
     wss.on("connection", (ws, req) => {
         // authUid 已由 verifyClient 校验并写入 req；此处仅作兜底（要求令牌时必为已认证 uid）。
         const authUid = (req && req.authUid) || BUILTIN_UID;
+        // 客户端真实 IP（用于位置兜底：内网/回环时回退到服务端公网 IP）
+        const clientIp = (req && req.socket && req.socket.remoteAddress) || '';
         console.log(`✅ 已认证客户端连接 (uid=${authUid})`);
         let aiContext = null;
 
         ws.on("message", async (data) => {
             try {
-                const message = JSON.parse(data.toString());
-                const userMessage = message.content?.trim();
+            const message = JSON.parse(data.toString());
+            const userMessage = (typeof message.content === 'string' ? message.content : '').trim();
+            const images = Array.isArray(message.images)
+              ? message.images.filter((x) => typeof x === 'string' && x.trim())
+              : [];
 
-                if (!userMessage) {
-                    return ws.send(
-                        JSON.stringify({
-                            type: "error",
-                            code: "INVALID_MESSAGE",
-                            message: "消息不能为空",
-                        }),
-                    );
-                }
-
-                // 身份由握手令牌决定（authUid），忽略客户端自报 userid，防止冒用/切换用户。
-                const userid = authUid;
-
-                if (!aiContext) {
-                    aiContext = await createConnectionAiContext(userid);
-                }
-
-                console.log(`💬 收到消息: "${userMessage}"`);
-
-                const sessionId = message.session_id || `session_${Date.now()}`;
-                await sessionManager.initSession(sessionId);
-                await sessionManager.saveMessage(
-                    sessionId,
-                    "user",
-                    userMessage,
+            if (!userMessage && images.length === 0) {
+                return ws.send(
+                    JSON.stringify({
+                        type: "error",
+                        code: "INVALID_MESSAGE",
+                        message: "消息不能为空",
+                    }),
                 );
+            }
 
-                let reply;
-                try {
-                    reply = await aiReplyService.getReply({
-                        aiContext,
-                        content: userMessage,
-                        sessionId,
-                    });
+            // 身份由握手令牌决定（authUid），忽略客户端自报 userid，防止冒用/切换用户。
+            const userid = authUid;
+
+            if (!aiContext) {
+                aiContext = await createConnectionAiContext(userid);
+            }
+
+            console.log(`💬 收到消息: "${userMessage || '[图片]'}"（图片 ${images.length} 张）`);
+
+            const sessionId = message.session_id || `session_${Date.now()}`;
+            await sessionManager.initSession(sessionId);
+            // 存储多模态消息：有图片时 content 存为 [text, image_url] 数组，否则存纯文本。
+            const storedContent = images.length
+              ? [
+                  ...(userMessage ? [{ type: 'text', text: userMessage }] : []),
+                  ...images.map((img) => ({ type: 'image_url', image_url: { url: img } })),
+                ]
+              : userMessage;
+            await sessionManager.saveMessage(
+                sessionId,
+                "user",
+                storedContent,
+            );
+
+            let reply;
+            try {
+                reply = await aiReplyService.getReply({
+                    aiContext,
+                    content: userMessage,
+                    images,
+                    sessionId,
+                    clientIp,
+                });
                 } catch (error) {
                     console.error(
                         "⚠️ 模型调用失败，使用兜底回复:",
