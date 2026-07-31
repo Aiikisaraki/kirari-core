@@ -37,13 +37,36 @@ function isPrivateOrLoopback(ip) {
 
 // 通过免费、免 key 的 ipapi.co 查询 IP 归属地（含时区/经纬度）。
 // clientIp 为内网/回环或空时，省略 IP 以查询"服务端自身公网 IP"归属地。
-async function lookupIpLocation(clientIp) {
+// 为避免网络抖动/离线导致请求卡死，内部强制 5 秒超时；支持外部 AbortSignal。
+const _ipCache = new Map(); // key: clientIp or '__server__', value: { ts, data }
+const IP_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
+
+async function lookupIpLocation(clientIp, signal) {
+  const cacheKey = !clientIp || isPrivateOrLoopback(clientIp) ? '__server__' : String(clientIp).trim();
+  const cached = _ipCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < IP_CACHE_TTL_MS) {
+    console.log(`[location] IP lookup cache hit for ${cacheKey === '__server__' ? 'server' : clientIp}`);
+    return cached.data;
+  }
+
   const useServerIp = !clientIp || isPrivateOrLoopback(clientIp);
   const url = useServerIp
     ? 'https://ipapi.co/json/'
     : `https://ipapi.co/json/${encodeURIComponent(clientIp)}/`;
+
+  // 内部超时：即使外部没传 signal，也不允许无限等待
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  const combinedSignal = signal
+    ? AbortSignal.any ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    : controller.signal;
+
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'kirari-pet/1.0' } });
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'kirari-pet/1.0' },
+      signal: combinedSignal,
+    });
+    clearTimeout(timeoutId);
     if (!res.ok) return null;
     const d = await res.json();
     if (!d || d.error) return null;
@@ -51,13 +74,21 @@ async function lookupIpLocation(clientIp) {
     const country = d.country_name || d.country || '';
     const location = city || country;
     if (!location) return null;
-    return {
+    const data = {
       location,
       timezone: d.timezone || null,
       latitude: d.latitude ?? null,
       longitude: d.longitude ?? null,
     };
-  } catch {
+    _ipCache.set(cacheKey, { ts: Date.now(), data });
+    return data;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err && err.name === 'AbortError') {
+      console.warn(`[location] IP lookup timeout/aborted for ${cacheKey === '__server__' ? 'server' : clientIp}`);
+    } else {
+      console.warn(`[location] IP lookup failed for ${cacheKey === '__server__' ? 'server' : clientIp}:`, err?.message || err);
+    }
     return null;
   }
 }
@@ -227,7 +258,7 @@ async function saveUserLocation(userid, location) {
 //   - 已存位置 → 直接用固化坐标（唯一且明确）。
 //   - 问过一次但用户没给 → 公网 IP 归属地兜底（内网/回环取服务端公网 IP），并落库。
 //   - 从未问过 → 标记已问，返回 needAsk（由调用方追问一次）。
-async function resolveForQuery(userid, clientIp, explicitLocation) {
+async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
   if (explicitLocation && explicitLocation.trim()) {
     const name = explicitLocation.trim();
     const g = await geocode(name);
@@ -262,7 +293,8 @@ async function resolveForQuery(userid, clientIp, explicitLocation) {
 
   if (rec && rec.askedAt) {
     // 之前已问过、用户未提供 → 按公网 IP 归属地兜底
-    const ipLoc = await lookupIpLocation(clientIp);
+    console.log(`[location] resolveForQuery: asked before, no location, trying IP lookup (clientIp=${clientIp || 'empty'})`);
+    const ipLoc = await lookupIpLocation(clientIp, signal);
     if (ipLoc && ipLoc.location) {
       await db.setUserLocation(userid, {
         location: ipLoc.location,
@@ -285,8 +317,20 @@ async function resolveForQuery(userid, clientIp, explicitLocation) {
         askedNow: false,
       };
     }
-    // IP 定位也失败：再次请用户补充（IP 失败极少，不会形成稳定循环）
-    return { location: null, latitude: null, longitude: null, timezone: null, displayName: null, source: null, needAsk: true, askedNow: true };
+    // IP 定位也失败：不卡死、不反复追问，用服务器本地时区作为临时兜底回答时间；
+    // 天气需要坐标，这里无法兜底，返回 needAsk 让用户补充城市。
+    console.warn('[location] IP lookup failed, returning fallback local timezone (no coordinates)');
+    const fallbackTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    return {
+      location: '本地',
+      latitude: null,
+      longitude: null,
+      timezone: fallbackTz,
+      displayName: '本地（服务器时区）',
+      source: 'fallback',
+      needAsk: false,
+      askedNow: false,
+    };
   }
 
   // 从未问过 → 先问一次，并打上 askedAt 标记

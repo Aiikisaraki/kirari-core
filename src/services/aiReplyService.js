@@ -194,16 +194,22 @@ function stripNonConversational(messages) {
 async function inferPendingLocationIntent(sessionId) {
   if (!sessionId) return null;
   const msgs = await sessionManager.getRecentMessages(sessionId, 8);
+  console.log(`[aiReply] inferPendingLocationIntent messages (${msgs.length}): ${msgs.map((m) => `${m.role}:${String(m.content || '').slice(0, 20)}`).join(' | ')}`);
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role !== 'assistant') continue;
     for (let j = i - 1; j >= 0; j--) {
       if (msgs[j].role === 'user') {
         const txt = String(msgs[j].content || '').trim();
-        if (txt && txt !== GREETING_MESSAGE) return txt;
+        if (txt && txt !== GREETING_MESSAGE) {
+          console.log(`[aiReply] inferPendingLocationIntent found pending user text: "${txt}"`);
+          return txt;
+        }
       }
     }
+    console.log('[aiReply] inferPendingLocationIntent no user text before latest assistant');
     return null;
   }
+  console.log('[aiReply] inferPendingLocationIntent no assistant message found');
   return null;
 }
 
@@ -216,6 +222,10 @@ async function runDirectToolsByIntents(intents, userid, clientIp, searchCtx) {
     try {
       let args = {};
       if (intentName === 'get_weather') {
+        if (loc.source === 'fallback' || loc.latitude == null || loc.longitude == null) {
+          results.push('我还不知道你具体在哪个城市，告诉我城市名才能帮你查天气哦~');
+          continue;
+        }
         args = {
           location: loc.displayName || loc.location || '',
           latitude: loc.latitude,
@@ -244,12 +254,13 @@ async function maybeContinuePendingLocationQuery(sessionId, userid, clientIp, se
   const pendingText = await inferPendingLocationIntent(sessionId);
   if (!pendingText) return null;
   const intents = detectDirectIntents(pendingText);
+  console.log(`[aiReply] pending intents detected from "${pendingText.slice(0, 40)}": ${intents.join(',') || '(none)'}`);
   if (!intents.length) return null;
   const combined = await runDirectToolsByIntents(intents, userid, clientIp, searchCtx);
   if (!combined) return null;
   console.log(`[aiReply] continue pending intent after location set: ${intents.join(',')} -> ${combined.slice(0, 60)}`);
   return {
-    direct: { speech: combined, emotion: 'happy', raw: combined },
+    direct: { speech: combined, emotion: 'happy', raw: combined, userText: pendingText },
     injected: null,
     needLocation: false,
     setLocation: { location: saved.location, ambiguous: saved.ambiguous },
@@ -401,6 +412,11 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
         if (loc.needAsk) { needLocation = true; break; }
         if (!loc.location && loc.latitude == null && loc.longitude == null) { results.push('缺少地点参数（location）'); continue; }
         if (intent.name === 'get_weather') {
+          // IP 兜底失败时只有时区没有坐标，无法查天气，友好提示用户补充城市
+          if (loc.source === 'fallback' || loc.latitude == null || loc.longitude == null) {
+            results.push('我还不知道你具体在哪个城市，告诉我城市名才能帮你查天气哦~');
+            continue;
+          }
           // 直接下发固化坐标 + 显示名，天气按坐标查询，唯一且明确
           args.location = loc.displayName || loc.location || '';
           args.latitude = loc.latitude;
@@ -634,7 +650,8 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       };
       try {
         console.log('[aiReply] direct tool hit, polishing via LLM...');
-        const polished = await polishToolResult(rawText, aiContext, sessionId, text, controller);
+        const polishUserText = preflight.direct.userText || text;
+        const polished = await polishToolResult(rawText, aiContext, sessionId, polishUserText, controller);
         console.log('[aiReply] polished reply via LLM OK');
         if (confirmSpeech) {
           // 合并句：时间/天气答复 + 位置设置确认（两者均经 LLM 润色）
