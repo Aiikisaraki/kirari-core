@@ -360,6 +360,8 @@ function createSettingsWindow() {
     show: false,
     frame: false,
     transparent: true,
+    // 透明窗口在 Windows 上默认是直角矩形，圆角需显式开启，否则四角会透出半透明直角轮廓。
+    roundedCorners: true,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: { preload: path.resolve(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false },
@@ -960,6 +962,8 @@ function createWindow() {
     show: false,
     skipTaskbar: true,
     transparent: true,
+    // 透明窗口在 Windows 上默认是直角矩形，圆角需显式开启，否则四角会透出半透明直角轮廓。
+    roundedCorners: true,
     width: petWindowSize.width,
     height: petWindowSize.height,
     backgroundColor: "#00000000",
@@ -1026,6 +1030,8 @@ function createChatWindow() {
     show: false,
     frame: false,
     transparent: true,
+    // 透明窗口在 Windows 上默认是直角矩形，圆角需显式开启，否则四角会透出半透明直角轮廓。
+    roundedCorners: true,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
