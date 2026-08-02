@@ -131,6 +131,49 @@ export class ChatSessionService {
         return true;
     }
 
+    // 跨端同步：把「主人在其他协议端（如 QQ）发起的对话」注入到桌宠聊天框。
+    // 仅由 AdapterManager 在 isOwner 时调用；guest 账号保持隔离，不调用本方法。
+    // 语义与桌面自身收发一致：user 消息置 waitingForReply，pet 回复清 waiting 并更新气泡，
+    // 并复用 lastPetSpeech 去重，避免后端重连/重试导致同一句刷屏。
+    injectExternalMessage(msg: {
+        author: ChatAuthor;
+        text: string;
+        images?: string[];
+        emotion?: PetEmotion | null;
+    }): void {
+        const text = (msg.text || "").trim();
+        const images = Array.isArray(msg.images)
+            ? msg.images.filter((x) => typeof x === "string" && x.trim())
+            : [];
+        if (!text && images.length === 0) {
+            return;
+        }
+
+        if (msg.author === "user") {
+            this.state.messages.push(this.createMessage("user", text, undefined, images));
+            this.state.waitingForReply = true;
+            this.state.lastError = "";
+            this.persist();
+            this.emit();
+            return;
+        }
+
+        if (msg.author === "pet") {
+            if (text === this.lastPetSpeech) {
+                return;
+            }
+            this.lastPetSpeech = text;
+            const emotion =
+                msg.emotion === "happy" || msg.emotion === "wave" ? msg.emotion : undefined;
+            this.state.messages.push(this.createMessage("pet", text, emotion, images));
+            this.state.waitingForReply = false;
+            this.state.bubbleMessage = text.length <= 10 ? text : LONG_REPLY_PROMPT;
+            this.state.bubbleInteractive = text.length > 10;
+            this.persist();
+            this.emit();
+        }
+    }
+
     dispose() {
         this.disposed = true;
         this.clearReconnectTimer();
@@ -236,7 +279,7 @@ export class ChatSessionService {
                 const emotion: PetEmotion | null | undefined =
                     rawEmotion === "happy" || rawEmotion === "wave" ? rawEmotion : undefined;
                 const images = Array.isArray(payload.images)
-                    ? payload.images.filter((x) => typeof x === "string" && x.trim())
+                    ? payload.images.filter((x: string) => typeof x === "string" && x.trim())
                     : [];
                 this.state.messages.push(this.createMessage("pet", speech, emotion, images));
                 this.state.waitingForReply = false;

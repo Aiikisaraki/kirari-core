@@ -4,6 +4,7 @@ import { useApiToken } from "../../composables/useApiToken";
 import { useThemeStore, THEMES } from "../../stores/theme";
 import { useAvatarStore } from "../../stores/avatar";
 import WindowChrome from "../common/WindowChrome.vue";
+import BotAdapterSettings from "./BotAdapterSettings.vue";
 
 const avatarStore = useAvatarStore();
 const isZipping = ref(false);
@@ -718,6 +719,8 @@ async function handleSave() {
                 <div v-if="saveSuccess" class="success-message">保存成功</div>
                 <div v-if="error" class="error-message">{{ error }}</div>
             </section>
+
+            <BotAdapterSettings />
         </main>
     </div>
 </template>

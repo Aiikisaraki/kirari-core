@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { AdapterStatus } from "./adapter/types";
 
 type SettingsRequest = {
   method: "GET" | "POST" | "PUT";
@@ -68,5 +69,21 @@ contextBridge.exposeInMainWorld("windowApi", {
   setPetName: (name: string): Promise<void> => ipcRenderer.invoke("pet-name:set", name),
   onPetNameChanged: (cb: (name: string) => void): void => {
     ipcRenderer.on("pet-name:changed", (_event, name: string) => cb(name));
+  },
+});
+
+// 机器人适配器（OneBot / QQ 官方机器人）管理接口
+contextBridge.exposeInMainWorld("botAdapterApi", {
+  list: (): Promise<AdapterStatus[]> => ipcRenderer.invoke("adapter:list"),
+  add: (cfg: unknown): Promise<AdapterStatus> => ipcRenderer.invoke("adapter:add", cfg),
+  update: (id: string, patch: unknown): Promise<AdapterStatus> =>
+    ipcRenderer.invoke("adapter:update", id, patch),
+  remove: (id: string): Promise<void> => ipcRenderer.invoke("adapter:remove", id),
+  connect: (id: string): Promise<void> => ipcRenderer.invoke("adapter:connect", id),
+  disconnect: (id: string): Promise<void> => ipcRenderer.invoke("adapter:disconnect", id),
+  setOwner: (adapterId: string, accountKey: string): Promise<void> =>
+    ipcRenderer.invoke("adapter:set-owner", adapterId, accountKey),
+  onStatus: (cb: (status: AdapterStatus[]) => void): void => {
+    ipcRenderer.on("adapter:status", (_event, status: AdapterStatus[]) => cb(status));
   },
 });

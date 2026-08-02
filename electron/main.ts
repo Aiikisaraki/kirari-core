@@ -12,6 +12,8 @@ protocol.registerSchemesAsPrivileged([
 ]);
 import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
+import { AdapterManager } from "./adapter/adapter-manager";
+import type { AdapterConfig, AdapterStatus } from "./adapter/types";
 import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort } from "./backend-launcher";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
@@ -70,6 +72,8 @@ type DeployConfig = {
   petName?: string;
   // 桌宠窗口位置（全局坐标）。由主进程在拖动结束/重置时持久化，启动时优先应用。
   window?: { x: number; y: number };
+  // 机器人适配器配置（OneBot / QQ 官方机器人）。连接信息含令牌，仅存于本机 userData 配置。
+  adapters?: AdapterConfig[];
 };
 const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 const DEFAULT_LOCAL = {
@@ -78,6 +82,7 @@ const DEFAULT_LOCAL = {
   builtinToken: DEFAULT_BUILTIN_TOKEN,
   theme: DEFAULT_THEME,
   avatar: DEFAULT_AVATAR,
+  adapters: [],
 };
 
 function loadClientConfig(): DeployConfig {
@@ -102,6 +107,11 @@ function loadClientConfig(): DeployConfig {
         ),
         customAvatars: Array.isArray(raw.customAvatars) ? raw.customAvatars : [],
         petName: typeof raw.petName === "string" && raw.petName.trim() ? raw.petName.trim() : "Kirari",
+        adapters: Array.isArray(raw.adapters)
+          ? raw.adapters.filter(
+              (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
+            )
+          : [],
         // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
         window:
           raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
@@ -300,6 +310,7 @@ let settingsWindow: PetWindow | null = null;
 let petWindow: PetWindow | null = null;
 let chatWindow: PetWindow | null = null;
 let tray: PetTray | null = null;
+let adapterManager: AdapterManager | null = null;
 let dragState: {
   windowId: number;
   windowStart: { x: number; y: number };
@@ -816,6 +827,13 @@ function broadcastChatState(state: ChatStateSnapshot) {
   });
 }
 
+function broadcastAdapterStatus() {
+  const status: AdapterStatus[] = adapterManager ? adapterManager.list() : [];
+  getAllLiveWindows().forEach((win) => {
+    win.webContents.send("adapter:status", status);
+  });
+}
+
 function ensureChatSessionService() {
   const uid = resolveChatUserid();
   if (!chatSessionService || chatServiceUserid !== uid) {
@@ -1075,6 +1093,33 @@ ipcMain.handle("chat:get-state", () => {
   return ensureChatSessionService().getSnapshot();
 });
 
+// ---- 机器人适配器管理（OneBot / QQ 官方机器人）----
+ipcMain.handle("adapter:list", () => (adapterManager ? adapterManager.list() : []));
+ipcMain.handle("adapter:add", (_event, cfg) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.add(cfg);
+});
+ipcMain.handle("adapter:update", (_event, id: string, patch) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.update(id, patch);
+});
+ipcMain.handle("adapter:remove", (_event, id: string) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.remove(id);
+});
+ipcMain.handle("adapter:connect", (_event, id: string) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.connect(id);
+});
+ipcMain.handle("adapter:disconnect", (_event, id: string) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.disconnect(id);
+});
+ipcMain.handle("adapter:set-owner", (_event, adapterId: string, accountKey: string) => {
+  if (!adapterManager) throw new Error("适配器管理器未初始化");
+  return adapterManager.setOwner(adapterId, accountKey);
+});
+
 ipcMain.on("chat:send-message", (_event, payload: { text: string; images?: string[] }) => {
   void ensureChatSessionService().sendMessage(payload);
 });
@@ -1290,6 +1335,34 @@ app.whenReady().then(async () => {
     backendHttpUrl = `http://127.0.0.1:${p}`;
     backendHealthUrl = `http://127.0.0.1:${p}/health`;
     console.log(`[backend] 本地模式使用动态端口 ${p} 连接后端`);
+  }
+
+  // 机器人适配器：初始化管理器（连接已启用的适配器 + 后端 WS）。
+  // owner 复用桌面 session、guest 独立 scope，均由 AdapterManager 内部路由。
+  try {
+    const token =
+      clientConfig.mode === "local"
+        ? clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN
+        : settingsSessionToken ?? "";
+    adapterManager = new AdapterManager({
+      backendUrl,
+      token,
+      getDesktopSessionId: () => ensureChatSessionService().getSnapshot().sessionId,
+      getAdaptersConfig: () => clientConfig.adapters || [],
+      saveAdaptersConfig: (adapters) => {
+        clientConfig.adapters = adapters;
+        saveClientConfig();
+      },
+      onStatusChange: broadcastAdapterStatus,
+      // 主人在其他协议端（QQ 等）的对话同步进桌宠聊天框
+      pushOwnerMessage: (m) => {
+        const svc = ensureChatSessionService();
+        if (svc) svc.injectExternalMessage(m);
+      },
+    });
+    adapterManager.init();
+  } catch (e) {
+    console.error("[adapter] 初始化失败:", e);
   }
 
   // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时同步到后端并广播前端。

@@ -1,0 +1,229 @@
+import { BotAdapter } from "./bot-adapter";
+import { OneBotAdapter } from "./onebot-adapter";
+import { BotBackendClient } from "./bot-backend-client";
+import type { AdapterConfig, AdapterStatus, BotIncoming, PetBackendResponse } from "./types";
+
+// 主人在其他协议端（如 QQ）发起的对话，需要同步进桌宠聊天框。
+// 由 main.ts 注入一个回调，内部转发到 ChatSessionService.injectExternalMessage。
+export type OwnerSyncMessage = {
+  author: "user" | "pet";
+  text: string;
+  images?: string[];
+  emotion?: "happy" | "wave" | null;
+};
+
+export interface AdapterManagerOpts {
+  backendUrl: string;
+  token: string;
+  getDesktopSessionId: () => string;
+  getAdaptersConfig: () => AdapterConfig[];
+  saveAdaptersConfig: (adapters: AdapterConfig[]) => void;
+  onStatusChange: () => void;
+  // 把主人的跨端消息/回复同步到桌宠聊天框；可选（未注入则不同步）。
+  pushOwnerMessage?: (msg: OwnerSyncMessage) => void;
+}
+
+// 管理多个协议适配器实例：持久化配置、按 (adapter, 发送者) 解析 locationScope，
+// 把入站消息经 BotBackendClient 发给后端，再按 session 把 pet_response 路由回对应适配器。
+export class AdapterManager {
+  private opts: AdapterManagerOpts;
+  private backend: BotBackendClient;
+  private instances = new Map<string, BotAdapter>();
+  private knownAccounts = new Map<string, Set<string>>();
+  private inited = false;
+
+  constructor(opts: AdapterManagerOpts) {
+    this.opts = opts;
+    this.backend = new BotBackendClient(opts.backendUrl, opts.token);
+  }
+
+  init(): void {
+    if (this.inited) return;
+    this.inited = true;
+    const configs = this.opts.getAdaptersConfig();
+    for (const cfg of configs) {
+      const inst = this.createInstance(cfg);
+      if (!inst) continue;
+      this.instances.set(cfg.id, inst);
+      this.knownAccounts.set(cfg.id, new Set());
+      inst.on("message", (msg: BotIncoming) => this.handleIncoming(inst, msg));
+      if (cfg.enabled) inst.connect();
+    }
+    this.backend.connect();
+  }
+
+  private createInstance(cfg: AdapterConfig): BotAdapter | null {
+    if (cfg.type === "onebot") return new OneBotAdapter(cfg);
+    // QQ 官方机器人第二阶段实现
+    console.warn(`[adapter] 暂不支持的适配器类型: ${cfg.type}`);
+    return null;
+  }
+
+  list(): AdapterStatus[] {
+    return this.opts.getAdaptersConfig().map((cfg) => {
+      const inst = this.instances.get(cfg.id);
+      return {
+        id: cfg.id,
+        name: cfg.name,
+        type: cfg.type,
+        enabled: cfg.enabled,
+        connected: inst ? inst.isConnected : false,
+        lastError: inst ? inst.error : "",
+        ownerAccount: cfg.ownerAccount,
+        knownAccounts: [...(this.knownAccounts.get(cfg.id) || [])],
+        config: cfg.config,
+      };
+    });
+  }
+
+  async add(cfg: Omit<AdapterConfig, "id"> & { id?: string }): Promise<AdapterStatus> {
+    const id = cfg.id || `adp_${Date.now().toString(36)}`;
+    const full: AdapterConfig = { ...(cfg as AdapterConfig), id };
+    const configs = this.opts.getAdaptersConfig().slice();
+    configs.push(full);
+    this.opts.saveAdaptersConfig(configs);
+
+    const inst = this.createInstance(full);
+    if (inst) {
+      this.instances.set(id, inst);
+      this.knownAccounts.set(id, new Set());
+      inst.on("message", (msg: BotIncoming) => this.handleIncoming(inst, msg));
+      if (full.enabled) inst.connect();
+    }
+    this.emitStatus();
+    return this.list().find((a) => a.id === id)!;
+  }
+
+  async update(id: string, patch: Partial<AdapterConfig>): Promise<AdapterStatus> {
+    const configs = this.opts.getAdaptersConfig().slice();
+    const idx = configs.findIndex((c) => c.id === id);
+    if (idx < 0) throw new Error("适配器不存在");
+    const full: AdapterConfig = { ...configs[idx], ...patch, config: { ...configs[idx].config, ...(patch.config || {}) } };
+    configs[idx] = full;
+    this.opts.saveAdaptersConfig(configs);
+
+    const inst = this.instances.get(id);
+    if (inst) {
+      inst.updateConfig(full);
+      // 连接相关字段变化 → 重连
+      if (patch.enabled !== undefined || patch.config !== undefined || patch.type !== undefined) {
+        inst.disconnect();
+        if (full.enabled) inst.connect();
+      }
+    }
+    this.emitStatus();
+    return this.list().find((a) => a.id === id)!;
+  }
+
+  async remove(id: string): Promise<void> {
+    const inst = this.instances.get(id);
+    if (inst) {
+      inst.dispose();
+      this.instances.delete(id);
+      this.knownAccounts.delete(id);
+    }
+    const configs = this.opts.getAdaptersConfig().filter((c) => c.id !== id);
+    this.opts.saveAdaptersConfig(configs);
+    this.emitStatus();
+  }
+
+  async connect(id: string): Promise<void> {
+    const inst = this.instances.get(id);
+    if (inst) inst.connect();
+    // 同步 enabled 标志
+    const configs = this.opts.getAdaptersConfig().slice();
+    const c = configs.find((x) => x.id === id);
+    if (c && !c.enabled) {
+      c.enabled = true;
+      this.opts.saveAdaptersConfig(configs);
+    }
+    this.emitStatus();
+  }
+
+  async disconnect(id: string): Promise<void> {
+    const inst = this.instances.get(id);
+    if (inst) inst.disconnect();
+    const configs = this.opts.getAdaptersConfig().slice();
+    const c = configs.find((x) => x.id === id);
+    if (c && c.enabled) {
+      c.enabled = false;
+      this.opts.saveAdaptersConfig(configs);
+    }
+    this.emitStatus();
+  }
+
+  // 设置某账号为主人：之后该账号复用桌面 session + scope=null（共享登录 uid 的记忆）。
+  // accountKey 为空表示取消主人。
+  setOwner(adapterId: string, accountKey: string): void {
+    const configs = this.opts.getAdaptersConfig().slice();
+    const c = configs.find((x) => x.id === adapterId);
+    if (!c) throw new Error("适配器不存在");
+    c.ownerAccount = accountKey || null;
+    this.opts.saveAdaptersConfig(configs);
+    const inst = this.instances.get(adapterId);
+    if (inst) inst.setOwner(accountKey || null);
+    this.emitStatus();
+  }
+
+  private handleIncoming(adapter: BotAdapter, msg: BotIncoming): void {
+    console.log(`[adapter] handleIncoming adapter=${adapter.name} sender=${msg.senderId} text="${msg.text}"`);
+    const accts = this.knownAccounts.get(adapter.id) || new Set<string>();
+    const isNew = !accts.has(msg.senderId);
+    accts.add(msg.senderId);
+    this.knownAccounts.set(adapter.id, accts);
+
+    // owner → scope=null（共享登录 uid）；guest → 独立 scope
+    const isOwner = adapter.ownerAccount != null && msg.senderId === adapter.ownerAccount;
+    const scope = isOwner ? null : `${adapter.id}::${msg.senderId}`;
+    const sessionId = isOwner ? this.opts.getDesktopSessionId() : `bot:${adapter.id}:${msg.conversationKey}`;
+    console.log(`[adapter] isOwner=${isOwner} scope=${scope} session=${sessionId}`);
+
+    // 主人账号：先把用户在协议端的输入同步到桌宠聊天框（与桌面自身发消息表现一致）。
+    if (isOwner && this.opts.pushOwnerMessage) {
+      this.opts.pushOwnerMessage({
+        author: "user",
+        text: msg.text,
+        images: msg.images,
+      });
+    }
+
+    const onResp = (resp: PetBackendResponse) => {
+      this.backend.offResponse(sessionId);
+      adapter
+        .sendMessage(msg, { text: resp.speech, images: resp.images || [] })
+        .catch((e) => console.error(`[adapter] 回发失败 ${adapter.name}:`, e));
+      // 主人账号：把宠物回复同步进桌宠聊天框，实现跨端对话可见。
+      if (isOwner && this.opts.pushOwnerMessage) {
+        this.opts.pushOwnerMessage({
+          author: "pet",
+          text: resp.speech,
+          images: resp.images || [],
+          emotion: resp.emotion === "happy" || resp.emotion === "wave" ? resp.emotion : null,
+        });
+      }
+    };
+    this.backend.onResponse(sessionId, onResp);
+    const ok = this.backend.send({
+      content: msg.text,
+      images: msg.images,
+      sessionId,
+      locationScope: scope,
+    });
+    console.log(`[adapter] backend.send → ${ok ? "已发送" : "失败(未连接)"}`);
+    if (!ok) {
+      this.backend.offResponse(sessionId);
+      console.warn(`[adapter] 后端未连接，丢弃消息 ${adapter.name}`);
+    }
+    // 仅在「新账号出现」等状态变化时广播，避免每条消息都刷 UI
+    if (isNew) this.emitStatus();
+  }
+
+  private emitStatus(): void {
+    this.opts.onStatusChange();
+  }
+
+  dispose(): void {
+    for (const inst of this.instances.values()) inst.disconnect();
+    this.backend.disconnect();
+  }
+}
