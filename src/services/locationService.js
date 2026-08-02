@@ -42,10 +42,12 @@ const _ipCache = new Map(); // key: clientIp or '__server__', value: { ts, data 
 const IP_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
 
 async function lookupIpLocation(clientIp, signal) {
+  const _t0 = Date.now();
   const cacheKey = !clientIp || isPrivateOrLoopback(clientIp) ? '__server__' : String(clientIp).trim();
+  console.log(`[ip] lookupIpLocation 开始 clientIp=${clientIp||'empty'} cacheKey=${cacheKey} signal=${signal?'yes':'no'} @${_t0}`);
   const cached = _ipCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < IP_CACHE_TTL_MS) {
-    console.log(`[location] IP lookup cache hit for ${cacheKey === '__server__' ? 'server' : clientIp}`);
+    console.log(`[location] IP lookup cache hit for ${cacheKey === '__server__' ? 'server' : clientIp} 耗时=${Date.now()-_t0}ms`);
     return cached.data;
   }
 
@@ -62,11 +64,13 @@ async function lookupIpLocation(clientIp, signal) {
     : controller.signal;
 
   try {
+    console.log(`[ip] fetch 开始 url=${url} @${Date.now()}`);
     const res = await fetch(url, {
       headers: { 'User-Agent': 'kirari-pet/1.0' },
       signal: combinedSignal,
     });
     clearTimeout(timeoutId);
+    console.log(`[ip] fetch 结束 ok=${res.ok} 耗时=${Date.now()-_t0}ms @${Date.now()}`);
     if (!res.ok) return null;
     const d = await res.json();
     if (!d || d.error) return null;
@@ -222,13 +226,13 @@ function isDecline(text) {
 // 保存用户提供的位置（来源 user）。关键：把原始输入地理编码为规范行政区划并固化坐标，
 // 保证位置的「唯一性 + 正确性」，而非存原始字符串（"北京"/"北京市"/"Beijing" 都能归一）。
 // 返回 { location(规范标签), raw(原始输入), ambiguous(是否同名多地点), candidates }。
-async function saveUserLocation(userid, location) {
+async function saveUserLocation(userid, location, scope) {
   const name = (location || '').trim();
   if (!name) return null;
   const cands = await geocodeCandidates(name, 5);
   if (!cands.length) {
     // 无法地理编码（地名不存在 / 离线）：仅记录原始输入，待用户纠正
-    await db.setUserLocation(userid, { location: name, raw: name, source: 'user' });
+    await db.setUserLocation(userid, { location: name, raw: name, source: 'user' }, scope);
     return { location: name, raw: name, ambiguous: false, candidates: [] };
   }
   // 取最相关候选（Open-Meteo 已按相关度/人口排序，首位通常最可能是用户所指）
@@ -248,7 +252,7 @@ async function saveUserLocation(userid, location) {
     longitude: top.longitude,
     timezone: top.timezone || null,
     source: 'user',
-  });
+  }, scope);
   return { location: label, raw: name, ambiguous, candidates: cands.slice(0, 5) };
 }
 
@@ -258,7 +262,9 @@ async function saveUserLocation(userid, location) {
 //   - 已存位置 → 直接用固化坐标（唯一且明确）。
 //   - 问过一次但用户没给 → 公网 IP 归属地兜底（内网/回环取服务端公网 IP），并落库。
 //   - 从未问过 → 标记已问，返回 needAsk（由调用方追问一次）。
-async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
+async function resolveForQuery(userid, clientIp, explicitLocation, signal, scope) {
+  const _t0 = Date.now();
+  console.log(`[resolve] 进入 userid=${userid} clientIp=${clientIp||'empty'} explicit="${explicitLocation||''}" signal=${signal?'yes':'no'} @${_t0}`);
   if (explicitLocation && explicitLocation.trim()) {
     const name = explicitLocation.trim();
     const g = await geocode(name);
@@ -277,8 +283,11 @@ async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
     // 显式城市地理编码失败：当作无效，走后续兜底
   }
 
-  const rec = await db.getUserLocation(userid);
+  console.log(`[resolve] db.getUserLocation 调用前 @${Date.now()}`);
+  const rec = await db.getUserLocation(userid, scope);
+  console.log(`[resolve] db.getUserLocation 返回 rec=${rec?JSON.stringify({location:rec.location,askedAt:rec.askedAt}):'null'} 耗时=${Date.now()-_t0}ms`);
   if (rec && rec.location) {
+    console.log(`[resolve] 命中已存位置分支 @${Date.now()} 耗时=${Date.now()-_t0}ms`);
     return {
       location: rec.location,
       latitude: rec.latitude ?? null,
@@ -293,8 +302,9 @@ async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
 
   if (rec && rec.askedAt) {
     // 之前已问过、用户未提供 → 按公网 IP 归属地兜底
-    console.log(`[location] resolveForQuery: asked before, no location, trying IP lookup (clientIp=${clientIp || 'empty'})`);
+    console.log(`[resolve] 命中 askedAt 分支，即将调用 lookupIpLocation @${Date.now()}`);
     const ipLoc = await lookupIpLocation(clientIp, signal);
+    console.log(`[resolve] lookupIpLocation 返回 ipLoc=${ipLoc?JSON.stringify({location:ipLoc.location,tz:ipLoc.timezone}):'null'} 耗时=${Date.now()-_t0}ms`);
     if (ipLoc && ipLoc.location) {
       await db.setUserLocation(userid, {
         location: ipLoc.location,
@@ -305,7 +315,7 @@ async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
         timezone: ipLoc.timezone || null,
         source: 'ip',
         askedAt: rec.askedAt,
-      });
+      }, scope);
       return {
         location: ipLoc.location,
         latitude: ipLoc.latitude ?? null,
@@ -334,7 +344,9 @@ async function resolveForQuery(userid, clientIp, explicitLocation, signal) {
   }
 
   // 从未问过 → 先问一次，并打上 askedAt 标记
-  await db.setUserLocation(userid, { askedAt: new Date().toISOString() });
+  console.log(`[resolve] 首次询问，db.setUserLocation(askedAt) 前 @${Date.now()}`);
+  await db.setUserLocation(userid, { askedAt: new Date().toISOString() }, scope);
+  console.log(`[resolve] 首次询问，已写 askedAt，返回 needAsk @${Date.now()} 耗时=${Date.now()-_t0}ms`);
   return { location: null, latitude: null, longitude: null, timezone: null, displayName: null, source: null, needAsk: true, askedNow: true };
 }
 
@@ -349,5 +361,5 @@ module.exports = {
   validateLocation,
   saveUserLocation,
   resolveForQuery,
-  getUserLocation: (userid) => db.getUserLocation(userid),
+  getUserLocation: (userid, scope) => db.getUserLocation(userid, scope),
 };

@@ -67,6 +67,9 @@ function setupWebSocket(server, options = {}) {
             const images = Array.isArray(message.images)
               ? message.images.filter((x) => typeof x === 'string' && x.trim())
               : [];
+            // 机器人适配器子命名空间：客户端在已认证 uid 下创建，用于客人账号记忆隔离；
+            // 不传（或 null）表示桌面/owner，复用 api_tokens 的登录 uid 记录。
+            const locationScope = typeof message.locationScope === 'string' ? message.locationScope : null;
 
             if (!userMessage && images.length === 0) {
                 return ws.send(
@@ -82,13 +85,19 @@ function setupWebSocket(server, options = {}) {
             const userid = authUid;
 
             if (!aiContext) {
+                console.log(`[WS-PERF] createConnectionAiContext 调用前 @${Date.now()}`);
                 aiContext = await createConnectionAiContext(userid);
+                console.log(`[WS-PERF] createConnectionAiContext 完成 @${Date.now()}`);
             }
 
             console.log(`💬 收到消息: "${userMessage || '[图片]'}"（图片 ${images.length} 张）`);
+            const _wsT0 = Date.now();
+            console.log(`[WS-PERF] 消息接入 @${_wsT0} session=${message.session_id || 'new'}`);
 
             const sessionId = message.session_id || `session_${Date.now()}`;
+            console.log(`[WS-PERF] initSession 前 @${Date.now()}`);
             await sessionManager.initSession(sessionId);
+            console.log(`[WS-PERF] initSession 完成 @${Date.now()}`);
             // 存储多模态消息：有图片时 content 存为 [text, image_url] 数组，否则存纯文本。
             const storedContent = images.length
               ? [
@@ -96,21 +105,26 @@ function setupWebSocket(server, options = {}) {
                   ...images.map((img) => ({ type: 'image_url', image_url: { url: img } })),
                 ]
               : userMessage;
+            console.log(`[WS-PERF] saveMessage(user) 前 @${Date.now()}`);
             await sessionManager.saveMessage(
                 sessionId,
                 "user",
                 storedContent,
             );
+            console.log(`[WS-PERF] saveMessage(user) 完成 @${Date.now()}`);
 
             let reply;
             try {
+                console.log(`[WS-PERF] → getReply 调用前 @${Date.now()} (距接入 ${Date.now()-_wsT0}ms)`);
                 reply = await aiReplyService.getReply({
                     aiContext,
                     content: userMessage,
                     images,
                     sessionId,
                     clientIp,
+                    locationScope,
                 });
+                console.log(`[WS-PERF] ← getReply 返回 @${Date.now()} 总耗时 ${Date.now()-_wsT0}ms`);
                 } catch (error) {
                     console.error(
                         "⚠️ 模型调用失败，使用兜底回复:",
@@ -124,20 +138,25 @@ function setupWebSocket(server, options = {}) {
                     reply.source = "fallback";
                 }
 
+                console.log(`[WS-PERF] saveMessage(assistant) 前 @${Date.now()}`);
                 await sessionManager.saveMessage(
                     sessionId,
                     "assistant",
                     reply.speech,
                 );
+                console.log(`[WS-PERF] saveMessage(assistant) 完成 @${Date.now()}`);
 
                 if (ws.readyState === WebSocket.OPEN && !aiContext.closed) {
+                    console.log(`[WS-PERF] ws.send 前 @${Date.now()}`);
                     ws.send(
                         JSON.stringify({
                             type: "pet_response",
                             ...reply,
+                            session_id: sessionId,
                             timestamp: Date.now(),
                         }),
                     );
+                    console.log(`[WS-PERF] ws.send 完成 @${Date.now()}`);
                 }
 
                 console.log(`🤖 发送回复: "${reply.speech}"`);

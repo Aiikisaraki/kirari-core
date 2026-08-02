@@ -214,8 +214,8 @@ async function inferPendingLocationIntent(sessionId) {
 }
 
 // 根据已保存的位置，为之前 pending 的时间/天气意图运行工具并返回原始结果字符串。
-async function runDirectToolsByIntents(intents, userid, clientIp, searchCtx) {
-  const loc = await locationSvc.resolveForQuery(userid, clientIp, '');
+async function runDirectToolsByIntents(intents, userid, clientIp, searchCtx, scope) {
+  const loc = await locationSvc.resolveForQuery(userid, clientIp, '', null, scope);
   if (loc.needAsk || !loc.location) return null;
   const results = [];
   for (const intentName of intents) {
@@ -249,14 +249,14 @@ async function runDirectToolsByIntents(intents, userid, clientIp, searchCtx) {
 
 // 位置刚保存后，若存在待接续的时间/天气意图，则一并返回 direct 工具结果，
 // 让 getReply 走"时间/天气润色 + 设置确认"的拼接路径；否则返回 null（由调用方走纯确认）。
-async function maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved) {
+async function maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved, scope) {
   if (!sessionId || !saved) return null;
   const pendingText = await inferPendingLocationIntent(sessionId);
   if (!pendingText) return null;
   const intents = detectDirectIntents(pendingText);
   console.log(`[aiReply] pending intents detected from "${pendingText.slice(0, 40)}": ${intents.join(',') || '(none)'}`);
   if (!intents.length) return null;
-  const combined = await runDirectToolsByIntents(intents, userid, clientIp, searchCtx);
+  const combined = await runDirectToolsByIntents(intents, userid, clientIp, searchCtx, scope);
   if (!combined) return null;
   console.log(`[aiReply] continue pending intent after location set: ${intents.join(',')} -> ${combined.slice(0, 60)}`);
   return {
@@ -267,7 +267,10 @@ async function maybeContinuePendingLocationQuery(sessionId, userid, clientIp, se
   };
 }
 
-async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId = '') {
+async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId = '', locationScope = null) {
+  const scope = locationScope || null;
+  const _pt = Date.now();
+  console.log(`[preflight] 进入 content="${String(content).slice(0,40)}" userid=${searchCtx?.userid} clientIp=${clientIp||'empty'} scope=${scope||'null'} @${_pt}`);
   const text = content.trim();
   const userid = searchCtx?.userid;
 
@@ -282,10 +285,10 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
       // 校验失败：当作普通对话处理，避免把「我在吃饭」之类误当位置保存
       console.log(`[aiReply] "${setLoc}" geocode 校验失败，不走设置分支`);
     } else {
-      const saved = await locationSvc.saveUserLocation(userid, setLoc);
+      const saved = await locationSvc.saveUserLocation(userid, setLoc, scope);
       console.log(`[aiReply] set location -> ${saved?.location || 'null'} (ambiguous=${saved?.ambiguous})`);
       // 上下文接续：上轮因缺位置而追问，本轮用户补充地点 → 自动执行原时间/天气请求
-      const continued = await maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved);
+      const continued = await maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved, scope);
       if (continued) return continued;
       return { direct: null, injected: null, needLocation: false, setLocation: { location: saved.location, ambiguous: saved.ambiguous } };
     }
@@ -295,7 +298,7 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
   //   如首条消息就是"常州"、"北京"，或用户想更新已存位置。经 looksLikeLocation + geocode 校验后保存。
   //   注意：如果当前存在「已追问但未获得位置」的 pending 状态，让给 D 分支处理（支持上下文接续）。
   if (userid != null && !setLoc && detectDirectIntents(text).length === 0) {
-    const rec = await locationSvc.getUserLocation(userid);
+    const rec = await locationSvc.getUserLocation(userid, scope);
     if (rec && rec.askedAt && !rec.location) {
       console.log('[aiReply] bare-place skipped: pending location ask exists, let block-D handle continuation');
     } else {
@@ -306,7 +309,7 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
         const bareOk = await locationSvc.validateLocation(text);
         console.log(`[aiReply] bare-place validateLocation("${text.slice(0, 16)}") -> ${bareOk}`);
         if (bareOk) {
-          const saved = await locationSvc.saveUserLocation(userid, text);
+          const saved = await locationSvc.saveUserLocation(userid, text, scope);
           if (saved) {
             console.log(`[aiReply] set location (bare place name) -> ${saved.location} (ambiguous=${saved.ambiguous})`);
             return { direct: null, injected: null, needLocation: false, setLocation: { location: saved.location, ambiguous: saved.ambiguous } };
@@ -349,9 +352,9 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
         queryLoc = oneOff;
         // 已追问过位置、用户用「X+查询」回应 → 一并设为默认位置，避免下次再问
         if (userid != null) {
-          const rec = await locationSvc.getUserLocation(userid);
+          const rec = await locationSvc.getUserLocation(userid, scope);
           if (rec && rec.askedAt && !rec.location) {
-            const saved = await locationSvc.saveUserLocation(userid, oneOff);
+            const saved = await locationSvc.saveUserLocation(userid, oneOff, scope);
             setLocInfo = { location: saved.location, ambiguous: saved.ambiguous };
             console.log(`[aiReply] follow-up set location via query -> ${saved.location} (ambiguous=${saved.ambiguous})`);
           }
@@ -369,7 +372,7 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
   // —— D. 对「位置追问」的回复：此前已问过、用户本轮简短地名回应（哪怕不含查询意图）——
   //   仅当本轮未解析出位置、且消息本身没有触发任何工具意图时才视为"回答追问"。
   if (userid != null && !queryLoc && matched.length === 0) {
-    const rec = await locationSvc.getUserLocation(userid);
+    const rec = await locationSvc.getUserLocation(userid, scope);
     console.log(`[aiReply] block-D rec=${rec ? JSON.stringify({loc: rec.location, askedAt: rec.askedAt}) : 'null'}`);
     if (rec && rec.askedAt && !rec.location) {
       const looksLike = locationSvc.looksLikeLocation(text);
@@ -379,11 +382,11 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
         const ok = await locationSvc.validateLocation(text);
         console.log(`[aiReply] block-D validateLocation("${text.slice(0, 16)}") -> ${ok}`);
         if (ok) {
-          const saved = await locationSvc.saveUserLocation(userid, text);
+          const saved = await locationSvc.saveUserLocation(userid, text, scope);
           if (saved) {
             console.log(`[aiReply] set location (follow-up reply) -> ${saved.location} (ambiguous=${saved.ambiguous})`);
             // 上下文接续：用户用纯地名回应追问 → 若上轮是时间/天气请求，一并执行
-            const continued = await maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved);
+            const continued = await maybeContinuePendingLocationQuery(sessionId, userid, clientIp, searchCtx, saved, scope);
             if (continued) return continued;
             return { direct: null, injected: null, needLocation: false, setLocation: { location: saved.location, ambiguous: saved.ambiguous } };
           }
@@ -407,8 +410,9 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
     try {
       let args = {};
       if (intent.name === 'get_weather' || intent.name === 'get_current_time') {
-        const loc = await locationSvc.resolveForQuery(userid, clientIp, queryLoc);
-        console.log(`[aiReply] resolveForQuery intent=${intent.name} explicit="${queryLoc}" -> ${JSON.stringify({location: loc.location, lat: loc.latitude, lon: loc.longitude, tz: loc.timezone, needAsk: loc.needAsk, source: loc.source})}`);
+        console.log(`[preflight] resolveForQuery 调用前 intent=${intent.name} @${Date.now()}`);
+        const loc = await locationSvc.resolveForQuery(userid, clientIp, queryLoc, null, scope);
+        console.log(`[preflight] resolveForQuery 返回 ${JSON.stringify({location: loc.location, tz: loc.timezone, needAsk: loc.needAsk, source: loc.source})} 耗时=${Date.now()-_pt}ms`);
         if (loc.needAsk) { needLocation = true; break; }
         if (!loc.location && loc.latitude == null && loc.longitude == null) { results.push('缺少地点参数（location）'); continue; }
         if (intent.name === 'get_weather') {
@@ -548,6 +552,7 @@ async function polishToolResult(rawToolText, aiContext, sessionId, userText, con
     { role: 'user', content: userText || '请帮我看看上面查到的信息。' },
   ];
 
+  console.log(`[polish] LLM 润色调用前 @${Date.now()}`);
   const completion = await aiContext.openai.chat.completions.create(
     {
       model: aiContext.model,
@@ -556,6 +561,7 @@ async function polishToolResult(rawToolText, aiContext, sessionId, userText, con
     },
     { signal: controller.signal },
   );
+  console.log(`[polish] LLM 润色返回 @${Date.now()}`);
 
   const msg = completion.choices?.[0]?.message;
   if (!msg || !msg.content || !msg.content.trim()) {
@@ -577,7 +583,7 @@ async function polishToolResult(rawToolText, aiContext, sessionId, userText, con
   };
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '' } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null } = {}) {
   if (!aiContext || aiContext.closed || !aiContext.openai) {
     throw new Error('AI 连接上下文不可用');
   }
@@ -592,13 +598,17 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
   const timeout = getRequestTimeout(text || '[用户发送了图片]');
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   aiContext.activeRequests.add(controller);
+  const _t0 = Date.now();
+  console.log(`[getReply] === 开始处理 "${text.slice(0,40)}" @${_t0}`);
 
   try {
     // ── Step 1: 意图预检 ──
     //   时间/天气等 direct 工具 → 取回数据后交给 LLM 润色（见下方 direct 路径）
     //   搜索类非 direct 工具 → 收集结果用于后续注入 prompt
     //   位置相关：未存位置先追问一次；用户说"我在X/更新位置"则持久化
-    const preflight = await preflightTools(text || '[用户发送了图片]', aiContext, clientIp, sessionId);
+    console.log(`[getReply] Step1 preflightTools 调用前 @${Date.now()}`);
+    const preflight = await preflightTools(text || '[用户发送了图片]', aiContext, clientIp, sessionId, locationScope);
+    console.log(`[getReply] Step1 完成 needLocation=${preflight.needLocation} direct=${!!preflight.direct} 耗时=${Date.now()-_t0}ms`);
 
     // 需要位置但未获取：先问用户一次（不调工具、不调 LLM，直接返回追问语）
     if (preflight.needLocation) {

@@ -34,6 +34,16 @@ db.exec(`
     uid INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS bot_locations (
+    owner_uid INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    location TEXT, location_raw TEXT, location_name TEXT, location_admin1 TEXT,
+    location_country TEXT, location_country_code TEXT,
+    latitude REAL, longitude REAL, location_source TEXT,
+    location_timezone TEXT, location_asked_at TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_uid, scope)
+  );
 `);
 
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
@@ -159,7 +169,25 @@ module.exports = {
   },
 
   // ---- 用户位置（按 uid 持久化；来源 user=对话中提供，ip=公网 IP 归属地兜底）----
-  getUserLocation: async (userid) => {
+  getUserLocation: async (userid, scope) => {
+    // scope 非空 → 机器人客人账号的独立位置记忆（bot_locations 表）
+    if (scope) {
+      const r = db.prepare('SELECT location, location_raw, location_name, location_admin1, location_country, location_country_code, latitude, longitude, location_source, location_timezone, location_asked_at FROM bot_locations WHERE owner_uid = ? AND scope = ?').get(userid, scope);
+      if (!r) return null;
+      return {
+        location: r.location || null,
+        raw: r.location_raw || null,
+        name: r.location_name || null,
+        admin1: r.location_admin1 || null,
+        country: r.location_country || null,
+        countryCode: r.location_country_code || null,
+        latitude: r.latitude != null ? Number(r.latitude) : null,
+        longitude: r.longitude != null ? Number(r.longitude) : null,
+        source: r.location_source || null,
+        timezone: r.location_timezone || null,
+        askedAt: r.location_asked_at || null,
+      };
+    }
     const r = db.prepare('SELECT location, location_raw, location_name, location_admin1, location_country, location_country_code, latitude, longitude, location_source, location_timezone, location_asked_at FROM api_tokens WHERE userid = ?').get(userid);
     if (!r) return null;
     return {
@@ -176,7 +204,36 @@ module.exports = {
       askedAt: r.location_asked_at || null,
     };
   },
-  setUserLocation: async (userid, patch = {}) => {
+  setUserLocation: async (userid, patch = {}, scope) => {
+    // scope 非空 → 客人账号独立位置（bot_locations），与桌面/owner 的 api_tokens 隔离
+    if (scope) {
+      const colMap = {
+        location: 'location', raw: 'location_raw', name: 'location_name', admin1: 'location_admin1',
+        country: 'location_country', countryCode: 'location_country_code',
+        latitude: 'latitude', longitude: 'longitude', source: 'location_source',
+        timezone: 'location_timezone', askedAt: 'location_asked_at',
+      };
+      const sets = [];
+      const vals = [];
+      for (const key of Object.keys(colMap)) {
+        if (patch[key] !== undefined) {
+          sets.push(`${colMap[key]} = ?`);
+          const v = patch[key];
+          vals.push(v != null ? (key === 'latitude' || key === 'longitude' ? Number(v) : v) : null);
+        }
+      }
+      if (sets.length) {
+        const existing = db.prepare('SELECT 1 FROM bot_locations WHERE owner_uid = ? AND scope = ?').get(userid, scope);
+        if (existing) {
+          db.prepare(`UPDATE bot_locations SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE owner_uid = ? AND scope = ?`).run(...vals, userid, scope);
+        } else {
+          const cols = ['owner_uid', 'scope', ...sets.map((s) => s.split(' = ')[0])];
+          const placeholders = cols.map(() => '?').join(', ');
+          db.prepare(`INSERT INTO bot_locations (${cols.join(', ')}) VALUES (${placeholders})`).run(userid, scope, ...vals);
+        }
+      }
+      return true;
+    }
     const existing = db.prepare('SELECT 1 FROM api_tokens WHERE userid = ?').get(userid);
     if (!existing) {
       // 极少数无配置行的情况（如远程用户尚未写配置），插入最小行后再更新位置字段
