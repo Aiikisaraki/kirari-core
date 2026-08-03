@@ -18,6 +18,7 @@ const express = require("express");
 const { setupHttpRoutes } = require("./api/routes");
 const { setupWebSocket } = require("./websocket/socketServer");
 const { findAvailablePort } = require("./utils/portHelper");
+const corsMiddleware = require("./middleware/cors");
 
 // 绑定网卡（HOST）：
 // - 默认 0.0.0.0（监听所有网卡），适合分离式 / 远程部署，开箱即用。
@@ -31,6 +32,8 @@ function createServer() {
 
     // 中间件
     app.use(express.json());
+    // CORS：放业务路由之前，处理跨域预检与响应头（独立网页前端 / 分离部署需要）。
+    app.use(corsMiddleware);
 
     // 1. 挂载 HTTP 路由
     setupHttpRoutes(app);

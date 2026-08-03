@@ -213,6 +213,16 @@ function setupHttpRoutes(app) {
         return res.json({ uid, sessionToken: signSession(uid) });
     });
 
+    // 当前登录用户态：供桌宠在分离（远端）模式下登录后拉取自身信息（如用户名）。
+    // 鉴权方式与 /api/profile 一致（内置账户 X-Builtin-Token 或 Bearer 会话令牌）。
+    app.get("/api/auth/me", async (req, res) => {
+        const auth = resolveAuthUid(req);
+        if (!auth) return res.status(401).json({ message: "未认证" });
+        const profile = await dbStorage.getProfile(auth.uid);
+        if (!profile) return res.status(404).json({ message: "账户不存在" });
+        return res.json(profile);
+    });
+
     // ---- 配置档案（替代旧的 /api-token/*，认证后无感读写）----
     app.get("/api/profile", async (req, res) => {
         const auth = resolveAuthUid(req);

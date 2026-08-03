@@ -1,0 +1,31 @@
+# 虚拟桌宠后端（pet-api）容器编排
+# 用法：
+#   docker compose up -d          # 构建并后台启动
+#   docker compose logs -f        # 查看日志
+#   docker compose down           # 停止并移除容器（数据卷 pet-api-data 保留）
+#
+# 数据持久化：SQLite 数据库落在命名卷 pet-api-data（容器内 /data），
+# 即使重建容器也不会丢失用户账号与配置。
+services:
+  pet-api:
+    build: .
+    container_name: pet-api
+    restart: unless-stopped
+    ports:
+      - "9089:9089"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=9089
+      - PET_API_DATA_DIR=/data
+      # 会话令牌签名密钥：容器化后务必固定，否则重启服务会让已下发的登录凭证全部失效。
+      - SESSION_SECRET=${SESSION_SECRET:-kirari-dev-session-secret}
+      # 内置本地账户令牌（local 模式免登录用）。
+      - BUILTIN_ACCOUNT_TOKEN=${BUILTIN_ACCOUNT_TOKEN:-kirari-local-builtin}
+      # 跨域允许来源（逗号分隔）。分离模式下桌宠为 Electron 客户端，通常留空即可；
+      # 若未来接网页控制台，可填 https://your-domain.com。
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    volumes:
+      - pet-api-data:/data
+
+volumes:
+  pet-api-data:
