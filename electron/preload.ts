@@ -23,9 +23,16 @@ type ModelConfigFile = {
 
 contextBridge.exposeInMainWorld("tokenApi", {
   getDeployConfig: (): Promise<DeployConfig> => ipcRenderer.invoke("deploy:get-config"),
+  getCapabilities: (): Promise<{ localAvailable: boolean }> => ipcRenderer.invoke("deploy:get-capabilities"),
+  setDeployServer: (
+    server: { wsUrl: string; httpUrl: string },
+  ): Promise<{ ok: boolean; server: { wsUrl: string; httpUrl: string } }> =>
+    ipcRenderer.invoke("deploy:set-server", server),
   setSession: (token: string | null): Promise<void> => ipcRenderer.invoke("deploy:set-session", token),
   login: (username: string, password: string): Promise<{ ok: boolean; uid?: number; message?: string }> =>
     ipcRenderer.invoke("token:login", { username, password }),
+  register: (username: string, password: string): Promise<{ ok: boolean; message?: string }> =>
+    ipcRenderer.invoke("token:register", { username, password }),
   request: (request: SettingsRequest): Promise<{ status: number; data: Record<string, unknown> }> =>
     ipcRenderer.invoke("token:request", request),
   // 本地模式：直接读写模型配置文件（config.json），外部编辑会实时同步。

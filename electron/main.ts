@@ -14,7 +14,7 @@ import extract from "extract-zip";
 import { ChatSessionService, type ChatStateSnapshot } from "./chat-session-service";
 import { AdapterManager } from "./adapter/adapter-manager";
 import type { AdapterConfig, AdapterStatus } from "./adapter/types";
-import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort } from "./backend-launcher";
+import { startBackendIfLocal, stopBackend, applyConfigToBackend, getBackendPort, isBackendBundled } from "./backend-launcher";
 import { readModelConfigFile, writeModelConfigFile, onModelConfigChanged, startModelConfigWatch } from "./model-config";
 import { initAppLogger, getLogPath, isDebugMode } from "./app-logger";
 
@@ -22,8 +22,8 @@ type PetWindow = InstanceType<typeof BrowserWindow>;
 type PetTray = InstanceType<typeof Tray>;
 
 // ---- 部署配置（由"安装过程"生成的 pet-client.config.json 决定工作模式）----
-type ThemeName = "aurora-glass" | "pet-pink";
-const THEME_LIST: ThemeName[] = ["aurora-glass", "pet-pink"];
+type ThemeName = "aurora-glass" | "pet-pink" | "mint-soft" | "lavender-mist";
+const THEME_LIST: ThemeName[] = ["aurora-glass", "pet-pink", "mint-soft", "lavender-mist"];
 const DEFAULT_THEME: ThemeName = "aurora-glass";
 
 // 桌宠形象配置（与前端 AvatarConfig 对应，主进程独立定义以避免依赖前端运行时模块）
@@ -74,6 +74,8 @@ type DeployConfig = {
   window?: { x: number; y: number };
   // 机器人适配器配置（OneBot / QQ 官方机器人）。连接信息含令牌，仅存于本机 userData 配置。
   adapters?: AdapterConfig[];
+  // 分离（远端）模式登录后的会话令牌，持久化以跨重启保持登录态。
+  sessionToken?: string;
 };
 const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 const DEFAULT_LOCAL = {
@@ -112,6 +114,7 @@ function loadClientConfig(): DeployConfig {
               (a: AdapterConfig) => a && typeof a.id === "string" && typeof a.type === "string",
             )
           : [],
+        sessionToken: typeof raw.sessionToken === "string" ? raw.sessionToken : undefined,
         // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
         window:
           raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
@@ -128,6 +131,16 @@ function loadClientConfig(): DeployConfig {
 
 const clientConfig = loadClientConfig();
 
+// 纯前端版（frontend edition）未打包后端：若配置仍是 local 模式，强制退化为 remote，
+// 否则会一直尝试连接本机 9089 而后端根本不存在。退化后由设置页让用户填写远程服务器地址。
+const localBackendAvailable = isBackendBundled();
+if (!localBackendAvailable && clientConfig.mode === "local") {
+  console.warn("[config] 当前安装包未包含本地后端，强制切换为远程模式（请在设置中填写服务端地址）");
+  clientConfig.mode = "remote";
+  if (!clientConfig.server) clientConfig.server = { wsUrl: "", httpUrl: "" };
+  saveClientConfig();
+}
+
 function saveClientConfig() {
   try {
     fs.writeFileSync(
@@ -136,6 +149,44 @@ function saveClientConfig() {
     );
   } catch (e) {
     console.error("[config] 保存客户端配置失败:", e);
+  }
+}
+
+// 创建并初始化机器人适配器管理器（连接已启用的适配器 + 后端 WS）。
+// 启动时与「远程服务器地址变更（deploy:set-server）」时共用，保证重建逻辑一致。
+function initAdapterManager() {
+  try {
+    if (adapterManager) {
+      try {
+        adapterManager.dispose();
+      } catch {
+        // 忽略释放异常
+      }
+      adapterManager = null;
+    }
+    const token =
+      clientConfig.mode === "local"
+        ? clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN
+        : settingsSessionToken ?? "";
+    adapterManager = new AdapterManager({
+      backendUrl,
+      token,
+      getDesktopSessionId: () => ensureChatSessionService().getSnapshot().sessionId,
+      getAdaptersConfig: () => clientConfig.adapters || [],
+      saveAdaptersConfig: (adapters) => {
+        clientConfig.adapters = adapters;
+        saveClientConfig();
+      },
+      onStatusChange: broadcastAdapterStatus,
+      // 主人在其他协议端（QQ 等）的对话同步进桌宠聊天框
+      pushOwnerMessage: (m) => {
+        const svc = ensureChatSessionService();
+        if (svc) svc.injectExternalMessage(m);
+      },
+    });
+    adapterManager.init();
+  } catch (e) {
+    console.error("[adapter] 初始化失败:", e);
   }
 }
 
@@ -304,7 +355,7 @@ function resolveChatUserid(): number {
   return loggedInUid && loggedInUid > 0 ? loggedInUid : 1;
 }
 
-let settingsSessionToken: string | null = null;
+let settingsSessionToken: string | null = clientConfig.sessionToken ?? null;
 let settingsWindow: PetWindow | null = null;
 
 let petWindow: PetWindow | null = null;
@@ -373,6 +424,9 @@ function createSettingsWindow() {
     transparent: true,
     // 透明窗口在 Windows 上默认是直角矩形，圆角需显式开启，否则四角会透出半透明直角轮廓。
     roundedCorners: true,
+    // 关掉 OS DWM 窗口级阴影——transparent + 圆角窗口下，DWM 仍按矩形画阴影，
+    // 会把 CSS 圆角内容框成一个"假圆角"。关掉之后只剩 CSS 本身的圆角 + 背景。
+    hasShadow: false,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: { preload: path.resolve(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false },
@@ -386,6 +440,31 @@ function createSettingsWindow() {
 }
 
 ipcMain.handle("deploy:get-config", () => clientConfig);
+
+// 暴露「本机是否打包了后端」给前端，用于决定是否展示本地/远程相关提示与控件。
+ipcMain.handle("deploy:get-capabilities", () => ({
+  localAvailable: localBackendAvailable,
+}));
+
+// 远程模式下由设置页修改服务端地址（ws/http）。写入 clientConfig 并持久化，
+// 立即刷新主进程连接地址、重建适配器连接（无需重启即可生效）。
+ipcMain.handle(
+  "deploy:set-server",
+  (_event, server: { wsUrl?: string; httpUrl?: string }) => {
+    const wsUrl = typeof server.wsUrl === "string" ? server.wsUrl.trim() : "";
+    const httpUrl = typeof server.httpUrl === "string" ? server.httpUrl.trim() : "";
+    clientConfig.server = { wsUrl, httpUrl };
+    saveClientConfig();
+    // 刷新主进程级别的连接地址
+    backendUrl = wsUrl || "ws://localhost:9089/ws";
+    backendHttpUrl = httpUrl || "http://localhost:9089";
+    backendHealthUrl = `${backendHttpUrl.replace(/\/$/, "")}/health`;
+    console.log(`[deploy] 服务端地址已更新 ws=${backendUrl} http=${backendHttpUrl}`);
+    // 重建适配器连接，让新的后端地址立即生效（local 模式也重建，无副作用）
+    initAdapterManager();
+    return { ok: true as const, server: { wsUrl, httpUrl } };
+  },
+);
 ipcMain.handle("theme:get", () => clientConfig.theme || DEFAULT_THEME);
 ipcMain.handle("theme:set", (_event, name: string) => {
   const next: ThemeName = (THEME_LIST as string[]).includes(name) ? (name as ThemeName) : DEFAULT_THEME;
@@ -702,6 +781,8 @@ ipcMain.handle("avatar:import-folder", async () => {
 });
 ipcMain.handle("deploy:set-session", (_event, token: string | null) => {
   settingsSessionToken = token || null;
+  clientConfig.sessionToken = token ?? undefined;
+  saveClientConfig();
   if (!token) {
     // 登出：清空远程 uid，并按本地身份（uid=1）重建聊天服务。
     loggedInUid = null;
@@ -729,7 +810,24 @@ ipcMain.handle("token:login", async (_event, credentials: { username: string; pa
       chatSessionService = null;
       chatServiceUserid = null;
     }
+    // 持久化登录凭证，重启桌宠后自动恢复登录态。
+    clientConfig.sessionToken = settingsSessionToken;
+    saveClientConfig();
     return { ok: true, uid: data.uid };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : "无法连接服务端" };
+  }
+});
+ipcMain.handle("token:register", async (_event, credentials: { username: string; password: string }) => {
+  try {
+    const response = await fetch(`${backendHttpUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    const data = await readApiResponse(response);
+    if (!response.ok) return { ok: false, message: String(data.message || "注册失败") };
+    return { ok: true };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "无法连接服务端" };
   }
@@ -1050,6 +1148,8 @@ function createChatWindow() {
     transparent: true,
     // 透明窗口在 Windows 上默认是直角矩形，圆角需显式开启，否则四角会透出半透明直角轮廓。
     roundedCorners: true,
+    // 关掉 OS DWM 窗口级阴影，否则圆角内容外层会被画矩形阴影包住，形成"假圆角"。
+    hasShadow: false,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
@@ -1339,31 +1439,7 @@ app.whenReady().then(async () => {
 
   // 机器人适配器：初始化管理器（连接已启用的适配器 + 后端 WS）。
   // owner 复用桌面 session、guest 独立 scope，均由 AdapterManager 内部路由。
-  try {
-    const token =
-      clientConfig.mode === "local"
-        ? clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN
-        : settingsSessionToken ?? "";
-    adapterManager = new AdapterManager({
-      backendUrl,
-      token,
-      getDesktopSessionId: () => ensureChatSessionService().getSnapshot().sessionId,
-      getAdaptersConfig: () => clientConfig.adapters || [],
-      saveAdaptersConfig: (adapters) => {
-        clientConfig.adapters = adapters;
-        saveClientConfig();
-      },
-      onStatusChange: broadcastAdapterStatus,
-      // 主人在其他协议端（QQ 等）的对话同步进桌宠聊天框
-      pushOwnerMessage: (m) => {
-        const svc = ensureChatSessionService();
-        if (svc) svc.injectExternalMessage(m);
-      },
-    });
-    adapterManager.init();
-  } catch (e) {
-    console.error("[adapter] 初始化失败:", e);
-  }
+  initAdapterManager();
 
   // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时同步到后端并广播前端。
   startModelConfigWatch();

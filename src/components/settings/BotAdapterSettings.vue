@@ -103,9 +103,12 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
 </script>
 
 <template>
-  <section class="adapter-section">
-    <h3 class="section-title">机器人适配器</h3>
-    <p class="hint">
+  <section id="bot" class="settings-card">
+    <h3 class="settings-card__title">
+      <span class="title-emoji">🤖</span>
+      <span>机器人适配器</span>
+    </h3>
+    <p class="settings-card__desc">
       接入 OneBot（NapCat / LLOneBot）或 QQ 官方机器人，让桌宠通过 QQ 收发消息。可同时挂多个适配器。
       把某个 QQ 号设为「主人」后，该账号与桌面宠共享同一份聊天记录与记忆。
     </p>
@@ -118,30 +121,25 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
             <span class="badge" :class="ad.type">{{ ad.type === 'onebot' ? 'OneBot' : 'QQ官方' }}</span>
             <strong>{{ ad.name }}</strong>
           </div>
-          <span
-            class="status-dot"
-            :class="{ on: ad.connected, off: !ad.connected }"
-          >{{ ad.connected ? "已连接" : "未连接" }}</span>
+          <span class="status-dot" :class="{ on: ad.connected, off: !ad.connected }">
+            {{ ad.connected ? "已连接" : "未连接" }}
+          </span>
         </div>
 
         <div v-if="ad.lastError" class="adapter-err">⚠ {{ ad.lastError }}</div>
 
         <div class="adapter-actions">
-          <button
-            type="button"
-            class="mini-btn"
-            @click="handleToggle(ad)"
-          >
+          <button type="button" class="btn btn--primary btn--sm" @click="handleToggle(ad)">
             {{ ad.connected ? "断开" : "连接" }}
           </button>
-          <button type="button" class="mini-btn ghost" @click="handleRemove(ad)">删除</button>
+          <button type="button" class="btn btn--ghost btn--sm" @click="handleRemove(ad)">删除</button>
         </div>
 
         <!-- 群消息回复触发方式（仅 OneBot，默认关闭，最安全） -->
-        <div v-if="ad.type === 'onebot'" class="group-mode-row">
-          <label class="group-mode-label">群消息回复</label>
+        <div v-if="ad.type === 'onebot'" class="group-row">
+          <label class="field-label">群消息回复</label>
           <select
-            class="group-mode-select"
+            class="settings-select"
             :value="(ad.config && ad.config.groupReplyMode) || 'off'"
             @change="handleGroupMode(ad, ($event.target as HTMLSelectElement).value)"
           >
@@ -151,14 +149,14 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
           </select>
         </div>
 
-        <!-- 群范围过滤：白名单 / 黑名单（选择回复方式后展示，与触发方式正交） -->
+        <!-- 群范围过滤：白名单 / 黑名单 -->
         <template
           v-if="ad.type === 'onebot' && ad.config && ad.config.groupReplyMode && ad.config.groupReplyMode !== 'off'"
         >
-          <div class="group-mode-row">
-            <label class="group-mode-label">群范围</label>
+          <div class="group-row">
+            <label class="field-label">群范围</label>
             <select
-              class="group-mode-select"
+              class="settings-select"
               :value="(ad.config && ad.config.groupFilter) || 'whitelist'"
               @change="handleGroupFilter(ad, ($event.target as HTMLSelectElement).value)"
             >
@@ -167,20 +165,20 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
             </select>
           </div>
 
-          <div v-if="(ad.config && ad.config.groupFilter) !== 'blacklist'" class="group-allow-row">
-            <label class="group-mode-label">允许回复的群号</label>
+          <div v-if="(ad.config && ad.config.groupFilter) !== 'blacklist'" class="group-row">
+            <label class="field-label">允许回复的群号</label>
             <input
-              class="group-allow-input"
+              class="text-input"
               type="text"
               :value="((ad.config && (ad.config.groupAllowlist as unknown as string[])) || []).join(', ')"
               @change="handleGroupList(ad, 'groupAllowlist', ($event.target as HTMLInputElement).value)"
               placeholder="输入允许回复的群号，逗号分隔，如 123456789, 987654321"
             />
           </div>
-          <div v-else class="group-allow-row">
-            <label class="group-mode-label">排除回复的群号</label>
+          <div v-else class="group-row">
+            <label class="field-label">排除回复的群号</label>
             <input
-              class="group-allow-input block"
+              class="text-input"
               type="text"
               :value="((ad.config && (ad.config.groupBlocklist as unknown as string[])) || []).join(', ')"
               @change="handleGroupList(ad, 'groupBlocklist', ($event.target as HTMLInputElement).value)"
@@ -188,7 +186,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
             />
           </div>
         </template>
-        <p v-if="ad.type === 'onebot'" class="hint small warn">
+        <p v-if="ad.type === 'onebot'" class="settings-hint settings-hint--warn">
           ⚠ 群消息默认关闭。开启后默认「白名单」模式——只有你显式加入允许列表的群才会被回复；选「黑名单」会回复除排除列表外的所有群，请谨慎。
         </p>
 
@@ -196,16 +194,12 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
         <div class="owner-row">
           <template v-if="ad.ownerAccount">
             <span class="owner-tag">主人：{{ ad.ownerAccount }}</span>
-            <button
-              type="button"
-              class="mini-btn ghost"
-              @click="setOwner(ad.id, '')"
-            >
+            <button type="button" class="btn btn--ghost btn--sm" @click="setOwner(ad.id, '')">
               取消主人
             </button>
           </template>
           <template v-else>
-            <select v-model="(ad as any)._ownerKey" class="owner-select">
+            <select v-model="(ad as any)._ownerKey" class="settings-select owner-select">
               <option value="">设为某账号为主人…</option>
               <option v-for="acc in ad.knownAccounts" :key="acc" :value="acc">
                 {{ acc }}
@@ -213,7 +207,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
             </select>
             <button
               type="button"
-              class="mini-btn"
+              class="btn btn--primary btn--sm"
               :disabled="!(ad as any)._ownerKey"
               @click="handleSetOwner(ad)"
             >
@@ -221,7 +215,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
             </button>
           </template>
         </div>
-        <p v-if="!ad.knownAccounts.length" class="hint small">
+        <p v-if="!ad.knownAccounts.length" class="settings-hint">
           连接后收到消息，才会出现可设为主人的账号。
         </p>
       </div>
@@ -229,89 +223,61 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
 
     <!-- 新增表单 -->
     <div v-if="showForm" class="adapter-form">
-      <label>协议类型</label>
-      <div class="provider-row">
-        <label class="provider-option">
-          <input type="radio" value="onebot" v-model="formType" />
-          <span>OneBot（NapCat / LLOneBot）</span>
-        </label>
-        <label class="provider-option">
-          <input type="radio" value="qqofficial" v-model="formType" />
-          <span>QQ 官方机器人（第二阶段）</span>
-        </label>
+      <div class="field">
+        <span class="field-label">协议类型</span>
+        <div class="provider-row">
+          <label class="provider-option">
+            <input type="radio" value="onebot" v-model="formType" />
+            <span>OneBot（NapCat / LLOneBot）</span>
+          </label>
+          <label class="provider-option">
+            <input type="radio" value="qqofficial" v-model="formType" />
+            <span>QQ 官方机器人（第二阶段）</span>
+          </label>
+        </div>
       </div>
 
-      <label for="ad-name">名称</label>
-      <input id="ad-name" v-model="formName" type="text" placeholder="如：NapCat 主号" />
+      <div class="field">
+        <label class="field-label" for="ad-name">名称</label>
+        <input id="ad-name" v-model="formName" class="text-input" type="text" placeholder="如：NapCat 主号" />
+      </div>
 
       <template v-if="isOneBot">
-        <label for="ad-ws">WS 地址</label>
-        <input id="ad-ws" v-model="formWsUrl" type="text" placeholder="ws://127.0.0.1:3001" />
-        <label for="ad-token">访问令牌（可选）</label>
-        <input id="ad-token" v-model="formToken" type="password" placeholder="对应 OneBot 的 access_token" />
+        <div class="field">
+          <label class="field-label" for="ad-ws">WS 地址</label>
+          <input id="ad-ws" v-model="formWsUrl" class="text-input" type="text" placeholder="ws://127.0.0.1:3001" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ad-token">访问令牌（可选）</label>
+          <input id="ad-token" v-model="formToken" class="text-input" type="password" placeholder="对应 OneBot 的 access_token" />
+        </div>
       </template>
       <template v-else>
-        <label for="ad-appid">AppID</label>
-        <input id="ad-appid" v-model="formAppId" type="text" placeholder="QQ 开放平台 AppID" />
-        <label for="ad-secret">Client Secret</label>
-        <input id="ad-secret" v-model="formSecret" type="password" placeholder="QQ 开放平台密钥" />
-        <p class="hint small">QQ 官方机器人收发逻辑将在第二阶段接入，此处仅登记配置。</p>
+        <div class="field">
+          <label class="field-label" for="ad-appid">AppID</label>
+          <input id="ad-appid" v-model="formAppId" class="text-input" type="text" placeholder="QQ 开放平台 AppID" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ad-secret">Client Secret</label>
+          <input id="ad-secret" v-model="formSecret" class="text-input" type="password" placeholder="QQ 开放平台密钥" />
+        </div>
+        <p class="settings-hint">QQ 官方机器人收发逻辑将在第二阶段接入，此处仅登记配置。</p>
       </template>
 
-      <div v-if="formError" class="error-message">{{ formError }}</div>
-      <div class="form-actions">
-        <button type="button" class="primary-btn" @click="handleAdd">添加</button>
-        <button type="button" class="ghost-btn" @click="showForm = false">取消</button>
+      <div v-if="formError" class="settings-error">{{ formError }}</div>
+      <div class="btn-row">
+        <button type="button" class="btn btn--primary" @click="handleAdd">添加</button>
+        <button type="button" class="btn btn--ghost" @click="showForm = false">取消</button>
       </div>
     </div>
 
-    <button v-else type="button" class="import-btn" @click="showForm = true">
+    <button v-else type="button" class="btn btn--import btn--block" @click="showForm = true">
       + 添加机器人适配器
     </button>
   </section>
 </template>
 
 <style scoped>
-.adapter-section {
-  display: grid;
-  gap: 14px;
-  padding: 18px 18px 20px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 10px 28px rgba(57, 44, 76, 0.1);
-  margin-top: 28px;
-  margin-bottom: 20px;
-}
-.section-title {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin: 0;
-  font-size: 16px;
-  font-weight: 800;
-  letter-spacing: 0.5px;
-  color: var(--pet-ink);
-}
-.section-title::before {
-  content: "";
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #ff8fb1 0%, #a78bfa 100%);
-  box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.18);
-  flex: 0 0 auto;
-}
-.hint {
-  color: var(--pet-muted);
-  font-size: 13px;
-}
-.hint.small {
-  font-size: 12px;
-  margin: 4px 0 0;
-}
 .adapter-list {
   display: grid;
   gap: 12px;
@@ -322,7 +288,7 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
   padding: 14px;
   border-radius: 13px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.42));
-  border: 1px solid rgba(167, 139, 250, 0.18);
+  border: 1px solid var(--pet-accent-soft);
 }
 .adapter-head {
   display: flex;
@@ -359,72 +325,15 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
 }
 .adapter-err {
   font-size: 12px;
-  color: #d33;
-}
-.group-mode-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.group-mode-label {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--pet-ink);
-}
-.group-mode-select {
-  flex: 1;
-  min-width: 160px;
-  padding: 7px 10px;
-  border: 1.5px solid var(--pet-border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--pet-ink);
-}
-.hint.small.warn {
-  color: #c0392b;
-  font-weight: 600;
-}
-.group-allow-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.group-allow-input {
-  flex: 1;
-  min-width: 200px;
-  padding: 7px 10px;
-  border: 1.5px solid #f0a8a0;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--pet-ink);
-}
-.group-allow-input.block {
-  border-color: #e0b85a;
+  color: var(--pet-danger);
 }
 .adapter-actions {
   display: flex;
   gap: 8px;
 }
-.mini-btn {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--pet-accent, #7c3aed);
-  color: #fff;
-  font-weight: 600;
-  font-size: 13px;
-  cursor: pointer;
-}
-.mini-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.mini-btn.ghost {
-  background: transparent;
-  color: var(--pet-accent, #7c3aed);
-  border: 1.5px solid rgba(167, 139, 250, 0.45);
+.group-row {
+  display: grid;
+  gap: 6px;
 }
 .owner-row {
   display: flex;
@@ -443,97 +352,13 @@ async function handleGroupList(ad: any, field: "groupAllowlist" | "groupBlocklis
 .owner-select {
   flex: 1;
   min-width: 140px;
-  padding: 7px 10px;
-  border: 1.5px solid var(--pet-border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--pet-ink);
 }
 .adapter-form {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   padding: 14px;
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(167, 139, 250, 0.25);
-}
-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pet-muted);
-}
-input {
-  flex: 1;
-  padding: 10px 12px;
-  border: 1px solid var(--pet-border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.55);
-  color: var(--pet-ink);
-}
-input:focus {
-  outline: none;
-  border-color: var(--pet-accent);
-  box-shadow: 0 0 0 3px var(--pet-focus-ring);
-}
-.provider-row {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.provider-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pet-ink);
-  cursor: pointer;
-}
-.provider-option input {
-  width: auto;
-  flex: 0 0 auto;
-  margin: 0;
-  accent-color: var(--pet-accent, #7c3aed);
-}
-.form-actions {
-  display: flex;
-  gap: 10px;
-}
-.primary-btn {
-  background: var(--pet-accent);
-  color: #fff;
-  border: 0;
-  border-radius: 8px;
-  padding: 10px 16px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.ghost-btn {
-  border: 1.5px solid rgba(167, 139, 250, 0.45);
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--pet-accent, #7c3aed);
-  border-radius: 8px;
-  padding: 10px 16px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.import-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-radius: 999px;
-  border: 0;
-  color: #fff;
-  background: linear-gradient(135deg, #ff8fb1 0%, #b07cf0 55%, #8b5cf6 100%);
-  box-shadow: 0 8px 18px rgba(176, 124, 240, 0.4);
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.error-message {
-  color: #d33;
-  font-size: 12px;
+  border: 1px solid var(--pet-accent-soft);
 }
 </style>

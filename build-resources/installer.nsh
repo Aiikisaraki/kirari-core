@@ -14,9 +14,16 @@
 # ============================================================================
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
+# 由 scripts/write-edition-nsh.cjs 生成：定义 !define EDITION "frontend|integrated|full"
+# 决定安装向导是否插入「选择默认模式」页，以及是否跳过「模型配置」页。
+!include "edition.nsh"
 
 # electron-builder 预留钩子：在"选择安装目录"页之后插入自定义页
 !macro customPageAfterChangeDir
+  # full 版：插入「选择默认模式」页（本地部署 / 连接远程服务端）
+  !ifdef EDITION_FULL
+  Page custom ModeSelectShow ModeSelectLeave
+  !endif
   Page custom ModelConfigShow ModelConfigLeave
 !macroend
 
@@ -33,6 +40,65 @@ Var ModelCfgModelVal
 Var ModelCfgKeyVal
 Var ModelCfgSkipVal
 
+# full 版「选择默认模式」页的控件与状态变量（仅 full 版编译，避免其他版未使用告警）
+!ifdef EDITION_FULL
+Var ModeSelectDialog
+Var ModeSelectLocal
+Var ModeSelectRemote
+Var ModeSelectVal
+
+# ──────────────────────────────────────────────────────────────────────
+# full 版安装向导「选择默认模式」页（仅在 EDITION="full" 时插入）
+# 写入 $APPDATA\akisaki-kirari\pet-client.config.json 的 mode 字段，
+# 主程序据此决定本地启动后端还是连接远程服务端。
+# 升级 / 重装（pet-client.config.json 已存在）则跳过本页。
+# ──────────────────────────────────────────────────────────────────────
+Function ModeSelectShow
+  ${If} ${FileExists} "$APPDATA\akisaki-kirari\pet-client.config.json"
+    Abort
+  ${EndIf}
+
+  nsDialogs::Create 1018
+  Pop $ModeSelectDialog
+  ${If} $ModeSelectDialog == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0    100% 16u "选择默认工作模式"
+  ${NSD_CreateLabel} 0 18u  100% 30u "本地部署：随程序启动内置后端，无需额外服务器。$\r$\n连接远程服务端：连接你已经部署好的 Kirari 服务端（稍后在设置中填写地址）。"
+
+  ${NSD_CreateRadioButton} 0 54u 100% 14u "本地部署（推荐，后端已随安装包附带）"
+  Pop $ModeSelectLocal
+  ${NSD_CreateRadioButton} 0 72u 100% 14u "连接远程服务端"
+  Pop $ModeSelectRemote
+
+  ; 默认选中「本地部署」
+  ${NSD_Check} $ModeSelectLocal
+  nsDialogs::Show
+FunctionEnd
+
+Function ModeSelectLeave
+  ${NSD_GetState} $ModeSelectLocal $1
+  ${NSD_GetState} $ModeSelectRemote $2
+  ${If} $2 == 1
+    StrCpy $ModeSelectVal "remote"
+  ${Else}
+    StrCpy $ModeSelectVal "local"
+  ${EndIf}
+
+  CreateDirectory "$APPDATA\akisaki-kirari"
+  ${If} $ModeSelectVal == "remote"
+    FileOpen $R0 "$APPDATA\akisaki-kirari\pet-client.config.json" w
+    FileWrite $R0 "{$\"mode$\":$\"remote$\",$\"server$\":{$\"wsUrl$\":$\"$\",$\"httpUrl$\":$\"$\"},$\"builtinToken$\":$\"kirari-local-builtin$\"}"
+    FileClose $R0
+  ${Else}
+    FileOpen $R0 "$APPDATA\akisaki-kirari\pet-client.config.json" w
+    FileWrite $R0 "{$\"mode$\":$\"local$\",$\"server$\":{$\"wsUrl$\":$\"ws://localhost:9089/ws$\",$\"httpUrl$\":$\"http://localhost:9089$\"},$\"builtinToken$\":$\"kirari-local-builtin$\"}"
+    FileClose $R0
+  ${EndIf}
+FunctionEnd
+!endif ; EDITION_FULL
+
 Function ModelConfigShow
   ; ══════════════════════════════════════════════════════════════════
   ; 升级 / 重装检测：已有配置文件则完全跳过本页
@@ -41,6 +107,20 @@ Function ModelConfigShow
   ${If} ${FileExists} "$APPDATA\akisaki-kirari\config.json"
     Abort
   ${EndIf}
+
+  ; ══════════════════════════════════════════════════════════════════
+  ; 按版本跳过「模型配置」页：
+  ;   - 纯前端版（frontend）：无本地后端，模型在服务端配置，无需本页。
+  ;   - full 版且用户选了「远程」：同样无本地后端，跳过本页。
+  ; ══════════════════════════════════════════════════════════════════
+  !ifdef EDITION_FRONTEND
+    Abort
+  !endif
+  !ifdef EDITION_FULL
+    ${If} $ModeSelectVal == "remote"
+      Abort
+    ${EndIf}
+  !endif
 
   nsDialogs::Create 1018
   Pop $ModelCfgDialog

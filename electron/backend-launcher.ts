@@ -33,6 +33,15 @@ function resolveBackendDir(): string {
   return path.join(resourcesPath, "pet-api");
 }
 
+// 判断当前安装包是否打包了本地后端。纯前端版（frontend edition）不把 pet-api 打进
+// extraResources，故 resources/pet-api/server.js 不存在 → 返回 false。
+// 主进程据此在启动时将 mode="local" 强制退化为 "remote"，避免连不上本机后端而空转。
+export function isBackendBundled(): boolean {
+  if (isDev()) return false;
+  const backendDir = resolveBackendDir();
+  return fs.existsSync(path.join(backendDir, "server.js"));
+}
+
 // Node 运行时选择：优先使用打包进 pet-api/runtime 的 node（自包含，无需用户装机有 Node），
 // 缺失时回退系统 PATH 的 node（要求目标机已安装匹配 ABI 的 Node）。
 function resolveNodeBin(backendDir: string): string | null {

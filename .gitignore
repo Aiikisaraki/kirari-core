@@ -28,6 +28,9 @@ build-resources/pet-api-bundle/
 
 # 保留 build-resources 下的配置（如 installer.nsh / 图标），仅忽略上面生成的子目录
 
+# 打包时由 scripts/write-edition-nsh.cjs 生成的版本宏（含 EDITION 定义，不提交）
+build-resources/edition.nsh
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

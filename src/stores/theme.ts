@@ -1,15 +1,17 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 
-export type ThemeName = "aurora-glass" | "pet-pink";
+export type ThemeName = "aurora-glass" | "pet-pink" | "mint-soft" | "lavender-mist";
 
-export const THEMES: { id: ThemeName; label: string }[] = [
-  { id: "aurora-glass", label: "极光玻璃 · Aurora Glass" },
-  { id: "pet-pink", label: "樱粉 · Pet Pink" },
+export const THEMES: { id: ThemeName; label: string; sub: string }[] = [
+  { id: "aurora-glass", label: "极光玻璃", sub: "Aurora Glass" },
+  { id: "pet-pink", label: "樱粉", sub: "Pet Pink" },
+  { id: "mint-soft", label: "薄荷嫩芽", sub: "Mint Soft" },
+  { id: "lavender-mist", label: "薰衣草晨雾", sub: "Lavender Mist" },
 ];
 
 const DEFAULT_THEME: ThemeName = "aurora-glass";
-const ALLOWED: ThemeName[] = ["aurora-glass", "pet-pink"];
+const ALLOWED: ThemeName[] = ["aurora-glass", "pet-pink", "mint-soft", "lavender-mist"];
 
 type ElectronApi = {
   ipcRenderer?: {

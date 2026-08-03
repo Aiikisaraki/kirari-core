@@ -19,8 +19,11 @@ interface ModelConfigFile {
 
 interface TokenApiBridge {
     getDeployConfig(): Promise<DeployConfig>;
+    getCapabilities(): Promise<{ localAvailable: boolean }>;
+    setDeployServer(server: { wsUrl: string; httpUrl: string }): Promise<{ ok: boolean; server: { wsUrl: string; httpUrl: string } }>;
     setSession(token: string | null): Promise<void>;
     login(username: string, password: string): Promise<{ ok: boolean; uid?: number; message?: string }>;
+    register(username: string, password: string): Promise<{ ok: boolean; message?: string }>;
     request(request: { method: 'GET' | 'POST' | 'PUT'; path: string; body: Record<string, unknown> }): Promise<{ status: number; data: Record<string, unknown> }>;
     getModelConfig(): Promise<ModelConfigFile>;
     setModelConfig(patch: Partial<ModelConfigFile>): Promise<ModelConfigFile>;
@@ -80,6 +83,24 @@ export function useApiToken() {
         return await getBridge().getDeployConfig();
     }
 
+    async function getCapabilities(): Promise<{ localAvailable: boolean }> {
+        return await getBridge().getCapabilities();
+    }
+
+    // 远程模式：修改服务端地址（ws/http），保存后立即生效（主进程重建连接）。
+    async function setDeployServer(server: { wsUrl: string; httpUrl: string }) {
+        isLoading.value = true;
+        error.value = '';
+        try {
+            return await getBridge().setDeployServer(server);
+        } catch (err) {
+            error.value = err instanceof Error ? err.message : '保存失败';
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
     async function request(method: 'GET' | 'POST' | 'PUT', path: string, body: Record<string, unknown>) {
         const result = await getBridge().request({ method, path, body });
         if (result.status >= 400) throw new Error(String(result.data.message || '请求失败'));
@@ -93,6 +114,20 @@ export function useApiToken() {
             return await getBridge().login(username, password);
         } catch (err) {
             const message = err instanceof Error ? err.message : '登录失败';
+            error.value = message;
+            return { ok: false, message };
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    async function register(username: string, password: string) {
+        isLoading.value = true;
+        error.value = '';
+        try {
+            return await getBridge().register(username, password);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : '注册失败';
             error.value = message;
             return { ok: false, message };
         } finally {
@@ -254,5 +289,5 @@ export function useApiToken() {
         }
     }
 
-    return { isLoading, error, getDeployConfig, login, getProfile, updateProfile, logout, readProfileCache, getModelConfig, setModelConfig, onModelConfigChanged };
+    return { isLoading, error, getDeployConfig, getCapabilities, setDeployServer, login, register, getProfile, updateProfile, logout, readProfileCache, getModelConfig, setModelConfig, onModelConfigChanged };
 }

@@ -25,6 +25,15 @@ module.exports = async function afterPack(context) {
     return;
   }
 
+  // 纯前端版（frontend edition）不会把后端（pet-api）打进 extraResources，
+  // 此时 resources/pet-api/server.js 不存在 → 跳过 node_modules 复制，
+  // 既避免向安装包额外塞入无用依赖，也避免 CI 环境下因找不到源后端而 process.exit(1)。
+  const backendEntry = path.join(appOutDir, "resources", "pet-api", "server.js");
+  if (!fs.existsSync(backendEntry)) {
+    console.log("[afterPack] 未检测到打包后端（纯前端版），跳过 node_modules 复制");
+    return;
+  }
+
   const projectRoot = path.resolve(__dirname, "..");
   // 源后端依赖目录：与 prepack 的 PET_API_DIR 保持一致。
   // 本地开发：项目根的上两级 -> pet-api；CI：PET_API_SOURCE_DIR 指向克隆的 kirari-core。

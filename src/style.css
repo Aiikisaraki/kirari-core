@@ -1,38 +1,46 @@
 @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&family=Nunito:wght@400;600;700&display=swap');
 
 /* ===== 主题系统 =====
-   两套主题通过 :root[data-theme] 切换；组件统一引用 --pet-* 变量。
-   aurora-glass（NapCat 极光玻璃）为默认，pet-pink（原樱粉）保留。 */
+   四套柔和主题，通过 :root[data-theme] 切换；组件统一引用 --pet-* 变量。
+   设计原则：低饱和度 / 同色系渐变 / 暖中性调，确保切换时色温不跳。
+   默认 aurora-glass（极光蓝紫），其余保留 / 扩展为 4 选 1。 */
 :root,
 :root[data-theme="aurora-glass"] {
   /* 文字与基础 */
-  --pet-ink: #111213;
+  --pet-ink: #1a1d2e;
   --pet-muted: #64748B;
-  /* 表面（毛玻璃卡片） */
-  --pet-surface: rgba(255, 255, 255, 0.7);
-  --pet-surface-strong: rgba(255, 255, 255, 0.92);
+  /* 表面（毛玻璃卡片）：提高实度避免穿透桌面 */
+  --pet-surface: rgba(255, 255, 255, 0.82);
+  --pet-surface-strong: rgba(255, 255, 255, 0.96);
   --pet-border: rgba(100, 116, 139, 0.18);
-  --pet-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
-  /* 主色（Aurora 亮蓝 #006FEE） */
-  --pet-accent: #006FEE;
-  --pet-accent-soft: rgba(0, 111, 238, 0.14);
-  --pet-accent-strong: #006FEE;
-  --pet-accent-strong-border: rgba(0, 111, 238, 0.35);
-  --pet-link: #006FEE;
-  --pet-focus-ring: rgba(0, 111, 238, 0.35);
-  --pet-focus-border: rgba(0, 111, 238, 0.55);
-  /* 外壳（app-shell 玻璃卡） */
-  --pet-app-bg: linear-gradient(135deg, #EEF2FF 0%, #FFFFFF 45%, #FDF2F8 100%);
-  --pet-app-border: rgba(255, 255, 255, 0.6);
-  --pet-app-shadow: 0 24px 70px rgba(30, 64, 175, 0.22);
-  /* 标题栏（aurora-glass 下为完全不透明的实心条，不融入底层渐变） */
-  --pet-chrome-bg: #E9EDF4;
-  --pet-chrome-border: rgba(198, 208, 224, 0.65);
+  --pet-shadow: 0 6px 20px rgba(15, 23, 42, 0.1);
+  /* 主色（极光蓝，柔和版 #5b8def） */
+  --pet-accent: #5b8def;
+  --pet-accent-soft: rgba(91, 141, 239, 0.14);
+  --pet-accent-strong: #4c7be0;
+  --pet-accent-strong-border: rgba(91, 141, 239, 0.35);
+  --pet-link: #4c7be0;
+  --pet-focus-ring: rgba(91, 141, 239, 0.3);
+  --pet-focus-border: rgba(91, 141, 239, 0.55);
+  /* 壳底色：实色渐变 + 挡桌面 + 蓝紫倾向 */
+  --pet-app-bg: linear-gradient(135deg, #e8eeff 0%, #f1ecf9 50%, #fdebf2 100%);
+  --pet-app-border: rgba(255, 255, 255, 0.7);
+  --pet-app-shadow: 0 12px 40px rgba(60, 80, 160, 0.18);
+  /* 标题栏 */
+  --pet-chrome-bg: rgba(232, 238, 255, 0.85);
+  --pet-chrome-border: rgba(180, 195, 230, 0.6);
   /* 等待点 / 危险 / 主按钮阴影 */
-  --pet-dot-2: rgba(0, 111, 238, 0.55);
-  --pet-dot-3: rgba(0, 111, 238, 0.3);
-  --pet-danger: #F31260;
-  --pet-primary-shadow: rgba(0, 111, 238, 0.32);
+  --pet-dot-2: rgba(91, 141, 239, 0.55);
+  --pet-dot-3: rgba(91, 141, 239, 0.3);
+  --pet-danger: #e35d6a;
+  --pet-primary-shadow: rgba(91, 141, 239, 0.32);
+  /* 品牌强调渐变（导入/主行动按钮、区块标识点），跨主题统一为同色系 */
+  --pet-brand-gradient: linear-gradient(135deg, #7eb1f5 0%, #5b8def 55%, #8c7ed8 100%);
+  --pet-brand-shadow: rgba(91, 141, 239, 0.4);
+  /* 主题专属装饰色（光斑用，浅色低饱和） */
+  --pet-deco-1: rgba(167, 199, 255, 0.55);
+  --pet-deco-2: rgba(214, 188, 240, 0.5);
+  --pet-deco-3: rgba(255, 200, 222, 0.42);
   /* 字体（圆体 Quicksand 为视觉签名，离线回退系统字体） */
   --pet-font: 'Quicksand', 'Nunito', system-ui, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --pet-size: 180px;
@@ -49,28 +57,101 @@
 }
 
 :root[data-theme="pet-pink"] {
-  --pet-ink: #2f2b37;
-  --pet-muted: #6f687b;
-  --pet-surface: rgba(255, 255, 255, 0.82);
-  --pet-surface-strong: rgba(255, 255, 255, 0.94);
-  --pet-border: rgba(104, 93, 122, 0.18);
-  --pet-shadow: 0 18px 40px rgba(57, 44, 76, 0.18);
-  --pet-accent: #ef7f8f;
-  --pet-accent-soft: #ffe5e8;
-  --pet-accent-strong: #d85f75;
-  --pet-accent-strong-border: rgba(216, 95, 117, 0.35);
-  --pet-link: #b5445f;
-  --pet-focus-ring: rgba(239, 127, 143, 0.24);
-  --pet-focus-border: rgba(239, 127, 143, 0.5);
-  --pet-app-bg: rgba(255, 248, 245, 0.55);
-  --pet-app-border: rgba(255, 255, 255, 0.6);
-  --pet-app-shadow: 0 24px 70px rgba(57, 44, 76, 0.35);
-  --pet-chrome-bg: rgba(255, 255, 255, 0.32);
-  --pet-chrome-border: rgba(255, 255, 255, 0.42);
-  --pet-dot-2: rgba(239, 127, 143, 0.55);
-  --pet-dot-3: rgba(239, 127, 143, 0.3);
+  --pet-ink: #3a2b30;
+  --pet-muted: #8a7480;
+  --pet-surface: rgba(255, 255, 255, 0.86);
+  --pet-surface-strong: rgba(255, 252, 251, 0.96);
+  --pet-border: rgba(180, 130, 140, 0.22);
+  --pet-shadow: 0 6px 20px rgba(120, 70, 90, 0.1);
+  /* 主色（樱粉，柔和版 #f29bae） */
+  --pet-accent: #f29bae;
+  --pet-accent-soft: rgba(242, 155, 174, 0.16);
+  --pet-accent-strong: #e57d96;
+  --pet-accent-strong-border: rgba(229, 125, 150, 0.35);
+  --pet-link: #d56a83;
+  --pet-focus-ring: rgba(242, 155, 174, 0.28);
+  --pet-focus-border: rgba(242, 155, 174, 0.55);
+  /* 壳底色：暖粉到杏黄渐变 */
+  --pet-app-bg: linear-gradient(135deg, #fff0ec 0%, #fde4ea 50%, #ffe9d6 100%);
+  --pet-app-border: rgba(255, 255, 255, 0.7);
+  --pet-app-shadow: 0 12px 40px rgba(180, 100, 120, 0.18);
+  --pet-chrome-bg: rgba(255, 240, 236, 0.85);
+  --pet-chrome-border: rgba(220, 180, 185, 0.6);
+  --pet-dot-2: rgba(242, 155, 174, 0.55);
+  --pet-dot-3: rgba(242, 155, 174, 0.3);
   --pet-danger: #e35d6a;
-  --pet-primary-shadow: rgba(239, 127, 143, 0.32);
+  --pet-primary-shadow: rgba(242, 155, 174, 0.32);
+  --pet-brand-gradient: linear-gradient(135deg, #fbc4d2 0%, #f29bae 55%, #f0a586 100%);
+  --pet-brand-shadow: rgba(242, 155, 174, 0.4);
+  --pet-deco-1: rgba(255, 195, 210, 0.6);
+  --pet-deco-2: rgba(255, 215, 195, 0.55);
+  --pet-deco-3: rgba(255, 225, 210, 0.45);
+  --pet-font: system-ui, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --pet-size: 180px;
+}
+
+:root[data-theme="mint-soft"] {
+  /* 薄荷嫩芽 — 清新绿，柔和 */
+  --pet-ink: #1f3530;
+  --pet-muted: #6b8079;
+  --pet-surface: rgba(255, 255, 255, 0.86);
+  --pet-surface-strong: rgba(252, 255, 252, 0.96);
+  --pet-border: rgba(120, 170, 155, 0.22);
+  --pet-shadow: 0 6px 20px rgba(50, 110, 90, 0.1);
+  --pet-accent: #5fc4a8;
+  --pet-accent-soft: rgba(95, 196, 168, 0.16);
+  --pet-accent-strong: #45a98e;
+  --pet-accent-strong-border: rgba(95, 196, 168, 0.35);
+  --pet-link: #45a98e;
+  --pet-focus-ring: rgba(95, 196, 168, 0.28);
+  --pet-focus-border: rgba(95, 196, 168, 0.55);
+  --pet-app-bg: linear-gradient(135deg, #e8f7f0 0%, #ecf6e3 50%, #f0f8e7 100%);
+  --pet-app-border: rgba(255, 255, 255, 0.7);
+  --pet-app-shadow: 0 12px 40px rgba(80, 140, 110, 0.18);
+  --pet-chrome-bg: rgba(228, 244, 235, 0.85);
+  --pet-chrome-border: rgba(170, 210, 195, 0.6);
+  --pet-dot-2: rgba(95, 196, 168, 0.55);
+  --pet-dot-3: rgba(95, 196, 168, 0.3);
+  --pet-danger: #e07a6e;
+  --pet-primary-shadow: rgba(95, 196, 168, 0.32);
+  --pet-brand-gradient: linear-gradient(135deg, #a3d9c8 0%, #5fc4a8 55%, #88c9a4 100%);
+  --pet-brand-shadow: rgba(95, 196, 168, 0.4);
+  --pet-deco-1: rgba(163, 217, 200, 0.55);
+  --pet-deco-2: rgba(195, 230, 200, 0.5);
+  --pet-deco-3: rgba(220, 240, 215, 0.45);
+  --pet-font: system-ui, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --pet-size: 180px;
+}
+
+:root[data-theme="lavender-mist"] {
+  /* 薰衣草晨雾 — 淡紫，柔雾感 */
+  --pet-ink: #322a3a;
+  --pet-muted: #7e6f87;
+  --pet-surface: rgba(255, 255, 255, 0.86);
+  --pet-surface-strong: rgba(254, 252, 255, 0.96);
+  --pet-border: rgba(160, 140, 180, 0.22);
+  --pet-shadow: 0 6px 20px rgba(110, 80, 130, 0.1);
+  --pet-accent: #b196e0;
+  --pet-accent-soft: rgba(177, 150, 224, 0.16);
+  --pet-accent-strong: #9c7ed0;
+  --pet-accent-strong-border: rgba(177, 150, 224, 0.35);
+  --pet-link: #8d6cc0;
+  --pet-focus-ring: rgba(177, 150, 224, 0.28);
+  --pet-focus-border: rgba(177, 150, 224, 0.55);
+  --pet-app-bg: linear-gradient(135deg, #f1ebf7 0%, #efe9f5 50%, #f7ecf0 100%);
+  --pet-app-border: rgba(255, 255, 255, 0.7);
+  --pet-app-shadow: 0 12px 40px rgba(130, 100, 160, 0.18);
+  --pet-chrome-bg: rgba(243, 236, 250, 0.85);
+  --pet-chrome-border: rgba(200, 180, 215, 0.6);
+  --pet-dot-2: rgba(177, 150, 224, 0.55);
+  --pet-dot-3: rgba(177, 150, 224, 0.3);
+  --pet-danger: #d97a96;
+  --pet-primary-shadow: rgba(177, 150, 224, 0.32);
+  --pet-brand-gradient: linear-gradient(135deg, #d8c4ed 0%, #b196e0 55%, #c4a8d8 100%);
+  --pet-brand-shadow: rgba(177, 150, 224, 0.4);
+  --pet-deco-1: rgba(216, 196, 237, 0.55);
+  --pet-deco-2: rgba(220, 200, 230, 0.5);
+  --pet-deco-3: rgba(232, 215, 240, 0.45);
   --pet-font: system-ui, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --pet-size: 180px;
 }
@@ -190,51 +271,49 @@ button {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  border-radius: 16px;
+  border-radius: 18px;
   overflow: hidden;
   background: var(--pet-app-bg);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
-  border: 1px solid var(--pet-app-border);
-  box-shadow: var(--pet-app-shadow);
+  /* 关键：transparent 窗体上，border / box-shadow 会"溢出"到 alpha=0 的角区域，
+     在 OS 矩形窗口外侧形成一圈半透明痕迹（"假圆角"）。
+     border-radius 的圆角已足够做视觉切分，不再叠加 border / box-shadow。 */
+  border: 0;
+  box-shadow: none;
 }
 
-/* aurora-glass：底层为 NapCat 实色渐变（不透桌面），叠加蓝/粉彩色光斑 */
-[data-theme="aurora-glass"] .app-shell {
+/* 所有主题统一柔和光斑 + 实色打底层：完全挡住桌面穿透，光斑仅作色彩装饰 */
+.app-shell {
   position: relative;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  isolation: isolate;
 }
-
-[data-theme="aurora-glass"] .app-shell > * {
-  position: relative;
-  z-index: 1;
-}
-
-[data-theme="aurora-glass"] .app-shell::before,
-[data-theme="aurora-glass"] .app-shell::after {
+.app-shell::before {
+  /* 实色打底层：用主题同色系极浅色铺底，
+     避免在 transparent 窗体上被系统玻璃穿透看到桌面。 */
   content: "";
   position: absolute;
+  inset: 0;
   z-index: 0;
-  border-radius: 50%;
-  filter: blur(52px);
+  background: var(--pet-app-bg);
+  border-radius: inherit;
   pointer-events: none;
 }
-
-[data-theme="aurora-glass"] .app-shell::before {
-  width: 340px;
-  height: 340px;
-  top: -90px;
-  left: -70px;
-  background: rgba(153, 199, 251, 0.55);
+.app-shell::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(260px 260px at 12% 8%, var(--pet-deco-1) 0%, transparent 65%),
+    radial-gradient(240px 240px at 92% 96%, var(--pet-deco-2) 0%, transparent 65%),
+    radial-gradient(180px 180px at 80% 20%, var(--pet-deco-3) 0%, transparent 70%);
+  filter: blur(2px);
+  opacity: 0.85;
 }
-
-[data-theme="aurora-glass"] .app-shell::after {
-  width: 300px;
-  height: 300px;
-  right: -60px;
-  bottom: -80px;
-  background: rgba(244, 114, 182, 0.42);
+.app-shell > * {
+  position: relative;
+  z-index: 2;
 }
 
 /* ===== aurora-glass 区域差异化 =====

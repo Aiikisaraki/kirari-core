@@ -1,17 +1,24 @@
 {
     "name": "akisaki-kirari",
     "private": true,
-    "version": "0.3.0",
+    "version": "0.3.1",
     "main": "dist-electron/main.js",
     "scripts": {
         "dev": "chcp 65001 && vite",
         "build": "chcp 65001 && vite build",
         "preview": "chcp 65001 && vite preview",
         "electron:dev": "chcp 65001 && vite",
-        "pack": "electron-builder --dir",
+        "pack": "electron-builder --dir --config electron-builder.integrated.yml",
         "prepack-backend-runtime": "node scripts/prepack-backend-runtime.cjs",
-        "predist": "npm run prepack-backend-runtime",
-        "dist": "npm run build && electron-builder --publish=never"
+        "write-edition-nsh": "node scripts/write-edition-nsh.cjs",
+        "dist": "npm run dist:integrated",
+        "dist:frontend": "npm run build && npm run pack:frontend",
+        "dist:integrated": "npm run build && npm run prepack-backend-runtime && npm run pack:integrated",
+        "dist:full": "npm run build && npm run prepack-backend-runtime && npm run pack:full",
+        "dist:all": "npm run build && npm run prepack-backend-runtime && npm run pack:frontend && npm run pack:integrated && npm run pack:full",
+        "pack:frontend": "node scripts/write-edition-nsh.cjs frontend && electron-builder --config electron-builder.frontend.yml --publish=never",
+        "pack:integrated": "node scripts/write-edition-nsh.cjs integrated && electron-builder --config electron-builder.integrated.yml --publish=never",
+        "pack:full": "node scripts/write-edition-nsh.cjs full && electron-builder --config electron-builder.full.yml --publish=never"
     },
     "dependencies": {
         "@vue/devtools-api": "^8.1.5",

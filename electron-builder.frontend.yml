@@ -1,5 +1,8 @@
-# electron-builder 配置：单机版（前后端一体安装包）
-# 构建：npm run dist  （会先 vite build，再打包 NSIS 安装向导）
+# electron-builder 配置：纯前端版（不打包后端 API，体积更小）
+# 适用：已部署好远程服务端的用户，仅安装桌面客户端并连接远程服务。
+# 构建：npm run dist:frontend
+# 与 integrated 的区别：extraResources 不含 pet-api（后端）与 backend-runtime（Node 运行时），
+# afterPack 钩子会检测到无后端而自动跳过 node_modules 复制。
 appId: com.akisaki.kirari
 productName: Kirari绮莉
 # 二进制文件名用 ASCII，降低杀软对非 ASCII Electron exe 的启发式扫描/误报
@@ -34,34 +37,21 @@ extraFiles:
   - from: build-resources/install-avatars.ps1
     to: install-avatars.ps1
 
-# 额外资源：
-#   - 后端 API（不含 node_modules）：从 build-resources/pet-api-bundle（prepack 生成）打包。
-#     node_modules 由 afterPack 钩子强制复制（electron-builder 默认排除 node_modules，与 gitignore 无关）。
-#   - Node 运行时：从 build-resources/backend-runtime 打包进 resources/pet-api/runtime。
-#   - 官方皮肤：把项目 resources/official-avatars 下所有皮肤子目录打包进安装包的
-#     resources/official-avatars，安装阶段由 NSIS 脚本一次性释放到 userData/avatars。
-#     应用启动后不再替换皮肤（仅开发模式下首次启动且目录为空时兜底复制）。
+# 额外资源：纯前端版仅打包官方皮肤，不打包后端 API 与 Node 运行时。
 extraResources:
   - from: resources/official-avatars
     to: official-avatars
     filter:
       - "**/*"
-  - from: build-resources/pet-api-bundle
-    to: pet-api
-    filter:
-      - "**/*"
-      - "!**/*.log"
-      - "!**/node_modules/**"
-  - from: build-resources/backend-runtime
-    to: pet-api/runtime
 
-# 打包完成后钩子：强制注入后端 node_modules（绕过 extraResources 的默认 node_modules 排除规则）
+# 打包完成后钩子：检测到无后端时自动跳过 node_modules 复制（见 scripts/after-pack.cjs）
 afterPack: scripts/after-pack.cjs
 
 win:
   target:
     - nsis
-  artifactName: ${productName}-Setup-${version}.${ext}
+  # ASCII 文件名，避免中文（productName 含中文 "Kirari绮莉"）被部分杀软启发式误报
+  artifactName: aki-kirari-pet-frontend-setup-${version}.${ext}
 
 # Windows 安装向导：非一键安装，允许用户选择目录、创建桌面快捷方式。
 nsis:
@@ -79,5 +69,5 @@ nsis:
   installerLanguages:
     - zh_CN
     - en
-  # 自定义安装向导页（模型配置）：插入到"选择安装目录"之后、"开始安装"之前
+  # 自定义安装向导页：纯前端版不显示「模型配置」页，仅由 include 控制
   include: build-resources/installer.nsh
