@@ -3,6 +3,7 @@ const { verifySession } = require("../auth/sessionAuth");
 const sessionManager = require("../session/sessionManager");
 const fallbackService = require("../services/fallbackService");
 const aiReplyService = require("../services/aiReplyService");
+const toolsModule = require("../tools");
 const {
     createConnectionAiContext,
     cleanupConnectionAiContext,
@@ -59,10 +60,75 @@ function setupWebSocket(server, options = {}) {
         const clientIp = (req && req.socket && req.socket.remoteAddress) || '';
         console.log(`✅ 已认证客户端连接 (uid=${authUid})`);
         let aiContext = null;
+        // 前端托管工具（MCP server / skill 提供的工具）schema 列表，由前端通过
+        // register_tools 消息上报；后端把它们并入模型的 function-calling 工具集。
+        ws.frontendTools = [];
+        ws.skillPrompts = [];
+        // 进行中的前端工具调用：call_id → { resolve, reject, timer }
+        // 当模型命中前端工具时，后端发 tool_invoke 消息回调解前端，前端执行完回 tool_result。
+        ws.pendingToolCalls = new Map();
+
+        // 通过 WS 回调「前端托管工具」执行：发 tool_invoke 给 Electron 主进程，
+        // 等待其回 tool_result（带相同 call_id）。带超时，避免主进程无响应卡死模型循环。
+        function invokeFrontendTool(name, args) {
+            return new Promise((resolve, reject) => {
+                if (ws.readyState !== WebSocket.OPEN) {
+                    return reject(new Error('WS 连接已断开，无法调用前端工具'));
+                }
+                const callId =
+                    'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+                const timer = setTimeout(() => {
+                    ws.pendingToolCalls.delete(callId);
+                    reject(new Error(`前端工具调用超时（30s 未收到结果）：${name}`));
+                }, 30000);
+                ws.pendingToolCalls.set(callId, { resolve, reject, timer });
+                ws.send(
+                    JSON.stringify({
+                        type: 'tool_invoke',
+                        call_id: callId,
+                        name,
+                        args,
+                    }),
+                );
+            });
+        }
 
         ws.on("message", async (data) => {
             try {
             const message = JSON.parse(data.toString());
+
+            // ── 前端托管工具：注册 / 结果回传（不是聊天消息，单独处理）──
+            if (message.type === 'register_tools') {
+                const list = Array.isArray(message.tools) ? message.tools : [];
+                ws.frontendTools = list.filter(
+                    (t) => t && t.function && typeof t.function.name === 'string',
+                );
+                // 合并进全局注册表，供 aiReplyService 构建工具集时使用。
+                toolsModule.setFrontendTools(ws.frontendTools);
+                console.log(`🔧 前端注册工具 ${ws.frontendTools.length} 个: ${ws.frontendTools.map((t) => t.function.name).join(', ')}`);
+                return;
+            }
+            if (message.type === 'register_skills') {
+                const prompts = Array.isArray(message.prompts) ? message.prompts : [];
+                ws.skillPrompts = prompts.filter((p) => typeof p === 'string' && p.trim());
+                console.log(`🧩 前端注册技能指令 ${ws.skillPrompts.length} 条`);
+                return;
+            }
+            if (message.type === 'tool_result') {
+                const callId = message.call_id;
+                const pending = ws.pendingToolCalls.get(callId);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    ws.pendingToolCalls.delete(callId);
+                    const content =
+                        typeof message.content === 'string'
+                            ? message.content
+                            : JSON.stringify(message.content ?? '');
+                    pending.resolve(content);
+                }
+                return;
+            }
+
             const userMessage = (typeof message.content === 'string' ? message.content : '').trim();
             const images = Array.isArray(message.images)
               ? message.images.filter((x) => typeof x === 'string' && x.trim())
@@ -87,6 +153,8 @@ function setupWebSocket(server, options = {}) {
             if (!aiContext) {
                 console.log(`[WS-PERF] createConnectionAiContext 调用前 @${Date.now()}`);
                 aiContext = await createConnectionAiContext(userid);
+                // 把「前端托管工具执行器」挂到 aiContext，供 aiReplyService 的 tool loop 回调。
+                aiContext.invokeFrontendTool = invokeFrontendTool;
                 console.log(`[WS-PERF] createConnectionAiContext 完成 @${Date.now()}`);
             }
 
@@ -123,6 +191,7 @@ function setupWebSocket(server, options = {}) {
                     sessionId,
                     clientIp,
                     locationScope,
+                    skillPrompts: ws.skillPrompts || [],
                 });
                 console.log(`[WS-PERF] ← getReply 返回 @${Date.now()} 总耗时 ${Date.now()-_wsT0}ms`);
                 } catch (error) {
@@ -190,12 +259,27 @@ function setupWebSocket(server, options = {}) {
         }, 1500);
 
         ws.on("close", () => {
+            // 拒绝所有未完成的前端工具调用，避免 Promise 永久挂起。
+            if (ws.pendingToolCalls) {
+                for (const [, pending] of ws.pendingToolCalls) {
+                    clearTimeout(pending.timer);
+                    pending.reject(new Error('WS 连接关闭，前端工具调用中断'));
+                }
+                ws.pendingToolCalls.clear();
+            }
             cleanupConnectionAiContext(aiContext);
             aiContext = null;
             console.log("🔌 客户端断开连接");
         });
 
         ws.on("error", () => {
+            if (ws.pendingToolCalls) {
+                for (const [, pending] of ws.pendingToolCalls) {
+                    clearTimeout(pending.timer);
+                    pending.reject(new Error('WS 连接出错，前端工具调用中断'));
+                }
+                ws.pendingToolCalls.clear();
+            }
             cleanupConnectionAiContext(aiContext);
             aiContext = null;
         });

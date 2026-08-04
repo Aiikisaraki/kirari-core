@@ -106,13 +106,15 @@ function parseModelReply(raw) {
   return withImages({ speech: text, emotion: null });
 }
 
-const { TOOL_DEFS, runTool, geocode } = require('../tools');
+const { mergeTools, runTool, getFrontendToolNames } = require('../tools');
 const locationSvc = require('./locationService');
 
 // 联网工具：web_search 默认可用（内置 uapis 免 key 源），始终暴露；
 // 用户若在设置里填了 SearXNG 地址 / Tavily Key，dispatcher 会自动路由到对应源。
+// 同时合并前端托管工具（MCP server / skill 提供的工具）：这些工具由 Electron 主进程
+// 实际执行，后端只持有其 schema，模型命中时由 socketServer 回调解前端执行。
 function buildTools() {
-  return TOOL_DEFS;
+  return mergeTools();
 }
 
 // ── 意图预检：在 LLM 调用前根据关键词预判是否需要联网工具 ──
@@ -583,7 +585,7 @@ async function polishToolResult(rawToolText, aiContext, sessionId, userText, con
   };
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [] } = {}) {
   if (!aiContext || aiContext.closed || !aiContext.openai) {
     throw new Error('AI 连接上下文不可用');
   }
@@ -700,6 +702,13 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       ? SYSTEM_PROMPT_WITH_TOOLS.replace('{{TOOL_RESULTS}}', preflight.injected.join('\n'))
       : SYSTEM_PROMPT_NORMAL;
 
+    // 注入前端托管的 skill 行为模板（提示词形态能力）：把启用中的 skill 指令追加到 system，
+    // 让模型在回复时遵循这些「技能设定」。
+    const skillBlock =
+      Array.isArray(skillPrompts) && skillPrompts.length
+        ? '\n\n# 已启用的技能（请遵循以下设定）\n' + skillPrompts.join('\n\n')
+        : '';
+
     // 历史消息 content 可能是字符串，或 [text, image_url] 多模态数组（JSON 序列化存储）；
     // 统一归一化为 OpenAI 消息格式，确保发送过的图片在上下文里不被丢弃。
     // 同时剔除启动问候语等系统噪声，避免污染 LLM 上下文。
@@ -728,7 +737,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         : (text || '');
 
     const messages = [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: systemPrompt + skillBlock },
       ...normalizedRecent,
       { role: 'user', content: userContent },
     ];
@@ -793,12 +802,20 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
           const args = tc.function?.arguments
             ? JSON.parse(tc.function.arguments)
             : {};
-          result = await runTool(tc.function?.name, args, {
-            searchKey: aiContext.searchKey,
-            searchEndpoint: aiContext.searchEndpoint,
-            searchProvider: aiContext.searchProvider,
-            openai: aiContext.openai,
-          });
+          const toolName = tc.function?.name;
+          // 前端托管工具（MCP/skill 提供，总是以 frontend__ 前缀标识）：
+          // 后端无法本地执行，必须通过 WS 回调解 Electron 主进程执行后取回结果。
+          const frontendToolNames = aiContext.invokeFrontendTool ? getFrontendToolNames() : null;
+          if (frontendToolNames && frontendToolNames.has(toolName)) {
+            result = await aiContext.invokeFrontendTool(toolName, args);
+          } else {
+            result = await runTool(toolName, args, {
+              searchKey: aiContext.searchKey,
+              searchEndpoint: aiContext.searchEndpoint,
+              searchProvider: aiContext.searchProvider,
+              openai: aiContext.openai,
+            });
+          }
         } catch (e) {
           result = `error: ${e instanceof Error ? e.message : String(e)}`;
         }

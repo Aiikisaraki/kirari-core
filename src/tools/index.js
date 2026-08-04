@@ -396,4 +396,36 @@ async function runTool(name, args = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOL_DEFS, runTool, geocode, geocodeCandidates };
+// ── 前端托管工具（MCP server / skill 提供的工具）──
+// 这些工具由 Electron 主进程（前端）实际执行，后端只持有其 schema 并在模型
+// 调用时把它们并入 function-calling 工具集；当模型命中前端工具时，后端通过 WS
+// 回调解前端执行，再把结果回灌模型。见 socketServer 的 toolBridge 机制。
+//
+// 约定：前端声明的工具名统一以 "frontend__" 前缀标识，便于后端区分「自己能执行」
+// 还是「需回调解前端」。
+let frontendToolRegistry = [];
+
+// 用前端本轮 register_tools 上报的工具 schema 覆盖注册表。
+function setFrontendTools(tools) {
+  frontendToolRegistry = Array.isArray(tools) ? tools.filter((t) => t && t.function && t.function.name) : [];
+  return frontendToolRegistry;
+}
+
+function getFrontendToolNames() {
+  return new Set(frontendToolRegistry.map((t) => t.function.name));
+}
+
+// 合并后端内置工具与前端托管工具，供模型 function-calling 使用。
+function mergeTools() {
+  return [...TOOL_DEFS, ...frontendToolRegistry];
+}
+
+module.exports = {
+  TOOL_DEFS,
+  runTool,
+  geocode,
+  geocodeCandidates,
+  setFrontendTools,
+  getFrontendToolNames,
+  mergeTools,
+};
