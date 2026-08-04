@@ -16,6 +16,7 @@ const { getDeployConfig, login, register, getProfile, logout } = useApiToken();
 const mode = ref<"local" | "remote">("local");
 const authed = ref(false);
 const accountName = ref("");
+const error = ref("");
 const petName = ref("Kirari");
 const activeId = ref<string>("appearance");
 
@@ -28,8 +29,20 @@ async function refreshAuth() {
         const config = await getDeployConfig();
         mode.value = config.mode;
         if (config.mode === "local") {
-            authed.value = true;
-            accountName.value = "本地内置账户";
+            // 本地内置账户：必须真正向后端验证内置令牌是否已被接受，
+            // 不能无条件视为已登录（否则会与后端实际拒绝握手的凭证状态不一致）。
+            try {
+                const profile = await getProfile();
+                authed.value = true;
+                accountName.value = profile.username || "本地内置账户";
+            } catch (err) {
+                authed.value = false;
+                accountName.value = "";
+                error.value =
+                    err instanceof Error && err.message
+                        ? `内置账户令牌未被后端接受：${err.message}（请检查服务端 BUILTIN_ACCOUNT_TOKEN 与本地配置是否一致）`
+                        : "内置账户令牌未被后端接受，请检查后端状态或内置令牌配置";
+            }
             return;
         }
         try {
@@ -105,6 +118,7 @@ onMounted(() => {
                         <span class="settings-greeting__name">{{ petName }}</span>
                         <span class="settings-greeting__sub">· {{ activeLabel }}</span>
                     </p>
+                    <p v-if="error" class="settings-greeting__error">{{ error }}</p>
                     <span class="settings-greeting__spacer" />
                     <span
                         v-if="mode === 'remote'"

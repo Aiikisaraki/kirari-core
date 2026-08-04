@@ -17,9 +17,11 @@ export function getBackendPort(): number {
   return activeLocalPort;
 }
 
-// 与后端 routes.js / backendEnv 保持一致的本地内置账户令牌。
-// 安装向导写入的 config.json 正是用它注入到 /api/profile。
-const BUILTIN_TOKEN = process.env.BUILTIN_ACCOUNT_TOKEN || "kirari-local-builtin";
+// 本地内置账户令牌默认值。
+// 注意：一键部署（local）模式下，后端必须用与前端完全相同的 builtinToken 启动，
+// 否则前端 WS 握手携带的令牌与后端 BUILTIN_ACCOUNT_TOKEN 不一致，会一直被拒（4401）。
+// 真正的令牌值来自 clientConfig.builtinToken（由 startBackendIfLocal 传入），此处仅作兜底。
+const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 
 let child: ChildProcess | null = null;
 
@@ -60,7 +62,7 @@ function resolveNodeBin(backendDir: string): string | null {
 
 // 注入运行所需环境变量，等价于后端 .env，避免安装包依赖外部 .env 文件存在性。
 // 若外层已设置（如打包机 CI 注入）则尊重外部值。
-function backendEnv(): NodeJS.ProcessEnv {
+function backendEnv(builtinToken: string): NodeJS.ProcessEnv {
   // 数据库目录外置到用户目录：每台机器独立、可写、且不进安装包（避免泄露开发者自己的 token/库）。
   const dataDir = path.join(app.getPath("userData"), "pet-api-data");
   return {
@@ -72,7 +74,9 @@ function backendEnv(): NodeJS.ProcessEnv {
     PORT: String(getBackendPort()),
     STORAGE_TYPE: process.env.STORAGE_TYPE || "db",
     MODEL_API_ENDPOINT: process.env.MODEL_API_ENDPOINT || "https://api.chatanywhere.tech/v1",
-    BUILTIN_ACCOUNT_TOKEN: process.env.BUILTIN_ACCOUNT_TOKEN || "kirari-local-builtin",
+    // 关键：本地模式的 BUILTIN_ACCOUNT_TOKEN 必须等于前端 clientConfig.builtinToken，
+    // 否则 WS 握手令牌与后端不一致，前端会一直被拒绝。
+    BUILTIN_ACCOUNT_TOKEN: process.env.BUILTIN_ACCOUNT_TOKEN || builtinToken,
     SESSION_SECRET: process.env.SESSION_SECRET || "kirari-dev-session-secret",
     PET_API_DATA_DIR: dataDir,
     NODE_ENV: "production",
@@ -118,7 +122,9 @@ async function waitForHealth(timeoutMs = 15000): Promise<{ ok: boolean; reason?:
 // 把 userData/config.json（用户级可编辑配置文件）的模型配置同步到后端 DB。
 // config.json 是「权威配置」：仅以其中「非空」的字段覆盖后端，空字段不触碰后端现有值。
 // 既用于首次启动播种，也用于用户（设置界面或外部编辑器）修改 config.json 后的实时同步。
-export async function applyConfigToBackend(): Promise<void> {
+// builtinToken 用于向后端 /api/profile 鉴权（与启动后端时注入的 BUILTIN_ACCOUNT_TOKEN 一致）。
+export async function applyConfigToBackend(builtinToken?: string): Promise<void> {
+  const token = builtinToken || DEFAULT_BUILTIN_TOKEN;
   try {
     const cfgPath = path.join(app.getPath("userData"), "config.json");
     if (!fs.existsSync(cfgPath)) {
@@ -144,7 +150,7 @@ export async function applyConfigToBackend(): Promise<void> {
     }
 
     const headers = {
-      "x-builtin-token": BUILTIN_TOKEN,
+      "x-builtin-token": token,
       "content-type": "application/json",
     };
 
@@ -176,14 +182,17 @@ export async function applyConfigToBackend(): Promise<void> {
 }
 
 // 后端就绪后，把 config.json 的模型配置同步进后端 DB（config.json 为权威配置）。
-async function seedBackendFromConfig(): Promise<void> {
-  await applyConfigToBackend();
+async function seedBackendFromConfig(builtinToken: string): Promise<void> {
+  await applyConfigToBackend(builtinToken);
 }
 
 // 本地模式且非 dev 时自启动后端 API。返回时后端应已在监听（或已超时告警）。
-export async function startBackendIfLocal(opts: { isLocal: boolean }): Promise<void> {
+// builtinToken 必须与前端的 clientConfig.builtinToken 完全一致，否则 WS 握手令牌不匹配会被后端拒绝。
+export async function startBackendIfLocal(opts: { isLocal: boolean; builtinToken?: string }): Promise<void> {
   if (!opts.isLocal) return; // 远程模式：连远程服务器，不启动本地后端
   if (isDev()) return; // dev：沿用独立运行的后端
+
+  const builtinToken = opts.builtinToken || DEFAULT_BUILTIN_TOKEN;
 
   // 本地模式：每次启动动态挑选一个空闲端口，作为启动参数注入后端子进程，
   // 主进程也用同一端口连接。避免写死 9089 被占用 / 系统保留导致 EACCES。
@@ -221,12 +230,12 @@ export async function startBackendIfLocal(opts: { isLocal: boolean }): Promise<v
 
   console.log(`[backend] 后端将监听端口 ${getBackendPort()} | HTTP http://127.0.0.1:${getBackendPort()} | WS ws://127.0.0.1:${getBackendPort()}/ws`);
   console.log(`[backend] 准备启动: ${nodeBin} server.js (cwd=${backendDir})`);
-  console.log(`[backend] 注入环境变量: HOST=127.0.0.1 PORT=${getBackendPort()} MODEL_API_ENDPOINT=${backendEnv().MODEL_API_ENDPOINT}`);
+  console.log(`[backend] 注入环境变量: HOST=127.0.0.1 PORT=${getBackendPort()} BUILTIN_ACCOUNT_TOKEN=${builtinToken}`);
 
   // 用 pipe 捕获输出以便排查问题（之前 ignore 导致启动失败完全无日志）
   child = spawn(nodeBin, ["server.js"], {
     cwd: backendDir,
-    env: backendEnv(),
+    env: backendEnv(builtinToken),
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -255,8 +264,28 @@ export async function startBackendIfLocal(opts: { isLocal: boolean }): Promise<v
     return;
   }
 
+  // 后端已就绪：用与前端一致的 builtinToken 校验「凭证有效性」——
+  // 若此处用 builtinToken 访问 /api/profile 失败，说明内置令牌与后端不一致，
+  // 必须立即报错（而非让前端一直用错误凭证重连）。
+  try {
+    const verifyRes = await fetch(`http://127.0.0.1:${getBackendPort()}/api/profile`, {
+      method: "GET",
+      headers: { "x-builtin-token": builtinToken },
+    });
+    if (verifyRes.ok) {
+      console.log("[backend] 内置账户令牌校验通过：前端与后端凭证一致");
+    } else {
+      console.error(
+        `[backend] ⚠️ 内置账户令牌校验失败 HTTP ${verifyRes.status}：前端 builtinToken 与后端 BUILTIN_ACCOUNT_TOKEN 不一致，` +
+          `请检查 pet-client.config.json 的 builtinToken 与启动器注入的令牌是否相同。`,
+      );
+    }
+  } catch (e) {
+    console.warn("[backend] 凭证就绪校验请求出错（不影响后端运行）:", e instanceof Error ? e.message : String(e));
+  }
+
   // 后端已就绪：把安装向导的配置播种进 DB（若用户尚未在设置里配置）
-  await seedBackendFromConfig();
+  await seedBackendFromConfig(builtinToken);
 }
 
 // 关闭前端时同步终止后端子进程及其进程树。

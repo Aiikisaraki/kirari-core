@@ -60,6 +60,8 @@ export class ChatSessionService {
     private persistenceQueue: Promise<void> = Promise.resolve();
     private initialized = false;
     private disposed = false;
+    // 凭证错误（4401/401）时置 true，停止自动重连，避免无限刷后端日志。
+    private stopReconnect = false;
     private state: ChatStateSnapshot = {
         sessionId: crypto.randomUUID(),
         connected: false,
@@ -193,6 +195,7 @@ export class ChatSessionService {
         }
 
         this.clearReconnectTimer();
+        this.stopReconnect = false;
         this.state.connected = false;
         this.state.lastError = "";
         this.emit();
@@ -328,11 +331,18 @@ export class ChatSessionService {
         this.state.connected = false;
         this.state.lastError = message;
         this.emit();
+        // 凭证错误（401 / 4401 / 未授权）属于不可恢复错误：后端明确拒绝了令牌，
+        // 不应无限重连反复刷后端日志。停止重连，等待用户在设置页重新登录 / 修正内置令牌。
+        if (/4401|401|未授权|令牌.*无效|凭证/.test(message)) {
+            console.error("[chat-session] ⛔ 凭证错误，停止自动重连。请在设置页重新登录或检查内置令牌配置。");
+            this.stopReconnect = true;
+            return;
+        }
         this.scheduleReconnect();
     }
 
     private scheduleReconnect() {
-        if (this.disposed) {
+        if (this.disposed || this.stopReconnect) {
             return;
         }
 

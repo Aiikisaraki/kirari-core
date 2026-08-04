@@ -384,7 +384,11 @@ async function readApiResponse(response: Response) {
 async function requestSettingsApi(request: SettingsApiRequest) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (clientConfig.mode === "local") {
-    headers["X-Builtin-Token"] = clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN;
+    // 本地内置账户令牌：后端 verifySessionOrBuiltin 只认 Authorization: Bearer，
+    // 故优先用 Bearer 形式；X-Builtin-Token 仅作兼容保留。
+    const builtinToken = clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN;
+    headers["Authorization"] = `Bearer ${builtinToken}`;
+    headers["X-Builtin-Token"] = builtinToken;
   } else if (settingsSessionToken) {
     headers["Authorization"] = `Bearer ${settingsSessionToken}`;
   }
@@ -1422,8 +1426,10 @@ app.whenReady().then(async () => {
 
   // 本地模式（打包版）：以子进程方式自启动后端 API，关闭前端时一并关闭。
   // dev 与 remote 模式不启动本地后端。
+  // 关键：把 clientConfig.builtinToken 透传给启动器，确保后端 BUILTIN_ACCOUNT_TOKEN
+  // 与前端的 WS 握手令牌一致，否则会一直被后端拒绝（4401）。
   if (clientConfig.mode === "local") {
-    await startBackendIfLocal({ isLocal: true });
+    await startBackendIfLocal({ isLocal: true, builtinToken: clientConfig.builtinToken || DEFAULT_BUILTIN_TOKEN });
   }
 
   // 本地模式（打包版）：主进程已为本次启动动态挑选空闲端口并作为启动参数注入后端子进程，
@@ -1437,9 +1443,27 @@ app.whenReady().then(async () => {
     console.log(`[backend] 本地模式使用动态端口 ${p} 连接后端`);
   }
 
-  // 机器人适配器：初始化管理器（连接已启用的适配器 + 后端 WS）。
-  // owner 复用桌面 session、guest 独立 scope，均由 AdapterManager 内部路由。
-  initAdapterManager();
+  // 分离（远程）模式：程序启动即做一次凭证有效性检测。
+  // 若本地残留的 sessionToken 已失效（服务端重置 DB / token 过期），不要带着错误凭证
+  // 去反复重连 WS，而是立即清除并通知前端回到「未登录」状态，由用户在设置页重新登录。
+  if (clientConfig.mode === "remote" && settingsSessionToken) {
+    try {
+      const verifyRes = await fetch(`${backendHttpUrl}/api/profile`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${settingsSessionToken}` },
+      });
+      if (verifyRes.status === 401) {
+        console.warn("[auth] 启动检测：本地 sessionToken 已失效，清除并回到未登录状态");
+        settingsSessionToken = undefined;
+        clientConfig.sessionToken = undefined;
+        saveClientConfig();
+      } else if (verifyRes.ok) {
+        console.log("[auth] 启动检测：本地 sessionToken 仍有效");
+      }
+    } catch (e) {
+      console.warn("[auth] 启动检测 sessionToken 失败（后端不可达）:", e instanceof Error ? e.message : String(e));
+    }
+  }
 
   // 启动 config.json 监听：用户在外部编辑器修改模型配置后，实时同步到后端并广播前端。
   startModelConfigWatch();
