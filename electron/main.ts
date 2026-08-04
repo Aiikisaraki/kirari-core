@@ -76,6 +76,10 @@ type DeployConfig = {
   adapters?: AdapterConfig[];
   // 分离（远端）模式登录后的会话令牌，持久化以跨重启保持登录态。
   sessionToken?: string;
+  // 配置由哪种安装包写入，用于区分残留配置：
+  // "integrated" = 一键部署（内联后端）；"frontend" = 仅前端（需自连远程服务器）；
+  // 旧版/非一键安装包可能无此字段（undefined），视为 legacy，会被一键部署包重置。
+  deployment?: "integrated" | "frontend";
 };
 const DEFAULT_BUILTIN_TOKEN = "kirari-local-builtin";
 const DEFAULT_LOCAL = {
@@ -115,6 +119,10 @@ function loadClientConfig(): DeployConfig {
             )
           : [],
         sessionToken: typeof raw.sessionToken === "string" ? raw.sessionToken : undefined,
+        deployment:
+          raw.deployment === "integrated" || raw.deployment === "frontend"
+            ? raw.deployment
+            : undefined,
         // 仅当 x/y 都是有效数字时才采用持久化位置；否则保持 undefined，启动时回退默认。
         window:
           raw.window && typeof raw.window.x === "number" && typeof raw.window.y === "number"
@@ -134,10 +142,26 @@ const clientConfig = loadClientConfig();
 // 纯前端版（frontend edition）未打包后端：若配置仍是 local 模式，强制退化为 remote，
 // 否则会一直尝试连接本机 9089 而后端根本不存在。退化后由设置页让用户填写远程服务器地址。
 const localBackendAvailable = isBackendBundled();
+
 if (!localBackendAvailable && clientConfig.mode === "local") {
   console.warn("[config] 当前安装包未包含本地后端，强制切换为远程模式（请在设置中填写服务端地址）");
   clientConfig.mode = "remote";
   if (!clientConfig.server) clientConfig.server = { wsUrl: "", httpUrl: "" };
+  saveClientConfig();
+}
+
+// 一键部署包（bundled 后端）：防止旧的非一键部署安装包残留配置干扰内联连接。
+// 旧配置可能残留 remote 模式 + 旧服务器地址 + 已失效的 sessionToken，会导致本应内联的
+// 连接被错误地指向旧服务器而失效。检测到「非本安装包写入」(deployment !== "integrated")
+// 时，强制重置为内联 local 模式，丢弃旧服务器地址与旧 sessionToken（内联模式用 builtinToken）。
+if (localBackendAvailable && clientConfig.deployment !== "integrated") {
+  console.warn(
+    "[config] 检测到非一键部署的残留配置，一键部署包已重置为内联本地模式（忽略旧服务器地址与凭证）",
+  );
+  clientConfig.mode = "local";
+  clientConfig.server = { wsUrl: "", httpUrl: "" };
+  clientConfig.sessionToken = undefined;
+  clientConfig.deployment = "integrated";
   saveClientConfig();
 }
 
