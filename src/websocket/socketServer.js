@@ -161,7 +161,25 @@ function setupWebSocket(server, options = {}) {
 
             if (!aiContext) {
                 console.log(`[WS-PERF] createConnectionAiContext 调用前 @${Date.now()}`);
-                aiContext = await createConnectionAiContext(userid);
+                try {
+                    aiContext = await createConnectionAiContext(userid);
+                } catch (ctxErr) {
+                    // 大模型未配置（缺 API Token / 模型名称 / Endpoint）属于配置缺失，
+                    // 应向前端返回明确、可操作的错误，而不是让外层 catch 兜底成笼统的
+                    // “服务器处理消息失败”，更不是只留在后端日志里。
+                    const reason = ctxErr && ctxErr.message ? ctxErr.message : '大模型尚未配置';
+                    console.warn(`⚠️ 用户 ${userid} 大模型未配置：${reason}`);
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(
+                            JSON.stringify({
+                                type: 'error',
+                                code: 'MODEL_NOT_CONFIGURED',
+                                message: `大模型尚未配置（${reason}）。请先在「设置 → 模型」中填写 API 地址、模型名称与密钥，保存后即可对话。`,
+                            }),
+                        );
+                    }
+                    return;
+                }
                 // 把「前端托管工具执行器」挂到 aiContext，供 aiReplyService 的 tool loop 回调。
                 aiContext.invokeFrontendTool = invokeFrontendTool;
                 console.log(`[WS-PERF] createConnectionAiContext 完成 @${Date.now()}`);

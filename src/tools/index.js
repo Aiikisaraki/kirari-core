@@ -416,8 +416,26 @@ function getFrontendToolNames() {
 }
 
 // 合并后端内置工具与前端托管工具，供模型 function-calling 使用。
+// 注意：前端（MCP/skill）上报的工具 schema 形态是 { function: { name, ... } }，
+// 顶端缺 type 字段；而 OpenAI / 多数兼容端点的 tools 数组要求每个元素带
+// type: 'function'。这里统一归一化，避免把缺 type 的工具送给模型导致
+// 「invalid tool type」类 400 错误（ModelScope 等接口会直接拒绝）。
+function normalizeTool(t) {
+  if (!t || !t.function || !t.function.name) return null;
+  return {
+    type: 'function',
+    function: {
+      name: t.function.name,
+      description: t.function.description || '',
+      parameters: t.function.parameters || { type: 'object', properties: {} },
+    },
+  };
+}
+
 function mergeTools() {
-  return [...TOOL_DEFS, ...frontendToolRegistry];
+  const back = TOOL_DEFS.map(normalizeTool).filter(Boolean);
+  const front = frontendToolRegistry.map(normalizeTool).filter(Boolean);
+  return [...back, ...front];
 }
 
 module.exports = {

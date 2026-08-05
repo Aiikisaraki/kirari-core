@@ -150,6 +150,8 @@ function setupHttpRoutes(app) {
             model.trim(),
             normalizedEndpoint,
         );
+        const tokenMask = typeof token === "string" && token ? `${token.slice(0, 4)}***${token.slice(-4)}` : "(空)";
+        console.log(`[api-token] 模型信息设置成功 userid=${userid} model=${model.trim()} api_endpoint=${normalizedEndpoint} token=${tokenMask}`);
         return res.json({ message: "API令牌设置成功" });
     });
 
@@ -162,6 +164,7 @@ function setupHttpRoutes(app) {
         if (!(await requireClient(req, res, userid))) return;
         if (!(await apiTokenManager.setModelConfig(userid, model)))
             return res.status(404).json({ message: "请先设置API令牌" });
+        console.log(`[api-token/model] 模型信息设置成功 userid=${userid} model=${model}`);
         return res.json({ model });
     });
     app.post("/api-token/endpoint", async (req, res) => {
@@ -172,6 +175,7 @@ function setupHttpRoutes(app) {
         if (!(await requireClient(req, res, userid))) return;
         if (!(await apiTokenManager.setApiEndpoint(userid, apiEndpoint)))
             return res.status(404).json({ message: "请先设置API令牌" });
+        console.log(`[api-token/endpoint] 模型信息设置成功 userid=${userid} api_endpoint=${apiEndpoint}`);
         return res.json({ api_endpoint: apiEndpoint });
     });
     app.post("/api-token/verify", async (req, res) => {
@@ -271,6 +275,13 @@ function setupHttpRoutes(app) {
     }
     await dbStorage.setProfile(auth.uid, patch);
     const profile = await dbStorage.getProfile(auth.uid);
+    // 模型信息设置成功日志：输出用户与模型信息（token 仅打印掩码，避免泄露明文）。
+    const tokenMask = profile?.token ? `${profile.token.slice(0, 4)}***${profile.token.slice(-4)}` : '(空)';
+    console.log(
+      `[profile] 模型信息设置成功 userid=${auth.uid} ` +
+      `model=${profile?.model || '(空)'} api_endpoint=${profile?.api_endpoint || '(空)'} ` +
+      `search_provider=${profile?.search_provider || '(默认)'} token=${tokenMask}`,
+    );
     return res.json(profile);
   });
 }
