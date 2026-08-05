@@ -64,6 +64,7 @@ function setupWebSocket(server, options = {}) {
         // register_tools 消息上报；后端把它们并入模型的 function-calling 工具集。
         ws.frontendTools = [];
         ws.skillPrompts = [];
+        ws.persona = null;
         // 进行中的前端工具调用：call_id → { resolve, reject, timer }
         // 当模型命中前端工具时，后端发 tool_invoke 消息回调解前端，前端执行完回 tool_result。
         ws.pendingToolCalls = new Map();
@@ -112,6 +113,14 @@ function setupWebSocket(server, options = {}) {
                 const prompts = Array.isArray(message.prompts) ? message.prompts : [];
                 ws.skillPrompts = prompts.filter((p) => typeof p === 'string' && p.trim());
                 console.log(`🧩 前端注册技能指令 ${ws.skillPrompts.length} 条`);
+                return;
+            }
+            // 基础人格：用户自定义的基础人格文本（自由段落）。为空则后端回退到预设人格。
+            // 所有回答（含工具润色、降级）都基于此人格，与所选模型无关，避免人格偏移。
+            if (message.type === 'register_persona') {
+                const p = typeof message.persona === 'string' ? message.persona : '';
+                ws.persona = p.trim() ? p : null;
+                console.log(`🎭 前端注册基础人格：${ws.persona ? '自定义人格（已应用）' : '预设人格'}`);
                 return;
             }
             if (message.type === 'tool_result') {
@@ -192,6 +201,7 @@ function setupWebSocket(server, options = {}) {
                     clientIp,
                     locationScope,
                     skillPrompts: ws.skillPrompts || [],
+                    persona: ws.persona || null,
                 });
                 console.log(`[WS-PERF] ← getReply 返回 @${Date.now()} 总耗时 ${Date.now()-_wsT0}ms`);
                 } catch (error) {
@@ -203,6 +213,7 @@ function setupWebSocket(server, options = {}) {
                         content: userMessage,
                         sessionId,
                         userid,
+                        persona: ws.persona || null,
                     });
                     reply.source = "fallback";
                 }

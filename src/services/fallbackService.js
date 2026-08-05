@@ -32,7 +32,7 @@ function loadResponseList() {
     }
 }
 
-function getReply({ content = "" } = {}) {
+function getReply({ content = "", persona = null } = {}) {
     if (!responseList) loadResponseList();
 
     // 1. 匹配分类
