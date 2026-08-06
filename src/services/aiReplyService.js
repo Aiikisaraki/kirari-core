@@ -83,7 +83,19 @@ function extractImagesFromSpeech(speech) {
 // 其余（裸文件名 FF3C....jpg、base64:... 、data:image/ 之外的非法 data: 等）一律视为非法，
 // 丢弃以避免模型侧 base64 解码失败（500 error counting image token）。
 function isValidImageUrl(url) {
-  return typeof url === 'string' && /^(https?:\/\/|data:image\/)/i.test(url.trim());
+  if (typeof url !== 'string') return false;
+  const u = url.trim();
+  if (/^https?:\/\//i.test(u)) return true;
+  if (/^data:image\//i.test(u)) {
+    const comma = u.indexOf(',');
+    if (comma === -1) return false;
+    const payload = u.slice(comma + 1).trim();
+    // 载荷是 URL 而非 base64（部分客户端把真实链接塞进 base64 字段，
+    // 形如 data:image/jpeg;base64,https://...）→ 视为非法，避免模型侧 500
+    if (/^https?:\/\//i.test(payload)) return false;
+    return true;
+  }
+  return false;
 }
 
 function withImages(result) {
