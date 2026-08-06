@@ -31,7 +31,10 @@ async function createConnectionAiContext(userid) {
   } catch {
     /* 非合法 URL 时保留原值，交给后续校验 */
   }
-  console.log(`[aiContext] 创建 AI 上下文 userid=${userid} model=${tokenConfig.model} host=${host}`);
+  // token 指纹：仅取前4+后4，便于用户在日志中核对「设置保存时写的 key」与「实际生效的 key」是否一致
+  // （全链路对其他位置均为掩码，此处是唯一能把「保存日志」与「生效日志」对照起来的落点）。
+  const tokenMask = tokenConfig.token ? `${tokenConfig.token.slice(0, 4)}***${tokenConfig.token.slice(-4)}` : '(空)';
+  console.log(`[aiContext] 创建 AI 上下文 userid=${userid} model=${tokenConfig.model} host=${host} token=${tokenMask}`);
 
   return {
     userid,

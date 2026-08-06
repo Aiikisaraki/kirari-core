@@ -3,6 +3,7 @@ const apiTokenManager = require("../token/apiTokenManager");
 const dbStorage = require("../db/dbStorage");
 const { verifySignedRequest } = require("./requestSigner");
 const { signSession, verifySession } = require("../auth/sessionAuth");
+const { invalidateUserContexts } = require("../websocket/socketServer");
 
 // 保留内置账户：uid 0-99999 为程序内置（本地部署内置账户 uid=0）。
 // 单独部署服务端真实用户从 100000 起。
@@ -274,6 +275,13 @@ function setupHttpRoutes(app) {
       patch.search_provider = search_provider;
     }
     await dbStorage.setProfile(auth.uid, patch);
+    // 配置已写入 DB，但用户可能正持有一条 WS 连接，其 aiContext 在首条消息时已用旧配置建好并缓存复用。
+    // 立即失效该用户所有活跃 WS 连接的缓存上下文，下一条消息会用新配置重建，无需重启/重连。
+    try {
+      invalidateUserContexts(auth.uid);
+    } catch (invErr) {
+      console.warn('[profile] 失效 WS 上下文失败（可忽略，下次重连自动生效）:', invErr?.message || invErr);
+    }
     const profile = await dbStorage.getProfile(auth.uid);
     // 模型信息设置成功日志：输出用户与模型信息（token 仅打印掩码，避免泄露明文）。
     const tokenMask = profile?.token ? `${profile.token.slice(0, 4)}***${profile.token.slice(-4)}` : '(空)';

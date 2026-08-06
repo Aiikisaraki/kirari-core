@@ -10,6 +10,10 @@ const {
 } = require("../ai/connectionAiContext");
 const sharp = require("sharp");
 
+// 全局 WebSocket.Server 实例引用（setupWebSocket 内赋值），供 invalidateUserContexts
+// 在 HTTP 路由层（/api/profile 保存成功后）跨模块遍历并失效指定用户的缓存上下文。
+let wss = null;
+
 // 本地部署内置账户：uid 0-99999 保留，内置账户 uid=1；其令牌为明文字符串，不走签名会话。
 const BUILTIN_UID = 1;
 const BUILTIN_TOKEN = process.env.BUILTIN_ACCOUNT_TOKEN || "kirari-local-builtin";
@@ -103,7 +107,7 @@ function setupWebSocket(server, options = {}) {
     // requireToken 默认开启；仅测试/特殊部署可显式关闭（关闭后回退到内置账户 uid）。
     const requireToken = options.requireToken !== false;
 
-    const wss = new WebSocket.Server({
+    wss = new WebSocket.Server({
         server,
         path: "/ws",
         // 握手阶段（HTTP 升级前）校验令牌：未通过直接拒绝升级，连接根本不会建立。
@@ -125,7 +129,8 @@ function setupWebSocket(server, options = {}) {
         // 客户端真实 IP（用于位置兜底：内网/回环时回退到服务端公网 IP）
         const clientIp = (req && req.socket && req.socket.remoteAddress) || '';
         console.log(`✅ 已认证客户端连接 (uid=${authUid})`);
-        let aiContext = null;
+        ws.authUid = authUid; // 供 invalidateUserContexts 按 uid 精确匹配连接
+        ws.aiContext = null;
         // 前端托管工具（MCP server / skill 提供的工具）schema 列表，由前端通过
         // register_tools 消息上报；后端把它们并入模型的 function-calling 工具集。
         ws.frontendTools = [];
@@ -242,10 +247,10 @@ function setupWebSocket(server, options = {}) {
             // 身份由握手令牌决定（authUid），忽略客户端自报 userid，防止冒用/切换用户。
             const userid = authUid;
 
-            if (!aiContext) {
+            if (!ws.aiContext) {
                 console.log(`[WS-PERF] createConnectionAiContext 调用前 @${Date.now()}`);
                 try {
-                    aiContext = await createConnectionAiContext(userid);
+                    ws.aiContext = await createConnectionAiContext(userid);
                 } catch (ctxErr) {
                     // 大模型未配置（缺 API Token / 模型名称 / Endpoint）属于配置缺失，
                     // 应向前端返回明确、可操作的错误，而不是让外层 catch 兜底成笼统的
@@ -264,7 +269,7 @@ function setupWebSocket(server, options = {}) {
                     return;
                 }
                 // 把「前端托管工具执行器」挂到 aiContext，供 aiReplyService 的 tool loop 回调。
-                aiContext.invokeFrontendTool = invokeFrontendTool;
+                ws.aiContext.invokeFrontendTool = invokeFrontendTool;
                 console.log(`[WS-PERF] createConnectionAiContext 完成 @${Date.now()}`);
             }
 
@@ -295,7 +300,7 @@ function setupWebSocket(server, options = {}) {
             try {
                 console.log(`[WS-PERF] → getReply 调用前 @${Date.now()} (距接入 ${Date.now()-_wsT0}ms)`);
                 reply = await aiReplyService.getReply({
-                    aiContext,
+                    aiContext: ws.aiContext,
                     content: userMessage,
                     images,
                     sessionId,
@@ -327,7 +332,7 @@ function setupWebSocket(server, options = {}) {
                 );
                 console.log(`[WS-PERF] saveMessage(assistant) 完成 @${Date.now()}`);
 
-                if (ws.readyState === WebSocket.OPEN && !aiContext.closed) {
+                if (ws.readyState === WebSocket.OPEN && !ws.aiContext.closed) {
                     console.log(`[WS-PERF] ws.send 前 @${Date.now()}`);
                     ws.send(
                         JSON.stringify({
@@ -379,8 +384,8 @@ function setupWebSocket(server, options = {}) {
                 }
                 ws.pendingToolCalls.clear();
             }
-            cleanupConnectionAiContext(aiContext);
-            aiContext = null;
+            cleanupConnectionAiContext(ws.aiContext);
+            ws.aiContext = null;
             console.log("🔌 客户端断开连接");
         });
 
@@ -392,12 +397,31 @@ function setupWebSocket(server, options = {}) {
                 }
                 ws.pendingToolCalls.clear();
             }
-            cleanupConnectionAiContext(aiContext);
-            aiContext = null;
+            cleanupConnectionAiContext(ws.aiContext);
+            ws.aiContext = null;
         });
     });
 
     return wss;
 }
 
-module.exports = { setupWebSocket };
+// 失效指定用户所有活跃 WS 连接的缓存 AI 上下文。
+// 调用时机：用户通过 /api/profile 修改模型/token/端点后，配置已写入 DB，
+// 但 WS 连接在首次消息时已用旧配置建好 aiContext 并缓存复用，不失效则改动要等重连才生效。
+// 这里主动把该用户每个 open 连接的 ws.aiContext 清空，下一条消息会用新配置重建。
+function invalidateUserContexts(uid) {
+    if (!wss) return;
+    let n = 0;
+    for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN && client.authUid === uid && client.aiContext) {
+            cleanupConnectionAiContext(client.aiContext);
+            client.aiContext = null;
+            n++;
+        }
+    }
+    if (n) {
+        console.log(`[ws] 已为用户 ${uid} 失效 ${n} 个缓存的 AI 上下文（模型配置已更新，下条消息将用新配置重建）`);
+    }
+}
+
+module.exports = { setupWebSocket, invalidateUserContexts };
