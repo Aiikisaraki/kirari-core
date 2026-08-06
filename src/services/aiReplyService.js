@@ -79,6 +79,13 @@ function extractImagesFromSpeech(speech) {
   return { speech: cleaned.replace(/\n{2,}/g, '\n').trim(), images };
 }
 
+// 合法的模型图片 URL：data:image/... 内联（入口处已由 sharp 解码缩放）或 http(s) 远程地址。
+// 其余（裸文件名 FF3C....jpg、base64:... 、data:image/ 之外的非法 data: 等）一律视为非法，
+// 丢弃以避免模型侧 base64 解码失败（500 error counting image token）。
+function isValidImageUrl(url) {
+  return typeof url === 'string' && /^(https?:\/\/|data:image\/)/i.test(url.trim());
+}
+
 function withImages(result) {
   const { speech, images } = extractImagesFromSpeech(result.speech);
   return { speech, emotion: result.emotion ?? null, images };
@@ -675,7 +682,9 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
   }
 
   const text = content.trim();
-  const imgList = Array.isArray(images) ? images.filter((x) => typeof x === 'string' && x.trim()) : [];
+  const imgList = Array.isArray(images)
+    ? images.filter((x) => typeof x === 'string' && x.trim() && isValidImageUrl(x))
+    : [];
 
   // 人格基座：自定义人格优先，缺省回退预设。5 条分支 prompt 全部由此派生，
   // 因此无论选用哪个模型、走哪条分支，人格锚点都一致，不会漂移。
@@ -842,11 +851,19 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 同时剔除启动问候语等系统噪声，避免污染 LLM 上下文。
     const normalizedRecent = stripNonConversational(recentMessages).map((m) => {
       const c = m.content;
-      if (Array.isArray(c)) return { role: m.role, content: c };
+      // 过滤历史中残留的非法图片条目（裸文件名 / base64:... 等），避免送进模型导致 500。
+      const dropBadImage = (arr) =>
+        Array.isArray(arr)
+          ? arr.filter(
+              (part) =>
+                !(part && part.type === 'image_url' && !isValidImageUrl(part.image_url && part.image_url.url)),
+            )
+          : arr;
+      if (Array.isArray(c)) return { role: m.role, content: dropBadImage(c) };
       if (typeof c === 'string') return { role: m.role, content: c };
       try {
         const parsed = JSON.parse(c);
-        if (Array.isArray(parsed)) return { role: m.role, content: parsed };
+        if (Array.isArray(parsed)) return { role: m.role, content: dropBadImage(parsed) };
       } catch {
         // 非 JSON，按纯文本处理
       }
