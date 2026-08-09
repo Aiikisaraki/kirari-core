@@ -4,11 +4,9 @@ const sessionManager = require("../session/sessionManager");
 const fallbackService = require("../services/fallbackService");
 const aiReplyService = require("../services/aiReplyService");
 const toolsModule = require("../tools");
-const {
-    createConnectionAiContext,
-    cleanupConnectionAiContext,
-} = require("../ai/connectionAiContext");
-const sharp = require("sharp");
+const { createConnectionAiContext, cleanupConnectionAiContext } = require("../ai/connectionAiContext");
+const { createFrontendToolBridge } = require("../tools/bridge");
+const { normalizeImages } = require("./imageNormalizer");
 
 // 全局 WebSocket.Server 实例引用（setupWebSocket 内赋值），供 invalidateUserContexts
 // 在 HTTP 路由层（/api/profile 保存成功后）跨模块遍历并失效指定用户的缓存上下文。
@@ -36,71 +34,6 @@ function authenticate(token) {
     if (uid != null) return uid;
     if (token === BUILTIN_TOKEN) return BUILTIN_UID;
     return null;
-}
-
-// ── 图片尺寸/体积兜底 ──
-// 客户端已自动压缩（最长边≤1280 + JPEG q0.8），这里用 sharp 做服务端真兜底：
-// 真正解码图片，超出像素上限的直接在服务端缩放成 JPEG q0.8（而不是像之前那样只按字节估算后报错）。
-// 拦住「绕过客户端直连后端」或极端大图，避免超大原图喂给模型导致推理失败。
-const MAX_IMAGE_COUNT = 8; // 单次消息最多 8 张
-const MAX_IMAGE_LONG_EDGE = 1280; // 像素最长边上限（与客户端一致）
-const IMAGE_JPEG_QUALITY = 80; // 缩放后 JPEG 质量（与客户端一致）
-
-// 真正解码并必要时缩放图片；返回 { error } 或 { images }。
-// 远程 http(s) URL、解码/缩放失败的原图一律原样透传（不阻塞、不抛出），只有数量超限才报错。
-async function normalizeImages(images) {
-    if (images.length > MAX_IMAGE_COUNT) {
-        return { error: `单次最多发送 ${MAX_IMAGE_COUNT} 张图片，请分批发送。` };
-    }
-    const out = [];
-    for (let i = 0; i < images.length; i++) {
-        const img = images[i];
-        // 远程 URL（模型自行拉取）不做服务端处理，原样透传。
-        if (typeof img !== "string" || !img.startsWith("data:")) {
-            out.push(img);
-            continue;
-        }
-        const comma = img.indexOf(",");
-        if (comma === -1) {
-            out.push(img);
-            continue;
-        }
-        const base64 = img.slice(comma + 1);
-        let buf;
-        try {
-            buf = Buffer.from(base64, "base64");
-        } catch {
-            out.push(img);
-            continue;
-        }
-        try {
-            const image = sharp(buf);
-            const meta = await image.metadata();
-            const longEdge = Math.max(meta.width || 0, meta.height || 0);
-            if (longEdge > MAX_IMAGE_LONG_EDGE) {
-                const resized = await image
-                    .resize({
-                        width: MAX_IMAGE_LONG_EDGE,
-                        height: MAX_IMAGE_LONG_EDGE,
-                        fit: "inside",
-                        withoutEnlargement: true,
-                    })
-                    .jpeg({ quality: IMAGE_JPEG_QUALITY })
-                    .toBuffer();
-                out.push(`data:image/jpeg;base64,${resized.toString("base64")}`);
-                console.warn(
-                    `[image] 服务端自动缩放第 ${i + 1} 张：原 ${meta.width}x${meta.height} → 最长边≤${MAX_IMAGE_LONG_EDGE}`,
-                );
-            } else {
-                // 像素未超限：保留原图，避免无意义转码导致质量损失。
-                out.push(img);
-            }
-        } catch (e) {
-            console.warn(`[image] 第 ${i + 1} 张解码/缩放失败，回退原图：`, e && e.message);
-            out.push(img);
-        }
-    }
-    return { images: out };
 }
 
 function setupWebSocket(server, options = {}) {
@@ -136,34 +69,9 @@ function setupWebSocket(server, options = {}) {
         ws.frontendTools = [];
         ws.skillPrompts = [];
         ws.persona = null;
-        // 进行中的前端工具调用：call_id → { resolve, reject, timer }
-        // 当模型命中前端工具时，后端发 tool_invoke 消息回调解前端，前端执行完回 tool_result。
-        ws.pendingToolCalls = new Map();
-
-        // 通过 WS 回调「前端托管工具」执行：发 tool_invoke 给 Electron 主进程，
-        // 等待其回 tool_result（带相同 call_id）。带超时，避免主进程无响应卡死模型循环。
-        function invokeFrontendTool(name, args) {
-            return new Promise((resolve, reject) => {
-                if (ws.readyState !== WebSocket.OPEN) {
-                    return reject(new Error('WS 连接已断开，无法调用前端工具'));
-                }
-                const callId =
-                    'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-                const timer = setTimeout(() => {
-                    ws.pendingToolCalls.delete(callId);
-                    reject(new Error(`前端工具调用超时（30s 未收到结果）：${name}`));
-                }, 30000);
-                ws.pendingToolCalls.set(callId, { resolve, reject, timer });
-                ws.send(
-                    JSON.stringify({
-                        type: 'tool_invoke',
-                        call_id: callId,
-                        name,
-                        args,
-                    }),
-                );
-            });
-        }
+        // 前端托管工具桥：管理「后端请求 → Electron 主进程执行 → 结果回传」的配对与超时。
+        const toolBridge = createFrontendToolBridge(ws);
+        ws.toolBridge = toolBridge;
 
         ws.on("message", async (data) => {
             try {
@@ -194,18 +102,9 @@ function setupWebSocket(server, options = {}) {
                 console.log(`🎭 前端注册基础人格：${ws.persona ? '自定义人格（已应用）' : '预设人格'}`);
                 return;
             }
+            // 前端工具执行结果回传：交给工具桥配对并 resolve 对应 Promise。
             if (message.type === 'tool_result') {
-                const callId = message.call_id;
-                const pending = ws.pendingToolCalls.get(callId);
-                if (pending) {
-                    clearTimeout(pending.timer);
-                    ws.pendingToolCalls.delete(callId);
-                    const content =
-                        typeof message.content === 'string'
-                            ? message.content
-                            : JSON.stringify(message.content ?? '');
-                    pending.resolve(content);
-                }
+                toolBridge.handleToolResult(message);
                 return;
             }
 
@@ -269,7 +168,7 @@ function setupWebSocket(server, options = {}) {
                     return;
                 }
                 // 把「前端托管工具执行器」挂到 aiContext，供 aiReplyService 的 tool loop 回调。
-                ws.aiContext.invokeFrontendTool = invokeFrontendTool;
+                ws.aiContext.invokeFrontendTool = toolBridge.invokeFrontendTool;
                 console.log(`[WS-PERF] createConnectionAiContext 完成 @${Date.now()}`);
             }
 
@@ -377,12 +276,8 @@ function setupWebSocket(server, options = {}) {
 
         ws.on("close", () => {
             // 拒绝所有未完成的前端工具调用，避免 Promise 永久挂起。
-            if (ws.pendingToolCalls) {
-                for (const [, pending] of ws.pendingToolCalls) {
-                    clearTimeout(pending.timer);
-                    pending.reject(new Error('WS 连接关闭，前端工具调用中断'));
-                }
-                ws.pendingToolCalls.clear();
+            if (ws.toolBridge) {
+                ws.toolBridge.clearPending('WS 连接关闭，前端工具调用中断');
             }
             cleanupConnectionAiContext(ws.aiContext);
             ws.aiContext = null;
@@ -390,12 +285,8 @@ function setupWebSocket(server, options = {}) {
         });
 
         ws.on("error", () => {
-            if (ws.pendingToolCalls) {
-                for (const [, pending] of ws.pendingToolCalls) {
-                    clearTimeout(pending.timer);
-                    pending.reject(new Error('WS 连接出错，前端工具调用中断'));
-                }
-                ws.pendingToolCalls.clear();
+            if (ws.toolBridge) {
+                ws.toolBridge.clearPending('WS 连接出错，前端工具调用中断');
             }
             cleanupConnectionAiContext(ws.aiContext);
             ws.aiContext = null;

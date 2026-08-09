@@ -44,6 +44,16 @@ db.exec(`
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (owner_uid, scope)
   );
+  CREATE TABLE IF NOT EXISTS daily_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    brief_text TEXT NOT NULL,
+    topics_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(userid, date)
+  );
+  CREATE INDEX IF NOT EXISTS idx_daily_memory_user_date ON daily_memory(userid, date);
 `);
 
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
@@ -260,6 +270,35 @@ module.exports = {
     return true;
   },
   getUser: async (uid) => db.prepare('SELECT uid, username FROM users WHERE uid = ?').get(uid),
+
+  // ---- 每日简报（主动感知的"当日记忆"）----
+  // 按 userid + date 去重，每天仅一份。brief_text 为 LLM 压缩后的要点文本，topics_json 为可选主题标签。
+  getDailyBrief: async (userid, date) => {
+    const row = db.prepare('SELECT brief_text, topics_json FROM daily_memory WHERE userid = ? AND date = ?').get(userid, date);
+    if (!row) return null;
+    let topics = [];
+    if (row.topics_json) {
+      try {
+        const parsed = JSON.parse(row.topics_json);
+        if (Array.isArray(parsed)) topics = parsed;
+      } catch {
+        topics = [];
+      }
+    }
+    return { briefText: row.brief_text, topics };
+  },
+  upsertDailyBrief: async (userid, date, briefText, topics = []) => {
+    if (!briefText || !briefText.trim()) return false;
+    db.prepare(`INSERT INTO daily_memory (userid, date, brief_text, topics_json) VALUES (?, ?, ?, ?)
+      ON CONFLICT(userid, date) DO UPDATE SET brief_text=excluded.brief_text, topics_json=excluded.topics_json, created_at=CURRENT_TIMESTAMP`)
+      .run(userid, date, briefText, JSON.stringify(topics));
+    return true;
+  },
+  // 列出所有已配置 Token 的用户（用于定时预生成简报）
+  getAllUserids: async () => {
+    const rows = db.prepare("SELECT userid FROM api_tokens WHERE token IS NOT NULL AND token != ''").all();
+    return rows.map((r) => r.userid);
+  },
 
   // ---- 配置档案（复用 api_tokens 表，按 uid 存取）----
   getProfile: async (uid) => {

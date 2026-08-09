@@ -19,6 +19,47 @@ const { setupHttpRoutes } = require("./api/routes");
 const { setupWebSocket } = require("./websocket/socketServer");
 const { findAvailablePort } = require("./utils/portHelper");
 const corsMiddleware = require("./middleware/cors");
+const dbStorage = require("./db/dbStorage");
+const { createConnectionAiContext, cleanupConnectionAiContext } = require("./ai/connectionAiContext");
+const dailyBriefing = require("./services/dailyBriefingService");
+
+// 每天 08:00 / 16:00 / 22:00 各主动刷新一次当日简报（"每日记忆"）。
+// 三次均强制重新采集（generateDailyBrief），覆盖当天同一份简报，使注入的【今日背景】
+// 始终为最新快照；对话时的 ensureDailyBrief 仍作兜底（三档全错过时首句也有简报）。
+const BRIEF_SLOTS = [8, 16, 22]; // 每天这几个整点刷新
+
+function msToNextSlot(now) {
+  const candidates = BRIEF_SLOTS.map((h) => {
+    const d = new Date(now);
+    d.setHours(h, 0, 0, 0);
+    if (d <= now) d.setDate(d.getDate() + 1);
+    return d;
+  });
+  candidates.sort((a, b) => a - b);
+  return candidates[0] - now;
+}
+
+function scheduleDailyBriefing() {
+  const now = new Date();
+  const ms = msToNextSlot(now);
+  setTimeout(async () => {
+    try {
+      const userids = await dbStorage.getAllUserids();
+      for (const uid of userids) {
+        try {
+          const ctx = await createConnectionAiContext(uid);
+          await dailyBriefing.generateDailyBrief(ctx);
+          cleanupConnectionAiContext(ctx);
+        } catch (e) {
+          console.warn(`[dailyBrief-sched] 用户 ${uid} 简报生成失败:`, e?.message || e);
+        }
+      }
+    } catch (e) {
+      console.warn("[dailyBrief-sched] 定时生成失败:", e?.message || e);
+    }
+    scheduleDailyBriefing();
+  }, ms);
+}
 
 // 绑定网卡（HOST）：
 // - 默认 0.0.0.0（监听所有网卡），适合分离式 / 远程部署，开箱即用。
@@ -70,6 +111,7 @@ function createServer() {
     }
 
     startServer();
+    scheduleDailyBriefing();
 }
 
 module.exports = { createServer };

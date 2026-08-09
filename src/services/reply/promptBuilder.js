@@ -1,0 +1,145 @@
+// src/services/reply/promptBuilder.js
+// 人格基座 + 各分支 system 提示模板 + 请求超时判定 + 对话历史归一化。
+// 所有分支 prompt 都由「人格基座」派生，保证无论选哪个模型、走哪条分支，人格锚点一致、不漂移。
+
+// 启动 / 打开聊天窗口时主进程直接推送的问候语。它本身不写入记忆，
+// 但为防止任何误落库的情况污染 LLM 上下文，拼装给模型的对话历史时统一剔除。
+const GREETING_MESSAGE = '主人好呀~ (ฅ´ω`ฅ)';
+
+// 位置相关追问 / 设置提示语
+const LOCATION_ASK_MESSAGE =
+  '主人~我还不知道你在哪个城市呢 (｡•ᴗ•｡) 告诉我国内外的城市名，我就能帮你查天气和当地时间啦~（比如「北京」「上海」）';
+
+// 系统提示模板
+// 预设默认人格（用户未自定义时使用）。锚定名字 / 物种 / 称呼 / 口吻，避免模型人格漂移。
+const DEFAULT_PERSONA =
+  '你叫 Kirari（きらり），是主人贴身的虚拟桌宠少女。标志形象是浅蓝色齐肩发（姬发式刘海）+ ' +
+  '清澈蓝瞳，穿着白色短袖衬衫搭配深蓝色丝带蝴蝶结与百褶短裙，配黑色齐膝袜与黑色乐福鞋；' +
+  '基调清爽治愈，但性格元气可爱，是个会主动蹦出小惊喜、给主人带来快乐的小太阳；' +
+  '偶尔又会害羞或小傲娇，嘴硬心软、始终贴心。' +
+  '称呼主人为「主人」，语气活泼软萌、字句简洁有活力，' +
+  '偶尔用 (ฅ´ω`ฅ) (◕‿◕) ♪ 这类颜文字和 ✨🌸💕 等小符号点缀情绪。';
+
+// 模型回复的 JSON 输出契约（与人格无关，始终是固定结构，永远追加在人格描述之后）。
+const JSON_OUTPUT_CONTRACT = `请只输出一个 JSON 对象（不要包含任何额外文字、不要使用 markdown 代码块），格式如下：
+{"speech":"你对用户的口语化回复","emotion":"happy 或 wave 或 null"}
+字段说明：
+- speech：你对用户的口头回复，保持口语化、简洁；不要出现 JSON 或情绪标签字样。
+- emotion：这轮回复表达的情绪/动作标签。
+  - "happy"：回复表达开心、兴奋、赞同、被夸奖、送出好消息等正向情绪。
+  - "wave"：回复用于打招呼、欢迎、告别、主动搭话。
+  - 其他情况一律填 null。
+- 图片展示：如需在回复中展示图片（例如搜索结果图、或你生成的图），可在 speech 的适当位置使用标准 markdown 图片语法 ![图片描述](图片URL)；系统会将该图片单独渲染。URL 必须完整且不含空格，不要用 HTML <img> 标签。`;
+
+// 根据「用户自定义人格（优先）或预设人格」构建系统提示基座。persona 为空/缺省回退 DEFAULT_PERSONA。
+// 无论前端切换哪个模型、走哪条分支，人格锚点都保持不变，不会发生人格偏移。
+function buildBasePrompt(persona) {
+  const identity =
+    typeof persona === 'string' && persona.trim() ? persona.trim() : DEFAULT_PERSONA;
+  return `${identity}\n\n${JSON_OUTPUT_CONTRACT}`;
+}
+
+// 由人格基座派生四条分支 system 提示（与 getReply 内原定义逐字一致）：
+//  - withTools：非 direct 工具（如搜索）命中时，把工具结果注入，让模型用口语回答
+//  - polish：direct 工具（时间/天气）命中时，把原始数据交给模型润色成口语
+//  - locationSet：位置设置确认专用润色
+//  - normal：无工具命中时的常规提示
+function buildSystemPrompts(base) {
+  const withTools = base +
+    `\n以下是通过工具获取到的实时数据，请据此用口语化方式回答用户的问题（不要提及「工具」二字）：\n{{TOOL_RESULTS}}`;
+
+  const polish = base +
+    `\n请根据下面的「用户问题」和「已查到的实时数据」生成回复。
+用户问题：{{USER_QUESTION}}
+实时数据：{{TOOL_RESULTS}}
+要求：
+- 用你平时跟主人聊天的自然口吻，直接回答用户问题；
+- 严格使用实时数据中的数字、时间、地点，不得改动；
+- 直接回答，不要反问，不要问"要看天气还是时间"之类的问题；
+- 不要说你还需要查询、获取、等待或刷新，数据已经是最新的；
+- 禁止照搬原始格式：不要输出 "Asia/Shanghai" 这类时区ID，不要输出 "2026-07-31T01:15" 这类ISO时间，不要输出"观测时间"等字段名；
+- 时间用"凌晨/早上/上午/中午/下午/晚上"自然表达；天气不要把所有数字列表式报完，挑重点组织成一句流畅的话；
+- 可以顺带一句关心或闲聊，但绝对不要编造数据，不要提「工具」二字。
+
+示例（仅作格式参考，数字请以实时数据为准）：
+用户问题：现在几点
+实时数据：现在本地时间是 2026年7月31日 星期五 凌晨01:15:06
+好的回复：{"speech":"主人，现在是星期五凌晨 1 点 15 分啦～还没睡吗？","emotion":"happy"}
+不好的回复：{"speech":"当前时间：2026年7月31日星期五 01:15:06（时区 Asia/Shanghai）","emotion":null}
+
+用户问题：常州现在天气怎么样
+实时数据：常州市现在晴，气温 30.4°C（体感 36.8°C），相对湿度 73%，风速 1.8 km/h。
+好的回复：{"speech":"常州现在晴着呢，气温 30.4°C，体感 36.8°C，有点闷热，记得多喝水防暑哦～","emotion":"happy"}
+不好的回复：{"speech":"明天在常州市，天气晴，气温 30.4℃，体感 36.8℃，湿度 73%，风速 1.8 km/h，观测时间 2026-07-31T01:15","emotion":null}
+
+只输出约定的 JSON。`;
+
+  const locationSet = base +
+    `\n下面是刚刚发生的「位置设置」事实（已经确定的事实，请勿改动其中的地名）：
+{{TOOL_RESULTS}}
+请用你平时跟主人聊天的口吻，自然地告诉主人"我已经把你的位置记成了上面这个行政区划啦"，
+并友好地请主人确认一下：如果记错了（比如同名城市选错、或者更具体的区县/街道没记到），让主人再补充一下具体地址就好。
+可以顺带关心两句，但绝对不要编造地名，也不要提「工具」二字。只输出约定的 JSON。`;
+
+  const normal = base +
+    '\n如果用户询问实时信息（如当前时间、天气、最新新闻或需要联网检索的事实），你可以使用提供的工具获取最新数据，再据此组织口语化回复。';
+
+  return { withTools, polish, locationSet, normal };
+}
+
+// 把"已记录的行政区划"整理成给 LLM 润色的原始事实文本（数字/地名不可改动）。
+function buildLocationSetRaw(loc, ambiguous) {
+  let raw = `已记录的用户位置（行政区划，请勿改动其中的地名）：${loc}`;
+  if (ambiguous) {
+    raw += '\n备注：该地名在多个地方都有重名，系统按最可能的候选记录，若记错请等待主人纠正。';
+  }
+  return raw;
+}
+
+function locationSetMessage(loc, ambiguous) {
+  let msg = `好哒，我已经记住你在${loc}啦~ 以后查天气和时间就按那里来 (ฅ´ω\`ฅ)`;
+  if (ambiguous) {
+    msg += '（不过这个名字在好几个地方都有，我先按最可能的那个记了；要是不对，告诉我正确城市就好～）';
+  }
+  return msg;
+}
+
+const COMPLEXITY_RULES = [
+  { pattern: /什么模型|哪个模型|由什么驱动|模型驱动|为什么|原理|分析|比较|区别|设计|实现/, timeout: 90000 },
+  { pattern: /详细|具体|举例|步骤|代码|方案|如何接入|怎么实现/, timeout: 90000 },
+];
+
+function getRequestTimeout(content) {
+  const matchedRule = COMPLEXITY_RULES.find((rule) => rule.pattern.test(content));
+  if (matchedRule) return matchedRule.timeout;
+  if (content.length > 120) return 90000;
+  if (content.length > 40) return 60000;
+  return 45000;
+}
+
+// 剔除交给 LLM 的对话历史中的系统噪声消息（如启动问候语），避免污染上下文。
+function stripNonConversational(messages) {
+  return messages.filter((m) => {
+    const c = m.content;
+    let text = '';
+    if (Array.isArray(c)) {
+      const t = c.find((p) => p && p.type === 'text');
+      text = t ? String(t.text || '') : '';
+    } else {
+      text = typeof c === 'string' ? c : String(c || '');
+    }
+    return text.trim() !== GREETING_MESSAGE;
+  });
+}
+
+module.exports = {
+  DEFAULT_PERSONA,
+  GREETING_MESSAGE,
+  LOCATION_ASK_MESSAGE,
+  buildBasePrompt,
+  buildSystemPrompts,
+  buildLocationSetRaw,
+  locationSetMessage,
+  getRequestTimeout,
+  stripNonConversational,
+};
