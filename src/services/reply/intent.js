@@ -17,6 +17,21 @@ function buildTools() {
   return mergeTools();
 }
 
+// 纠正/质疑意图：用户指出"你记错了 / 她没说过 / 根本没有"等，是对桌宠先前陈述的否定。
+// 命中后由 getReply 层进入"有限搜索"模式：web_search 仍可用（让宠物去搜出真正的正确答案），
+// 但用 webSearchCap 兜底（纠正模式限 2 次），达上限即强制纯文本收尾，避免无节制联网拖垮后端。
+// 注意与 detectDirectIntents 区分：后者是"时间/天气"等明确工具意图；
+// 本函数是"否定/纠正"语义，本身不触发任何工具，只影响后续 loop 的搜索限幅。
+const CORRECTION_PATTERNS = [
+  /根本没有|根本没|没说过|没说过的|你记错|你说错|哪有|压根没有|不是吧|真的有吗|真的说过吗|胡说|瞎说|编的吧|编出来|杜撰|自己编|你编的|撒谎|造的吧|乱讲|扯淡|你搞错|记反了|搞反了|张冠李戴|胡扯|无中生有/,
+];
+
+function detectCorrectionIntent(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return CORRECTION_PATTERNS.some((re) => re.test(t));
+}
+
 // ── 意图预检模式 ──
 const INTENT_PATTERNS = [
   // 时间意图：覆盖「几点」「查时间」「现在呢」「时间」等省略说法；
@@ -327,4 +342,4 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
   return { direct: null, injected: results.map((r) => `[tool] ${r}`), needLocation: false, setLocation: setLocInfo };
 }
 
-module.exports = { preflightTools, buildTools, detectDirectIntents, INTENT_PATTERNS };
+module.exports = { preflightTools, buildTools, detectDirectIntents, detectCorrectionIntent, INTENT_PATTERNS };

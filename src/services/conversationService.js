@@ -12,11 +12,42 @@ const {
   LOCATION_ASK_MESSAGE,
   stripNonConversational,
 } = require('./reply/promptBuilder');
-const { preflightTools, buildTools } = require('./reply/intent');
+const { preflightTools, buildTools, detectCorrectionIntent } = require('./reply/intent');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
 const dailyBriefing = require('./dailyBriefingService');
+const knowledgeRetrieval = require('../knowledge/retrievalService');
 const { runTool, getFrontendToolNames } = require('../tools');
 const sessionManager = require('../session/sessionManager');
+
+// 工具循环最多轮数（也用于超时预算计算）。
+const MAX_ROUNDS = 5;
+
+// 兜底收尾：当模型在工具循环末尾只吐了 reasoning / 流被截断而 content 为空时，
+// 用 tools:undefined + 一句强指令强制模型直接产出最终文本（不再调用任何工具）。
+// 自带独立 AbortController（不与主请求共享），避免主超时已触发导致救回也一并被掐断。
+async function salvageAsText(aiContext, messages) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    // 若末尾是一条被截断的空 assistant 消息，先移除，避免部分供应商拒绝空 content。
+    const cleaned = messages.filter(
+      (m, i) =>
+        !(i === messages.length - 1 && m.role === 'assistant' && (!m.content || !m.content.trim()) && (!m.tool_calls || m.tool_calls.length === 0)),
+    );
+    const FORCE = '\n\n[系统] 你必须现在直接给出最终回复，不要再调用任何工具。用你平时和主人说话的口吻回答即可。';
+    const patched = cleaned.map((m) =>
+      m.role === 'system' ? { ...m, content: (m.content || '') + FORCE } : m,
+    );
+    const completion = await streamChatCompletion(
+      aiContext.openai,
+      { model: aiContext.model, messages: patched, max_tokens: 1500 },
+      { signal: ctrl.signal },
+    );
+    return completion.choices?.[0]?.message?.content || '';
+  } finally {
+    clearTimeout(tid);
+  }
+}
 
 async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null } = {}) {
   if (!aiContext || aiContext.closed || !aiContext.openai) {
@@ -40,7 +71,10 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
   }
 
   const controller = new AbortController();
-  const timeout = getRequestTimeout(text || '[用户发送了图片]');
+  // 超时随"可能触发的工具轮次"放大：短消息默认仅 45s，但带工具的多轮 loop 很容易超过。
+  // 基线取消息复杂度超时，但至少 60s；再为每轮工具预留 15s，封顶 120s。
+  const baseTimeout = getRequestTimeout(text || '[用户发送了图片]');
+  const timeout = Math.min(120000, Math.max(baseTimeout, 60000) + MAX_ROUNDS * 15000);
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   aiContext.activeRequests.add(controller);
   const _t0 = Date.now();
@@ -155,6 +189,15 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       console.warn('[aiReply] 简报注入失败（已忽略）:', e?.message || e);
     }
 
+    // 知识库检索（Layer 2 推荐源：离线植入 > 免注册实时；Layer 1 私有库启用后自然优先）。
+    // 在作答前检索并注入参考信息，让桌宠在基础问题上更有底。失败静默降级，绝不阻塞主对话。
+    let kbBlock = '';
+    try {
+      kbBlock = await knowledgeRetrieval.retrieveForPrompt(aiContext, text || '[用户发送了图片]');
+    } catch (e) {
+      console.warn('[aiReply] 知识库检索失败（已忽略）:', e?.message || e);
+    }
+
     const systemPrompt = preflight.injected
       ? sys.withTools.replace('{{TOOL_RESULTS}}', preflight.injected.join('\n'))
       : sys.normal;
@@ -202,35 +245,50 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         : (text || '');
 
     const messages = [
-      { role: 'system', content: systemPrompt + dailyBlock + skillBlock },
+      { role: 'system', content: systemPrompt + dailyBlock + kbBlock + skillBlock },
       ...normalizedRecent,
       { role: 'user', content: userContent },
     ];
 
-    const tools = buildTools();
+    const correctionMode = detectCorrectionIntent(text);
+    const allTools = buildTools();
+    // 纠正场景【放开搜索、但有限度】：主人指出"你说错了/她没说过"时，宠物的正确反应是
+    // 去搜索找出真正的正确答案，而不是盲信自己或硬抗。所以 web_search 仍可用。
+    // 但搜索必须"有限度"——用 webSearchCap 兜底：纠正模式限 2 次、普通模式限 4 次，
+    // 达到上限即强制后续轮次纯文本收尾，避免无节制搜索把后端拖垮（原 45s 超时崩因）。
+    const tools = allTools;
     const toolChoice = tools.length ? 'auto' : undefined;
+    const webSearchCap = correctionMode ? 2 : 4;
+    if (correctionMode) console.log(`[aiReply] 纠正意图命中，允许有限搜索（webSearchCap=${webSearchCap}）后强制收尾`);
 
     // tool-call loop：模型可多次调用工具，直到产出最终文本
-    const MAX_ROUNDS = 5;
     let toolsDisabled = false; // 部分端点/模型（如 ModelScope 推理接口）不支持 function calling，
                                // 请求带 tools 会直接 400；此时降级为纯文本重试一次。
+    // 退化循环保护：模型反复用近重复 query 调 web_search（搜了又搜、自证式空转）时，
+    // 强制后续轮次不再带工具，逼其用已有信息直接文本作答。
+    let degenerateLoop = false;
+    const searchQueryHistory = [];
+    let webSearchCount = 0; // 本轮 web_search 调用计数，配合 webSearchCap 实现"有限度"搜索
     for (let round = 0; round < MAX_ROUNDS; round++) {
       let completion;
       try {
+        // 退化循环触发后不再带工具（useTools=false），模型只能直接文本作答。
+        const useTools = tools.length && !toolsDisabled && !degenerateLoop;
         completion = await streamChatCompletion(
           aiContext.openai,
           {
             model: aiContext.model,
             messages,
-            tools: tools.length && !toolsDisabled ? tools : undefined,
-            tool_choice: tools.length && !toolsDisabled ? toolChoice : undefined,
-            max_tokens: 800,
+            tools: useTools ? tools : undefined,
+            tool_choice: useTools ? toolChoice : undefined,
+            max_tokens: 1500,
           },
           { signal: controller.signal },
         );
       } catch (e) {
         const errMsg = e?.message || String(e);
         const toolErr = /tool|2013|function.?call|invalid param/i.test(errMsg);
+        const aborted = e?.name === 'AbortError' || /abort/i.test(errMsg);
         if (!toolsDisabled && tools.length && toolErr) {
           console.warn(`[aiReply] 端点/模型不支持 tools（${errMsg}），降级重试（不携带 tools）`);
           toolsDisabled = true;
@@ -239,10 +297,39 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             {
               model: aiContext.model,
               messages,
-              max_tokens: 800,
+              max_tokens: 1500,
             },
             { signal: controller.signal },
           );
+        } else if (aborted) {
+          // 主请求超时/中断（如 120s 上限触发）：当前轮流被截断。
+          // 用 salvageAsText（独立 60s 控制器）基于已有上下文强制纯文本收尾，救回一句真实回复，
+          // 实在救不回才冒泡到外层通用兜底，避免直接崩成"还在学习中"。
+          console.warn(`[aiReply] 主请求超时/中断（${errMsg}），尝试纯文本收尾`);
+          try {
+            const salvaged = await salvageAsText(aiContext, messages);
+            if (salvaged && salvaged.trim()) {
+              const { speech, emotion } = parseModelReply(salvaged.trim());
+              if (speech) {
+                console.log('[aiReply] 超时后纯文本收尾成功');
+                return {
+                  speech,
+                  emotion,
+                  images: [],
+                  action: 'idle',
+                  mood: 'curious',
+                  source: 'model_salvaged',
+                  model: aiContext.model,
+                  usage: null,
+                  sessionId,
+                  userid: aiContext.userid,
+                };
+              }
+            }
+          } catch (se) {
+            console.warn('[aiReply] 超时后纯文本收尾失败：', se?.message || se);
+          }
+          throw e;
         } else {
           throw e;
         }
@@ -269,9 +356,34 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         const rawContent = msg.content?.trim();
         if (!rawContent) {
+          // 流被截断（如超时 abort、reasoning 吃满 max_tokens）导致 content 为空：
+          // 不再硬抛（会掉进"还在学习中"通用兜底），先强制一次"纯文本收尾"生成救回答案。
           console.error(
-            `[aiReply] 内容为空 model=${aiContext.model} reasoning_len=${completion._reasoningContent?.length || 0} chunks=${completion._chunkCount}`,
+            `[aiReply] round=${round} 内容为空，尝试强制纯文本收尾 model=${aiContext.model} reasoning_len=${completion._reasoningContent?.length || 0} chunks=${completion._chunkCount}`,
           );
+          try {
+            const salvaged = await salvageAsText(aiContext, messages);
+            if (salvaged && salvaged.trim()) {
+              const { speech, emotion, images } = parseModelReply(salvaged.trim());
+              if (speech) {
+                console.log('[aiReply] 纯文本收尾成功，救回回复');
+                return {
+                  speech,
+                  emotion,
+                  images: Array.isArray(images) ? images : [],
+                  action: 'idle',
+                  mood: 'curious',
+                  source: 'model_salvaged',
+                  model: completion.model,
+                  usage: completion.usage,
+                  sessionId,
+                  userid: aiContext.userid,
+                };
+              }
+            }
+          } catch (se) {
+            console.warn('[aiReply] 纯文本收尾失败：', se?.message || se);
+          }
           throw new Error(`模型返回内容为空（model=${aiContext.model}，可能仅输出 reasoning 或流被截断）`);
         }
         const { speech, emotion, images } = parseModelReply(rawContent);
@@ -298,6 +410,25 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             ? JSON.parse(tc.function.arguments)
             : {};
           const toolName = tc.function?.name;
+          // 退化循环检测：记录 web_search 的 query，出现近重复即标记 degenerateLoop，
+          // 下一轮起不再带工具（见上方 useTools 判定），避免搜了又搜的自证式空转。
+          if (toolName === 'web_search') {
+            webSearchCount++;
+            try {
+              const q = (tc.function?.arguments ? JSON.parse(tc.function.arguments) : {}).query || '';
+              const key = String(q).trim().toLowerCase();
+              if (key) {
+                if (searchQueryHistory.includes(key)) degenerateLoop = true;
+                else searchQueryHistory.push(key);
+              }
+            } catch { /* ignore parse error */ }
+            // "有限度"搜索：达到上限（纠正模式 2 / 普通模式 4）即强制后续轮次纯文本收尾，
+            // 不再带工具，避免无节制联网拖垮后端。
+            if (webSearchCap > 0 && webSearchCount >= webSearchCap) {
+              console.log(`[aiReply] web_search 已达上限(${webSearchCap})，强制纯文本收尾`);
+              degenerateLoop = true;
+            }
+          }
           // 前端托管工具（MCP/skill 提供，总是以 frontend__ 前缀标识）：
           // 后端无法本地执行，必须通过 WS 回调解 Electron 主进程执行后取回结果。
           const frontendToolNames = aiContext.invokeFrontendTool ? getFrontendToolNames() : null;
