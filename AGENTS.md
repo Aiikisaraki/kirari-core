@@ -17,7 +17,7 @@
 - **运行时**: Node.js (CommonJS)
 - **Web 框架**: Express 5.2.1
 - **WebSocket**: ws 8.19.0
-- **AI 集成**: OpenAI SDK 6.18.0（兼容 OpenAI 协议的任意端点，默认指向智谱 bigmodel）
+- **AI 集成**: OpenAI SDK 6.18.0（兼容 OpenAI 协议的任意端点，内置默认指向 ChatAnywhere `api.chatanywhere.tech`）
 - **持久化**: better-sqlite3 12.x（会话、Token、客户端身份）
 - **密码哈希**: bcryptjs 3.x
 - **环境管理**: dotenv 17.x
@@ -83,12 +83,12 @@ npm install
 ```env
 PORT=9089
 STORAGE_TYPE=db
-MODEL_API_ENDPOINT=https://open.bigmodel.cn/api/paas/v4/
+MODEL_API_ENDPOINT=https://api.chatanywhere.tech/v1
 ```
 
 - `PORT`：首选端口（代码兜底默认值 8089，`.env` 当前设为 `9089`）。
 - `STORAGE_TYPE`：`memory` 或 `db`，当前设为 `db`（SQLite 生效）。
-- `MODEL_API_ENDPOINT`：模型 API 默认端点。前端"设置"页保存的端点会覆盖此默认值。
+- `MODEL_API_ENDPOINT`：模型 API 默认端点（代码内置默认即 `https://api.chatanywhere.tech/v1`，此行可覆盖；前端"设置"页保存的端点会再次覆盖）。
 
 ### 启动服务
 
@@ -162,13 +162,13 @@ wscat -c ws://localhost:9089/ws
 2. `socketServer.js` 首次收到消息时为该 `userid` 创建 `aiContext`（`connectionAiContext.js`），从 `apiTokenManager` 读取该用户的 Token / 模型 / 端点。
 3. `aiReplyService.getReply()` 调用 `openai.chat.completions.create`：
    - `model`：用户配置的模型（默认 `GLM-4.7-Flash`）
-   - `baseURL`：用户配置的端点（默认智谱 `open.bigmodel.cn/api/paas/v4/`）
+   - `baseURL`：用户配置的端点（内置默认 ChatAnywhere `api.chatanywhere.tech/v1`，本地 `.env` 的 `MODEL_API_ENDPOINT` 可覆盖）
    - `max_tokens: 512`，附带系统提示与最近 6 条历史
    - 按内容长度/关键词动态设置超时（45s~90s）
 4. 若用户未配置 Token，或模型调用抛错，则回退到 `fallbackService.getReply()`，回复 `source` 标记为 `"fallback"`。
 5. 同一 WS 连接中途切换 `userid` 会返回 `USER_ID_CHANGED` 错误。
 
-> 命名澄清：代码/文档里出现的 "qwen / 千问" 容易误解。实际默认端点来自**智谱（Zhipu）** `open.bigmodel.cn`，仅早期模型名默认值曾为 `qwen-turbo`，当前路由默认模型为 `GLM-4.7-Flash`。任何兼容 OpenAI 协议的端点都可配置。
+> 命名澄清：代码/文档里出现的 "qwen / 千问" 容易误解。内置默认端点来自 **ChatAnywhere** `api.chatanywhere.tech`（早期默认曾为智谱 `open.bigmodel.cn`、模型名曾为 `qwen-turbo`），当前路由默认模型为 `GLM-4.7-Flash`。任何兼容 OpenAI 协议的端点都可配置，本地 `.env` 的 `MODEL_API_ENDPOINT` 可覆盖内置默认值。
 
 ### 客户端签名体系（Token 管理接口）
 

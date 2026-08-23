@@ -248,7 +248,7 @@ ws://<your-server>:<port>/ws
 
 1. **API Token 与模型配置**
    - Token / 模型名 / 端点由前端"设置"页提交并加密存入 SQLite。
-   - 未配置端点时使用 `.env` 的 `MODEL_API_ENDPOINT`（默认智谱 `open.bigmodel.cn`）。
+   - 未配置端点时使用 `.env` 的 `MODEL_API_ENDPOINT`（内置默认 ChatAnywhere `api.chatanywhere.tech`；本地 `.env` 可覆盖为智谱 `open.bigmodel.cn` 等）。
    - 读取档案时 Token 以掩码（`sk-****abcd`）返回，**不再需要"查看密码"**。改动 Token 只需填入新值直接替换。
 
 2. **账户鉴权**
