@@ -3,7 +3,12 @@
 // { speech, emotion, images } 的稳定结构。四级容错：严格解析 → 修复后解析 → 正则提取 → 纯文本兜底。
 
 // 模型回复可携带的情绪/动作标签，需与前端白名单（PetEmotion）保持一致。
-const EMOTION_WHITELIST = new Set(['happy', 'wave']);
+// 即 AvatarState 去掉基础态 idle / blink / sleepy / speak。新增动画时同步扩展这里。
+const EMOTION_VALUES = [
+  'happy', 'wave',
+  'bow', 'excited', 'nod', 'sad', 'shake', 'shy', 'stretch', 'surprised', 'thinking',
+];
+const EMOTION_WHITELIST = new Set(EMOTION_VALUES);
 
 // 把文本安全地 JSON.parse 为对象；失败返回 null。
 function tryParseJson(text) {
@@ -46,7 +51,7 @@ function extractByRegex(text) {
   const speech = speechMatch
     ? speechMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim()
     : '';
-  const emoMatch = text.match(/"emotion"\s*:\s*"(happy|wave)"/i);
+  const emoMatch = text.match(new RegExp(`"emotion"\\s*:\\s*"(${EMOTION_VALUES.join('|')})"`, 'i'));
   const emotion = emoMatch ? emoMatch[1].toLowerCase() : null;
   return {
     speech,
