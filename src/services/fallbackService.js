@@ -65,6 +65,7 @@ function getReply({ content = "", persona = null } = {}) {
       greeting: 'wave',
       praise: 'happy',
       goodbye: 'wave',
+      scold: 'sad',
     };
     reply.emotion = categoryEmotion[categoryName] || null;
 
