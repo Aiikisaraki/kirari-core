@@ -197,66 +197,6 @@ function setupHttpRoutes(app) {
 
     app.get("/", (_req, res) => res.send("Virtual Pet API is running!"));
 
-    // ---- 用户私有知识库（Layer 1，最高优先级；前端"知识库"设置页录入）----
-    app.get("/api/knowledge", async (req, res) => {
-        const auth = resolveAuthUid(req);
-        if (!auth) return res.status(401).json({ message: "未认证" });
-        if (!(await requireClient(req, res, auth.uid))) return;
-        const category =
-            typeof req.query.category === "string" && req.query.category.trim()
-                ? req.query.category.trim().slice(0, 50)
-                : undefined;
-        const entries = await dbStorage.getKnowledgeEntries(auth.uid, {
-            category,
-            limit: 200,
-        });
-        return res.json({ entries });
-    });
-
-    app.post("/api/knowledge", async (req, res) => {
-        const auth = resolveAuthUid(req);
-        if (!auth) return res.status(401).json({ message: "未认证" });
-        if (!(await requireClient(req, res, auth.uid))) return;
-        const { title, content, category, tags, source } = req.body || {};
-        if (
-            typeof title !== "string" ||
-            !title.trim() ||
-            typeof content !== "string" ||
-            !content.trim()
-        )
-            return res.status(400).json({ message: "标题和内容不能为空" });
-        const id = await dbStorage.addKnowledgeEntry(auth.uid, {
-            title: title.trim().slice(0, 200),
-            content: content.trim().slice(0, 8000),
-            category:
-                typeof category === "string" && category.trim()
-                    ? category.trim().slice(0, 50)
-                    : null,
-            tags: Array.isArray(tags)
-                ? tags.map((t) => String(t).slice(0, 50)).slice(0, 20)
-                : [],
-            source:
-                typeof source === "string" && source.trim()
-                    ? source.trim().slice(0, 50)
-                    : null,
-        });
-        if (!id) return res.status(400).json({ message: "保存失败" });
-        return res.json({ id, message: "已保存" });
-    });
-
-    app.delete("/api/knowledge", async (req, res) => {
-        const auth = resolveAuthUid(req);
-        if (!auth) return res.status(401).json({ message: "未认证" });
-        if (!(await requireClient(req, res, auth.uid))) return;
-        const id = Number(
-            req.body?.id ?? (typeof req.query.id === "string" ? req.query.id : undefined),
-        );
-        if (!Number.isSafeInteger(id) || id <= 0)
-            return res.status(400).json({ message: "无效的条目 id" });
-        const ok = await dbStorage.deleteKnowledgeEntry(auth.uid, id);
-        return res.json({ deleted: ok });
-    });
-
     // ---- 账号体系（独立部署服务端时使用）----
     app.post("/api/auth/register", async (req, res) => {
         const { username, password } = req.body || {};

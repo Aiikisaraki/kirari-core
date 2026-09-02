@@ -49,7 +49,7 @@ async function salvageAsText(aiContext, messages) {
   }
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null } = {}) {
   if (!aiContext || aiContext.closed || !aiContext.openai) {
     throw new Error('AI 连接上下文不可用');
   }
@@ -193,7 +193,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 在作答前检索并注入参考信息，让桌宠在基础问题上更有底。失败静默降级，绝不阻塞主对话。
     let kbBlock = '';
     try {
-      kbBlock = await knowledgeRetrieval.retrieveForPrompt(aiContext, text || '[用户发送了图片]');
+      kbBlock = await knowledgeRetrieval.retrieveForPrompt(aiContext, text || '[用户发送了图片]', { kbContext, ws });
     } catch (e) {
       console.warn('[aiReply] 知识库检索失败（已忽略）:', e?.message || e);
     }

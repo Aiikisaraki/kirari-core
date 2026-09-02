@@ -69,6 +69,8 @@ function setupWebSocket(server, options = {}) {
         ws.frontendTools = [];
         ws.skillPrompts = [];
         ws.persona = null;
+        // 私人知识库反向请求：记录待前端回复的请求（requestId → { resolve, reject, timer }）
+        ws.kbRequests = new Map();
         // 前端托管工具桥：管理「后端请求 → Electron 主进程执行 → 结果回传」的配对与超时。
         const toolBridge = createFrontendToolBridge(ws);
         ws.toolBridge = toolBridge;
@@ -102,6 +104,18 @@ function setupWebSocket(server, options = {}) {
                 console.log(`🎭 前端注册基础人格：${ws.persona ? '自定义人格（已应用）' : '预设人格'}`);
                 return;
             }
+            // 私人知识库响应：前端本地检索完成，回传结果给后端等待中的检索请求
+            if (message.type === 'kb_response') {
+                const rid = message.requestId;
+                if (typeof rid === 'string' && ws.kbRequests.has(rid)) {
+                    const pend = ws.kbRequests.get(rid);
+                    clearTimeout(pend.timer);
+                    ws.kbRequests.delete(rid);
+                    const results = Array.isArray(message.results) ? message.results : [];
+                    pend.resolve(results);
+                }
+                return;
+            }
             // 前端工具执行结果回传：交给工具桥配对并 resolve 对应 Promise。
             if (message.type === 'tool_result') {
                 toolBridge.handleToolResult(message);
@@ -115,6 +129,8 @@ function setupWebSocket(server, options = {}) {
             // 机器人适配器子命名空间：客户端在已认证 uid 下创建，用于客人账号记忆隔离；
             // 不传（或 null）表示桌面/owner，复用 api_tokens 的登录 uid 记录。
             const locationScope = typeof message.locationScope === 'string' ? message.locationScope : null;
+            // 私人知识库上下文：前端本地检索后主动携带的结果（优先用此，减轻反向拉取延迟）
+            const kbContext = Array.isArray(message.kbContext) ? message.kbContext : null;
 
             if (!userMessage && images.length === 0) {
                 return ws.send(
@@ -207,6 +223,8 @@ function setupWebSocket(server, options = {}) {
                     locationScope,
                     skillPrompts: ws.skillPrompts || [],
                     persona: ws.persona || null,
+                    kbContext,
+                    ws,
                 });
                 console.log(`[WS-PERF] ← getReply 返回 @${Date.now()} 总耗时 ${Date.now()-_wsT0}ms`);
                 } catch (error) {
@@ -315,4 +333,33 @@ function invalidateUserContexts(uid) {
     }
 }
 
-module.exports = { setupWebSocket, invalidateUserContexts };
+// 向前端发起私人知识库检索请求，等待 kb_response 回传结果（Promise + 超时）。
+// 用于 DBKnowledgeSource 在请求未携带 kbContext 时，fallback 从前端实时拉取。
+// @param ws WebSocket 连接（已建立并注册 kbRequests Map）
+// @param query 检索词
+// @param timeout 超时毫秒（默认 3000）
+// @returns Promise<Array<{text, source, score, tier, priority}>>，超时/失败返回 []
+function requestKnowledgeFromFrontend(ws, query, timeout = 3000) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return Promise.resolve([]);
+    }
+    return new Promise((resolve) => {
+        const requestId = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const timer = setTimeout(() => {
+            ws.kbRequests.delete(requestId);
+            console.warn(`[kb] 前端知识库请求超时 requestId=${requestId}`);
+            resolve([]);
+        }, timeout);
+        ws.kbRequests.set(requestId, { resolve, timer });
+        try {
+            ws.send(JSON.stringify({ type: 'kb_request', requestId, query }));
+        } catch (e) {
+            clearTimeout(timer);
+            ws.kbRequests.delete(requestId);
+            console.error('[kb] 发送 kb_request 失败:', e);
+            resolve([]);
+        }
+    });
+}
+
+module.exports = { setupWebSocket, invalidateUserContexts, requestKnowledgeFromFrontend };

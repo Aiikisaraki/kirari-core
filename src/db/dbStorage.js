@@ -54,17 +54,6 @@ db.exec(`
     UNIQUE(userid, date)
   );
   CREATE INDEX IF NOT EXISTS idx_daily_memory_user_date ON daily_memory(userid, date);
-  CREATE TABLE IF NOT EXISTS knowledge_base (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    userid INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    category TEXT,
-    tags_json TEXT,
-    source TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_kb_userid ON knowledge_base(userid);
 `);
 
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
@@ -309,59 +298,6 @@ module.exports = {
   getAllUserids: async () => {
     const rows = db.prepare("SELECT userid FROM api_tokens WHERE token IS NOT NULL AND token != ''").all();
     return rows.map((r) => r.userid);
-  },
-
-  // ---- 用户私有知识库（Layer 1，最高优先级；主人手写的笔记/事实，主权在自己）----
-  getKnowledgeEntries: async (userid, { category, limit = 50 } = {}) => {
-    let rows;
-    if (category) {
-      rows = db.prepare('SELECT id, title, content, category, tags_json, source FROM knowledge_base WHERE userid = ? AND category = ? ORDER BY id DESC LIMIT ?').all(userid, category, limit);
-    } else {
-      rows = db.prepare('SELECT id, title, content, category, tags_json, source FROM knowledge_base WHERE userid = ? ORDER BY id DESC LIMIT ?').all(userid, limit);
-    }
-    return rows.map((r) => ({ ...r, tags: safeJsonArray(r.tags_json) }));
-  },
-  addKnowledgeEntry: async (userid, { title, content, category = null, tags = [], source = null } = {}) => {
-    if (!title || !content) return null;
-    const info = db.prepare('INSERT INTO knowledge_base (userid, title, content, category, tags_json, source) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(userid, title, content, category, JSON.stringify(tags || []), source);
-    return info.lastInsertRowid;
-  },
-  deleteKnowledgeEntry: async (userid, id) => {
-    const r = db.prepare('DELETE FROM knowledge_base WHERE userid = ? AND id = ?').run(userid, id);
-    return r.changes > 0;
-  },
-
-  // 检索私人知识库（Layer 1）：按查询分词做 LIKE 匹配 title/content/tags_json。
-  // 个人库规模小（数十~数百条），LIKE 足够快；结构化三元组场景后续可升级 FTS5。
-  // 通配符 % _ 会被转义，避免用户提问里的特殊字符破坏 SQL。
-  searchKnowledgeEntries: async (userid, query, limit = 5) => {
-    const q = String(query || '').trim();
-    if (!q) return [];
-    const esc = (s) => s.replace(/[\\%_]/g, (c) => '\\' + c);
-    const terms = q
-      .split(/\s+/)
-      .map((t) => t.trim())
-      .filter(Boolean)
-      .map(esc)
-      .slice(0, 8);
-    if (!terms.length) return [];
-    const conds = terms
-      .map(() => '(title LIKE ? ESCAPE \'\\\' OR content LIKE ? ESCAPE \'\\\' OR tags_json LIKE ? ESCAPE \'\\\')')
-      .join(' AND ');
-    const params = [userid];
-    for (const t of terms) {
-      const like = `%${t}%`;
-      params.push(like, like, like);
-    }
-    params.push(limit);
-    const rows = db
-      .prepare(
-        `SELECT id, title, content, category, tags_json, source FROM knowledge_base ` +
-          `WHERE userid = ? AND ${conds} ORDER BY id DESC LIMIT ?`,
-      )
-      .all(...params);
-    return rows.map((r) => ({ ...r, tags: safeJsonArray(r.tags_json) }));
   },
 
   // ---- 配置档案（复用 api_tokens 表，按 uid 存取）----

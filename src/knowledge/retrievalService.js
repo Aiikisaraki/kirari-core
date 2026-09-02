@@ -9,10 +9,10 @@
 const { getRegistry } = require('./SourceRegistry');
 
 /**
- * 检索并格式化为提示词片段。失败/无结果返回空串，绝不阻塞主对话。
+ * 检索并格式化为提示词片段。失败/无结果返回空串,绝不阻塞主对话。
  * @param {Object} aiContext 含 userid（用于 Layer1 私有知识隔离）
  * @param {string} query
- * @param {Object} [opts] { topK, maxChars, domains }
+ * @param {Object} [opts] { topK, maxChars, domains, kbContext, ws }
  * @returns {Promise<string>}
  */
 async function retrieveForPrompt(aiContext, query, opts = {}) {
@@ -25,6 +25,9 @@ async function retrieveForPrompt(aiContext, query, opts = {}) {
       domains: opts.domains,
       // 透传 userid：私有知识库（DBKnowledgeSource）据此按用户隔离检索。
       userid: aiContext?.userid,
+      // 透传前端携带的 kbContext 和 ws（DBKnowledgeSource 用于主动携带/反向拉取）
+      kbContext: opts.kbContext,
+      ws: opts.ws,
     });
     if (!passages.length) return '';
 
