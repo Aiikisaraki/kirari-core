@@ -6,8 +6,8 @@
     "scripts": {
         "test": "echo \"Error: no test specified\" && exit 1",
         "start": "node server.js",
-        "dev": "concurrently \"nodemon server.js\" \"nodemon server.js\"",
-        "health": "curl http://localhost:3000/health"
+        "dev": "nodemon server.js",
+        "health": "curl http://127.0.0.1:${PORT:-9089}/health"
     },
     "keywords": [],
     "author": "",

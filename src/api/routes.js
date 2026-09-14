@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+// 版本号统一来自 package.json，避免 /health、/config 与发版版本漂移。
+const { version: APP_VERSION } = require("../../package.json");
 const apiTokenManager = require("../token/apiTokenManager");
 const dbStorage = require("../db/dbStorage");
 const { verifySignedRequest } = require("./requestSigner");
@@ -71,7 +73,7 @@ function setupHttpRoutes(app) {
         res.json({
             status: "ok",
             message: "虚拟桌宠服务运行正常",
-            version: "1.0.0",
+            version: APP_VERSION,
             uptime: Math.floor(process.uptime()),
         }),
     );
@@ -81,7 +83,7 @@ function setupHttpRoutes(app) {
             max_message_length: 200,
             supports_tts: false,
             mode: "fallback",
-            version: "1.0.0",
+            version: APP_VERSION,
         }),
     );
 
