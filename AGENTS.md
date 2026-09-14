@@ -1,260 +1,137 @@
-# 虚拟桌宠 API (pet-api)
+# Kirari Core 开发说明
 
-## 项目概述
+## 项目定位
 
-这是一个基于 Node.js 的虚拟桌宠 API 服务器，提供 WebSocket 实时通信和 REST API 接口，用于支持桌面宠物应用（Electron 客户端 `akisaki-kirari`）的交互功能。
+Kirari Core 是 Kirari 桌宠的后端服务，当前版本 `0.7.2`。它负责对话、会话记忆、知识库、账户配置、工具调用和 WebSocket 实时通信；桌面窗口、动画、点穿、换肤和 OneBot 平台连接由 `kirari-desktop` 负责。
 
-服务具备三类能力：
+本仓库的旧项目名是 `pet-api`，但对外项目名统一使用 `kirari-core`。
 
-1. **WebSocket 实时对话通道**（`/ws`）—— 客户端发消息，服务端优先调用大模型生成回复，失败时回退到本地关键词预设回复。
-2. **REST API** —— 健康检查、客户端初始化配置、以及 API Token / 模型配置的管理接口。
-3. **会话管理与持久化** —— 基于 `session_id` 的多会话管理，默认使用 SQLite 持久化（也可切回内存）。
+## 技术栈
 
-> ⚠️ 大模型能力**已经接入**，不是"待开发"。是否走真实模型取决于该 `userid` 是否在后端配置过 API Token：配过则调用模型，未配则走本地预设回复。
+- Node.js 24，CommonJS
+- Express 5
+- `ws` WebSocket 服务
+- `better-sqlite3` / SQLite
+- OpenAI SDK，兼容 OpenAI API 格式
+- `sharp` 图片解码与处理
+- `bcryptjs`、`dotenv`
+- `nodemon`、`concurrently`
 
-### 主要技术栈
+## 目录职责
 
-- **运行时**: Node.js (CommonJS)
-- **Web 框架**: Express 5.2.1
-- **WebSocket**: ws 8.19.0
-- **AI 集成**: OpenAI SDK 6.18.0（兼容 OpenAI 协议的任意端点，内置默认指向 ChatAnywhere `api.chatanywhere.tech`）
-- **持久化**: better-sqlite3 12.x（会话、Token、客户端身份）
-- **密码哈希**: bcryptjs 3.x
-- **环境管理**: dotenv 17.x
-- **开发工具**: nodemon 3.1.11, concurrently 9.2.1
-
-### 项目架构
-
-```
-pet-api/
-├── server.js                      # 服务器入口，仅调用 createServer()
-├── package.json
-├── .env                           # 环境变量（PORT / STORAGE_TYPE / MODEL_API_ENDPOINT）
-├── PORTREADME.md                  # API 接口详细文档
-├── 开发指南.md                     # 后端开发指南
-├── res/
-│   └── fallback_responses.json    # 预设回复配置（模型失败时的兜底）
-└── src/
-    ├── app.js                     # 创建 Express + http 服务，挂载路由/WS，启动端口探测
-    ├── api/
-    │   ├── routes.js              # REST 路由（/health /config /api-client /api-token(legacy) /api/auth /api/profile）
-    │   └── requestSigner.js       # legacy 客户端请求签名校验（ed25519 verify + nonce/时间戳）
-    ├── auth/
-    │   └── sessionAuth.js         # 会话令牌 HMAC 签名/校验（Bearer 登录态）
-    ├── ai/
-    │   └── connectionAiContext.js # 按 userid 读取 Token，用 OpenAI SDK 构建连接上下文
-    ├── db/
-    │   ├── memoryStorage.js       # 内存存储实现
-    │   └── dbStorage.js           # SQLite 存储实现（当前 .env 激活）
-    ├── services/
-    │   ├── aiReplyService.js      # 调用大模型生成回复（chat.completions）
-    │   └── fallbackService.js     # 关键词匹配预设回复
-    ├── session/
-    │   └── sessionManager.js      # 会话管理门面（STORAGE_TYPE 切换内存/SQLite）
-    ├── token/
-    │   └── apiTokenManager.js     # Token / 模型 / 端点 的读写封装
-    ├── utils/
-    │   └── portHelper.js          # 端口可用性探测
-    └── websocket/
-        └── socketServer.js        # WS 消息处理核心
+```text
+server.js                         # 入口
+src/app.js                        # 创建 HTTP 服务，挂载 REST 与 WebSocket
+src/api/routes.js                 # REST 路由和账户鉴权
+src/api/requestSigner.js          # legacy 客户端签名校验
+src/auth/sessionAuth.js           # 会话令牌签发与校验
+src/websocket/socketServer.js     # WS 认证、消息和连接状态
+src/services/                     # 对话、降级回复、简报等业务服务
+src/knowledge/                    # 知识源注册与检索
+src/tools/                        # 后端工具和桌面端工具桥
+src/db/                           # 内存 / SQLite 存储实现
+src/session/                      # 会话管理门面
+src/token/                        # 模型配置读写
+res/fallback_responses.json       # 模型不可用时的本地回复
+PORTREADME.md                     # 当前接口合约
 ```
 
-### 核心功能
+模块边界要求：路由只负责协议和鉴权，服务层负责业务，存储层只负责持久化，WebSocket 层负责连接和消息编排。不要把桌面 UI 逻辑、OneBot 平台细节或持久化业务规则混进无关模块。
 
-1. **WebSocket 通信** - `/ws` 路径，支持实时双向消息传输。
-2. **REST API** - `/health`、`/config` 以及 API Token / 模型配置管理接口。
-3. **会话管理** - 基于 `session_id` 的会话状态维护与消息历史记录。
-4. **大模型回复（主路径）** - 通过 OpenAI SDK 调用用户配置的模型端点；未配置 Token 时自动回退。
-5. **预设回复（兜底）** - 基于关键词匹配的 `fallback_responses.json`，仅在模型调用失败时使用。
-6. **账户与配置档案** - `users` 表（uid 主键，0-99999 保留，真实用户从 100000 起）+ `/api/auth/{register,login}` + `/api/profile`（GET/PUT，Token 掩码返回，按内置账户或会话令牌鉴权）。
-6. **端口自适应** - 自动检测并使用可用端口。
-7. **客户端签名校验** - Token 管理类接口使用 ed25519（前端私钥签名 / 后端用注册公钥验签）防篡改。
+## 运行与端口
 
-## 构建和运行
+安装依赖：
 
-### 环境配置
-
-1. 安装依赖：
 ```bash
 npm install
 ```
 
-2. 配置环境变量（`.env` 文件，已被 `.gitignore` 忽略）：
-```env
-PORT=9089
-STORAGE_TYPE=db
-MODEL_API_ENDPOINT=https://api.chatanywhere.tech/v1
-```
+直接运行：
 
-- `PORT`：首选端口（代码兜底默认值 8089，`.env` 当前设为 `9089`）。
-- `STORAGE_TYPE`：`memory` 或 `db`，当前设为 `db`（SQLite 生效）。
-- `MODEL_API_ENDPOINT`：模型 API 默认端点（代码内置默认即 `https://api.chatanywhere.tech/v1`，此行可覆盖；前端"设置"页保存的端点会再次覆盖）。
-
-### 启动服务
-
-**方式一：直接运行**
 ```bash
-node server.js
+npm start
 ```
 
-**方式二：使用 nodemon（开发模式）**
+开发运行：
+
 ```bash
 npm run dev
 ```
 
-> ⚠️ 当前 `package.json` 的 `dev` 脚本误写为两个相同的 `nodemon server.js`，
-> 实际只会启动一个实例。建议后续改为 `nodemon server.js` 或 `concurrently` 同时拉起前端。
+默认监听 `HOST=0.0.0.0`、`PORT=9089`。只有在未显式设置 `PORT` 时，服务才会在默认端口不可用时尝试候选端口。桌面整合版由 `kirari-desktop/electron/backend-launcher.ts` 注入 `HOST=127.0.0.1` 和动态端口，后端不要写死桌面端端口，也不要自行覆盖启动器传入的端口。
 
-### 服务端口
+`npm run dev` 当前用于启动后端开发进程。前端开发服务需要在 `kirari-desktop` 仓库单独启动。
 
-服务器（`src/utils/portHelper.js`）会先尝试 `process.env.PORT`，再依次尝试备选端口，返回第一个可用端口：
+## 配置约定
 
-- 首选：`process.env.PORT`（默认 8089，`.env` 设为 9089）
-- 备选端口：`3000`, `3001`, `8089`, `5000`
+`.env` 只保存在本地，不入库。常用变量：
 
-> 联调风险：前端 Electron 默认连接 `ws://localhost:9089/ws`，但若后端因为端口被占用而漂移到了 `3000` 等端口，前端不会自动发现。实际联调时建议保证 `9089` 端口空闲。
-
-### 测试接口
-
-**健康检查：**
-```bash
-curl http://localhost:9089/health
-# => {"status":"ok","message":"虚拟桌宠服务运行正常","version":"1.0.0","uptime":123}
+```env
+HOST=0.0.0.0
+PORT=9089
+STORAGE_TYPE=db
+MODEL_API_ENDPOINT=https://api.chatanywhere.tech/v1
+BUILTIN_ACCOUNT_TOKEN=请设置随机值
+SESSION_SECRET=请设置随机值
 ```
 
-**获取配置：**
-```bash
-curl http://localhost:9089/config
-# => {"default_action":"idle","max_message_length":200,"supports_tts":false,"mode":"fallback","version":"1.0.0"}
-```
+- `STORAGE_TYPE=db` 使用 SQLite，`memory` 用于临时测试。
+- 模型端点可由账户档案配置覆盖。
+- `BUILTIN_ACCOUNT_TOKEN` 只用于本地内置账户；必须与桌面端配置一致。
+- 独立部署必须设置随机的 `SESSION_SECRET`。
+- 不要提交 `.env`、真实 Token、数据库、日志或用户数据。
 
-**WebSocket 测试：**
-```bash
-# 安装 wscat
-npm install -g wscat
+## 认证事实
 
-# 连接
-wscat -c ws://localhost:9089/ws
+推荐的新接口使用账户凭证：
 
-# 发送消息（注意：需要带 userid 字段，否则返回 INVALID_USER_ID）
-{"type":"user_message","session_id":"test","userid":1,"content":"你好"}
-```
+- 本地内置账户：`X-Builtin-Token`。
+- 独立部署账户：登录后使用 `Authorization: Bearer <session-token>`。
+- WebSocket：连接 `/ws?token=<token>`，握手阶段完成认证。
 
-## 开发规范
+WebSocket 连接身份来自握手令牌对应的 UID，客户端消息中的 `userid` 不再作为身份来源。内置账户 UID 当前为 `1`；独立注册账户从 `100000` 起分配。旧 `/api-client/*`、`/api-token/*` 接口使用 ed25519 请求签名，仅为历史客户端兼容保留。
 
-### 代码风格
+## WebSocket 约定
 
-- 使用 CommonJS 模块系统（`require`/`module.exports`）
-- 采用函数式/模块化风格
-- 使用异步函数处理 I/O 操作
-- 关键操作使用 `console.log` 标记
+当前连接除了聊天消息，还支持桌面端上报或回传：
 
-### 会话管理
+- `register_tools`：注册桌面端托管工具。
+- `tool_result`：回传工具执行结果。
+- `register_skills`：注册技能说明。
+- `register_persona`：注册用户人格设定。
+- `kb_response`：回传私人知识库检索结果。
+- 普通消息可包含 `content`、`images`、`session_id`、`locationScope` 和 `kbContext`。
 
-- 通过 `STORAGE_TYPE` 在内存存储（`memoryStorage.js`）和 SQLite 存储（`dbStorage.js`）之间切换。
-- `sessionManager.js` 为统一门面，对外屏蔽底层实现。
-- 会话保留最近 10 条消息（约 5 轮问答），由 `getRecentMessages(sessionId, 6)` 在模型调用时取最近 6 条作为上下文。
-- 当前 `.env` 设为 `STORAGE_TYPE=db`，SQLite 文件位于 `data/pet_sessions.db`（已被 `.gitignore` 忽略）。
+图片进入模型前会经过服务端解码和尺寸检查。模型调用失败或未完成配置时，服务会按实现返回明确错误或本地降级回复。完整字段和错误码以 [`PORTREADME.md`](./PORTREADME.md) 为准。
 
-### 大模型回复链路
+## 版本与接口
 
-1. 客户端 WS 消息携带 `userid`。
-2. `socketServer.js` 首次收到消息时为该 `userid` 创建 `aiContext`（`connectionAiContext.js`），从 `apiTokenManager` 读取该用户的 Token / 模型 / 端点。
-3. `aiReplyService.getReply()` 调用 `openai.chat.completions.create`：
-   - `model`：用户配置的模型（默认 `GLM-4.7-Flash`）
-   - `baseURL`：用户配置的端点（内置默认 ChatAnywhere `api.chatanywhere.tech/v1`，本地 `.env` 的 `MODEL_API_ENDPOINT` 可覆盖）
-   - `max_tokens: 512`，附带系统提示与最近 6 条历史
-   - 按内容长度/关键词动态设置超时（45s~90s）
-4. 若用户未配置 Token，或模型调用抛错，则回退到 `fallbackService.getReply()`，回复 `source` 标记为 `"fallback"`。
-5. 同一 WS 连接中途切换 `userid` 会返回 `USER_ID_CHANGED` 错误。
+项目版本唯一来源是 `package.json`。`/health` 和 `/config` 应通过同一版本来源返回版本号，不要在路由中写死旧版本。
 
-> 命名澄清：代码/文档里出现的 "qwen / 千问" 容易误解。内置默认端点来自 **ChatAnywhere** `api.chatanywhere.tech`（早期默认曾为智谱 `open.bigmodel.cn`、模型名曾为 `qwen-turbo`），当前路由默认模型为 `GLM-4.7-Flash`。任何兼容 OpenAI 协议的端点都可配置，本地 `.env` 的 `MODEL_API_ENDPOINT` 可覆盖内置默认值。
+修改接口时必须同步更新 `PORTREADME.md`，并检查桌面端的 `electron/chat-session-service.ts`、适配器和后端启动器。改动认证、消息字段、端口或图片处理时，应进行真实联调。
 
-### 客户端签名体系（Token 管理接口）
+## 联调检查
 
-除 `/health`、`/config` 外，所有 `/api-client`、`/api-token` 接口都需要签名：
+最小检查路径：
 
-- 前端（`akisaki-kirari`）在 `userData/client-identity.json` 生成 **ed25519** 密钥对，`clientId` 为 UUID。
-- 请求时携带头：`X-Client-Id`、`X-Client-Timestamp`、`X-Client-Nonce`、`X-Client-Signature`（对 `method\npath\ntimestamp\nnonce\nbody` 签名）。
-- 后端 `requestSigner.js` 用客户端注册时上传的 **ed25519 公钥** 做 `crypto.verify`（algorithm=null，按公钥类型自动走 ed25519）校验签名与时间戳/nonce，防重放与篡改。
-- 用户身份 `userid` 当前在前端硬编码为 `"1"`。
+1. `npm install` 成功，原生依赖与当前 Node.js ABI 匹配。
+2. 启动后确认日志中的 HOST、PORT 和 `/health` 可访问。
+3. 用有效内置令牌或会话令牌连接 `/ws`。
+4. 验证文本、图片、降级回复、会话恢复和配置保存。
+5. 若修改工具、技能或知识库，分别验证注册、回传、超时和断线行为。
+6. 前端改动还要验证拖动、逐像素点穿、动画、换肤和安装包。
 
-### 消息格式
+当前没有完整自动化测试套件，发布前不能只依赖构建成功判断功能正常。
 
-**客户端 → 服务端（WebSocket）：**
-```json
-{
-  "type": "user_message",
-  "session_id": "string",
-  "userid": 1,
-  "content": "string",
-  "timestamp": "number (可选)"
-}
-```
-- `userid` 为必填正整数，缺失或非法返回 `INVALID_USER_ID`。
-- `content` 为必填非空字符串，缺失返回 `INVALID_MESSAGE`。
-- 当前实现**不严格校验 `type` 字段**，直接读取 `content` / `userid` / `session_id`。
+## 当前待办
 
-**服务端 → 客户端：**
-```json
-{
-  "type": "pet_response",
-  "speech": "string",
-  "action": "string",
-  "mood": "string",
-  "source": "model | fallback",
-  "model": "string (仅 model 路径)",
-  "timestamp": "number"
-}
-```
-- 模型路径固定返回 `action: "idle"`、`mood: "curious"`。
-- 连接成功后约 1.5 秒会主动推送一条欢迎 `pet_response`（演示性质）。
-
-**错误响应：**
-```json
-{ "type": "error", "code": "string", "message": "string", "timestamp": "number (可选)" }
-```
-实际错误码：`INVALID_MESSAGE`、`INVALID_USER_ID`、`USER_ID_CHANGED`、`PROCESS_ERROR`。
-（旧文档提到的 `MODEL_ERROR` / `RATE_LIMITED` / `SESSION_EXPIRED` 当前未使用。）
-
-### 预设回复配置
-
-- 配置文件：`res/fallback_responses.json`
-- 分类：greeting, goodbye, praise, scold, status, time, weather, default
-- 支持动态变量替换（如 `{{current_time}}`）
-
-## 当前状态
-
-- ✅ WebSocket 通信已实现
-- ✅ REST API 基础接口已完成（`/health` `/config`）
-- ✅ 预设回复系统正常工作（作为兜底）
-- ✅ 大模型 API 集成已实现（OpenAI SDK，按 userid 配置）
-- ✅ SQLite 持久化已实现（`dbStorage.js`，`STORAGE_TYPE=db` 生效）
-- ✅ 客户端签名校验已实现（ed25519 前后端共用一套密钥，前端私钥签名、后端用注册公钥验签）
-- ✅ API Token / 模型 / 端点管理接口已实现
-- ⏳ 单元测试（待添加）
-- ⏳ 速率限制 / 消息长度限制（待实现）
-- ⏳ OneBot / QQ 机器人适配器（尚未接入，见下方）
-
-## 开发注意事项
-
-1. **端口冲突**: 服务器会自动尝试多个端口，确保至少有一个可用。
-2. **会话持久化**: SQLite 模式重启后可恢复；内存模式重启即丢失。
-3. **API 安全**: API Key 通过环境变量 + 数据库管理，`.env` 不要提交到版本控制。
-4. **签名一致性**: Token 接口依赖前后端签名算法一致，修改签名逻辑需同步两端。
-5. **userid 来源**: 当前前端硬编码 `userid=1`，多用户/多 QQ 号场景需重新设计映射。
-
-## 扩展方向
-
-1. **OneBot / QQ 适配器**: 接入 NapCat / LLOneBot 等 OneBot 实现，把 QQ 消息桥接进本服务的 `socketServer`（当前最大缺口）。
-2. **多会话映射**: QQ 群号/用户 → `session_id`，复用现有会话与持久化。
-3. **CQ 码处理**: 表情/图片/@ 等富媒体的编解码。
-4. **工具调用**: 天气查询、提醒等。
-5. **多模态**: 图片、语音交互。
+- OneBot 群号 / 用户与 `session_id` 的稳定映射。
+- QQ 富媒体和 CQ 码编解码。
+- 按 UID / 会话的速率限制和消息长度限制。
+- 后端接口与跨版本客户端的自动化测试。
 
 ## 相关文档
 
-- `PORTREADME.md` - 详细的 API 接口规范文档
-- `开发指南.md` - 后端开发指南（架构、流程、配置）
-- `res/fallback_responses.json` - 预设回复配置
-- `.env` - 环境变量配置（本地文件，不入库）
+- [`README.md`](./README.md)：面向部署和使用者的快速入口。
+- [`PORTREADME.md`](./PORTREADME.md)：WebSocket / REST 当前接口合约。
+- [`res/fallback_responses.json`](./res/fallback_responses.json)：本地降级回复配置。

@@ -1,299 +1,271 @@
-# 虚拟桌宠 API 服务器接口规范
+# Kirari Core 接口合约
 
-> **版本**: v1.1（已根据源码核对）
-> **通信方式**: WebSocket 为主，REST 为辅
-> **数据格式**: JSON
+> 当前实现版本：`0.7.2`
+> 通信方式：WebSocket 为主，REST 为辅
+> 数据格式：JSON
 
----
+这份文档描述当前源码实际提供的接口。桌面端本地模式的端口由客户端动态注入，示例中的 `9089` 仅代表后端直接运行时的默认端口。
 
-## 📋 接口概览
+## 接口总览
 
-| 接口类型  | 路径                  | 方法 | 说明                     | 优先级 |
-| --------- | --------------------- | ---- | ------------------------ | ------ |
-| WebSocket | `/ws`                 | -    | 核心消息通信             | ⭐⭐⭐⭐⭐ |
-| REST      | `/health`             | GET  | 服务健康检查             | ⭐⭐⭐    |
-| REST      | `/config`             | GET  | 获取默认配置             | ⭐⭐     |
-| REST      | `/api/auth/register`  | POST | 注册用户账号（服务端部署）| ⭐⭐⭐   |
-| REST      | `/api/auth/login`     | POST | 登录换取会话令牌         | ⭐⭐⭐    |
-| REST      | `/api/profile`        | GET  | 获取当前账户配置档案     | ⭐⭐⭐⭐   |
-| REST      | `/api/profile`        | PUT  | 更新配置档案（模型/端点/Token）| ⭐⭐⭐⭐ |
-| REST      | `/api-client/register`| POST | 注册客户端身份（legacy） | ⭐      |
-| REST      | `/api-token/status`   | GET  | 查询 Token 配置状态（legacy）| ⭐   |
-| REST      | `/api-token`          | POST | 设置 Token/模型/端点（legacy）| ⭐  |
-| REST      | `/api-token/model`    | POST | 更新模型名（legacy）     | ⭐      |
-| REST      | `/api-token/endpoint` | POST | 更新端点（legacy）       | ⭐      |
-| REST      | `/api-token/verify`   | POST | 校验查看密码并取回 Token（legacy）| ⭐ |
+| 类型 | 路径 | 方法 | 说明 |
+| --- | --- | --- | --- |
+| WebSocket | `/ws` | 连接 | 实时对话、图片、工具和知识库桥接 |
+| REST | `/health` | GET | 健康检查 |
+| REST | `/config` | GET | 客户端能力和默认配置 |
+| REST | `/api/auth/register` | POST | 注册独立部署账户 |
+| REST | `/api/auth/login` | POST | 登录并获取会话令牌 |
+| REST | `/api/auth/me` | GET | 获取当前登录账户 |
+| REST | `/api/profile` | GET / PUT | 读取或更新模型配置档案 |
+| REST | `/api-client/register` | POST | legacy 客户端注册 |
+| REST | `/api-token/*` | 多种 | legacy Token 管理接口 |
 
----
+## 地址与认证
 
-## 🌐 WebSocket 接口
+直接运行后端时：
 
-### 连接地址
-
-```
-ws://<your-server>:<port>/ws
+```text
+HTTP:      http://<host>:<port>
+WebSocket: ws://<host>:<port>/ws?token=<token>
 ```
 
-默认端口：`9089`（代码兜底 8089，`.env` 设为 9089）。
+默认端口是 `9089`，默认监听地址是 `0.0.0.0`。如果没有显式设置 `PORT` 且默认端口被占用，服务会尝试候选端口。桌面整合版会把 `HOST=127.0.0.1` 和动态端口注入后端，实际地址以启动日志或客户端状态为准。
 
-### 消息交互流程
+WebSocket 在握手阶段校验令牌：
 
-```
-客户端 → 服务端: { "type":"user_message", "userid":1, "content":"..." }
-服务端 → 大模型: 调用用户配置的 OpenAI 协议端点（chat.completions）
-大模型 → 服务端: 返回文本
-服务端 → 客户端: { "type":"pet_response", "source":"model", ... }
-                        │
-                        └─ 若未配置 Token / 模型调用失败 → 走 fallback_responses.json（source:"fallback"）
-```
-
-> 大模型为**主路径**，本地预设回复为**兜底**。是否走模型取决于该 `userid` 是否配置过 API Token。
-
----
-
-## 📨 消息类型定义
-
-### 1. 客户端 → 服务端：用户消息
-
-```json
-{
-  "type": "user_message",
-  "session_id": "string",
-  "userid": 1,
-  "content": "string",
-  "timestamp": "number (可选)"
-}
-```
-
-| 字段         | 类型   | 必填 | 说明                              |
-| ------------ | ------ | ---- | --------------------------------- |
-| `type`       | string | 否   | 当前实现不校验此字段              |
-| `session_id` | string | 否   | 缺省时服务端生成                  |
-| `userid`     | number | **是** | 正整数；缺失/非法 → `INVALID_USER_ID` |
-| `content`    | string | **是** | 非空；缺失/空 → `INVALID_MESSAGE` |
+- 本地内置账户：使用 `X-Builtin-Token` 对应的令牌值作为 URL 中的 `token`。
+- 独立部署账户：使用登录接口返回的会话令牌。
 
 示例：
-```json
-{ "type":"user_message", "session_id":"user_abc123", "userid":1, "content":"你好，小灵！" }
+
+```text
+ws://127.0.0.1:9089/ws?token=<session-or-builtin-token>
 ```
 
-### 2. 服务端 → 客户端：宠物响应
+令牌无效或缺失时，WebSocket 升级会被拒绝。连接身份由令牌决定，消息中的 `userid` 不会改变当前身份。
 
-```json
-{
-  "type": "pet_response",
-  "speech": "string",
-  "action": "string",
-  "mood": "string",
-  "source": "model | fallback",
-  "model": "string (仅 model 路径)",
-  "timestamp": "number"
-}
-```
+## WebSocket 消息
 
-| 字段        | 类型   | 必填 | 示例值                  | 说明                          |
-| ----------- | ------ | ---- | ----------------------- | ----------------------------- |
-| `type`      | string | 是   | `"pet_response"`        | 固定值                        |
-| `speech`    | string | 是   | `"主人好呀！"`          | 宠物说的话                    |
-| `action`    | string | 是   | `"idle"` / `"wave"`     | 模型路径固定 `"idle"`         |
-| `mood`      | string | 是   | `"curious"` / `"happy"` | 模型路径固定 `"curious"`      |
-| `source`    | string | 否   | `"model"` / `"fallback"`| 标明回复来源                  |
-| `model`     | string | 否   | `"GLM-4.7-Flash"`       | 仅 model 路径返回             |
-| `timestamp` | number | 否   | `1700000000000`         | 服务端生成                    |
+### 普通消息
 
-示例（模型）：
-```json
-{ "type":"pet_response", "speech":"主人好呀！今天过得怎么样？", "action":"idle", "mood":"curious", "emotion":"happy", "source":"model", "model":"GLM-4.7-Flash", "timestamp":1700000000000 }
-```
-
-> Action / Mood 枚举建议值参见旧文档。**当前模型路径产出 `action:"idle"`、`mood:"curious"`，并会按回复语义附带 `emotion`（`happy` / `wave`）；兜底回复同样按分类附带 `emotion`**（greeting→wave、praise→happy、goodbye→wave，其余 `null`）。前端仅消费 `emotion` 字段用于“情绪优先”动画（先播情绪/动作再说话）。
-
-### 3. 服务端 → 客户端：错误响应
+客户端发送：
 
 ```json
 {
-  "type": "error",
-  "code": "string",
-  "message": "string",
-  "timestamp": "number (可选)"
+    "type": "user_message",
+    "session_id": "desktop-main",
+    "content": "你好，绮莉",
+    "images": [],
+    "locationScope": null,
+    "kbContext": []
 }
 ```
 
-| code               | message            | 触发条件                         |
-| ------------------ | ------------------ | -------------------------------- |
-| `INVALID_MESSAGE`  | "消息不能为空"     | `content` 缺失或为空             |
-| `INVALID_USER_ID`  | "用户 ID 无效"     | `userid` 缺失或非安全正整数      |
-| `USER_ID_CHANGED`  | "同一连接不能切换用户" | 同一 WS 连接中途换了 `userid` |
-| `PROCESS_ERROR`    | "服务器处理消息失败" | 其他未预期错误                 |
+字段说明：
 
-> 旧文档提到的 `MODEL_ERROR` / `RATE_LIMITED` / `SESSION_EXPIRED` **当前未使用**。
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `type` | string | 否 | 客户端通常填写 `user_message`；当前服务主要按内容字段处理 |
+| `session_id` | string | 否 | 会话标识；缺省时由服务端生成 |
+| `content` | string | 与图片二选一 | 文本内容，不能为空 |
+| `images` | string[] | 与文字二选一 | 图片数据或数据 URL；服务端会解码和尺寸检查 |
+| `locationScope` | string / null | 否 | 机器人适配器使用的隔离范围 |
+| `kbContext` | object[] | 否 | 客户端私人知识库检索结果 |
 
-### 4. 连接欢迎消息
+文本和图片都为空时返回 `INVALID_MESSAGE`。客户端传入的 `userid` 仅为历史字段，不应作为认证或会话身份依据。
 
-连接成功后约 **1.5 秒**，服务端主动推送一条 `pet_response`（演示性质）：
+### 服务端回复
+
 ```json
-{ "type":"pet_response", "speech":"主人好呀~ (ฅ´ω`ฅ)", "action":"wave", "mood":"curious", "emotion":"wave", "timestamp":1700000000000 }
+{
+    "type": "pet_response",
+    "speech": "主人好呀，今天也一起加油。",
+    "action": "idle",
+    "mood": "curious",
+    "emotion": "happy",
+    "source": "model",
+    "model": "模型名称",
+    "timestamp": 1700000000000
+}
 ```
 
----
+- `speech`：回复文本。
+- `action`、`mood`：桌宠动作和基础情绪。
+- `emotion`：可选的情绪动画提示。
+- `source`：`model` 或 `fallback`。
+- `model`：模型路径可能返回，降级路径通常没有。
+- `timestamp`：服务端生成的时间戳。
 
-## 🌐 REST 接口
+### 错误回复
 
-### 公共接口（无需签名）
-
-#### `GET /health`
 ```json
-{ "status":"ok", "message":"虚拟桌宠服务运行正常", "version":"1.0.0", "uptime": 123 }
-```
-> 注意：**无 `model` 字段**（旧文档示例有误）。
-
-#### `GET /config`
-```json
-{ "default_action":"idle", "max_message_length":200, "supports_tts":false, "mode":"fallback", "version":"1.0.0" }
-```
-
----
-
-### 账户与配置档案（推荐路径，前端设置界面使用）
-
-这套接口按**账户凭证**驱动，对前端无感，取代了旧的 ed25519 签名 + 查看密码流程。
-
-**鉴权方式二选一**：
-- 本地部署：请求头 `X-Builtin-Token: <builtinToken>`，对应保留内置账户 `uid=0`。该令牌与客户端 `pet-client.config.json` 的 `builtinToken`、服务端 `.env` 的 `BUILTIN_ACCOUNT_TOKEN` 一致（仅本地端到端部署时使用）。
-- 远程/服务端部署：先 `POST /api/auth/login` 拿到 `sessionToken`，后续请求带 `Authorization: Bearer <sessionToken>`。
-
-#### `POST /api/auth/register`
-独立部署服务端时注册用户账号（前端"注册"入口）。
-```json
-请求: { "username":"alice", "password":"secret123" }
-成功: { "uid": 100000 }
-冲突: 409 { "message":"用户名已被占用" }
-```
-> uid 分配：保留区间 `0-99999` 为程序内置账户，真实用户从 `100000` 起递增。
-
-#### `POST /api/auth/login`
-```json
-请求: { "username":"alice", "password":"secret123" }
-成功: { "uid": 100000, "sessionToken":"<jwt-like>" }
-失败: 401 { "message":"用户名或密码错误" }
+{
+    "type": "error",
+    "code": "MODEL_NOT_CONFIGURED",
+    "message": "大模型尚未配置",
+    "timestamp": 1700000000000
+}
 ```
 
-#### `GET /api/profile`
-返回当前账户配置档案（Token 以掩码返回，无需查看密码）。
+当前主要错误码：
+
+| 错误码 | 说明 |
+| --- | --- |
+| `INVALID_MESSAGE` | 文本和图片均为空 |
+| `MODEL_NOT_CONFIGURED` | 当前账户没有完整的模型服务配置 |
+| `MODEL_IMAGE_TOO_LARGE` | 图片无法通过服务端尺寸或解码检查 |
+| `PROCESS_ERROR` | 未预期的处理错误 |
+
+### 桌面端桥接消息
+
+这些消息由桌面端在已认证连接中使用：
+
+| 类型 | 方向 | 作用 |
+| --- | --- | --- |
+| `register_tools` | 客户端 → 服务端 | 注册桌面端托管工具 |
+| `tool_result` | 客户端 → 服务端 | 回传工具执行结果 |
+| `register_skills` | 客户端 → 服务端 | 注册技能说明 |
+| `register_persona` | 客户端 → 服务端 | 注册用户自定义人格 |
+| `kb_response` | 客户端 → 服务端 | 回传私人知识库检索结果 |
+
+服务端可能向客户端发送工具调用或知识库请求，客户端应按 `requestId` 回传对应结果。具体工具字段由注册内容决定。
+
+## REST 接口
+
+### `GET /health`
+
+无需账户认证。
+
 ```json
-// 头: X-Builtin-Token 或 Authorization: Bearer <token>
-{ "uid":0, "username":"__builtin__", "model":"qwen-turbo", "api_endpoint":"https://open.bigmodel.cn/api/paas/v4/", "token_masked":"sk-****abcd", "hasToken": true }
-未认证: 401 { "message":"未认证" }
+{
+    "status": "ok",
+    "message": "虚拟桌宠服务运行正常",
+    "version": "0.7.2",
+    "uptime": 123
+}
 ```
 
-#### `PUT /api/profile`
-更新配置档案。模型/端点始终可改；Token 仅在新值非空时替换（留空不修改）。
+### `GET /config`
+
+无需账户认证。
+
 ```json
-// 头同上
-请求: { "model":"GLM-4.7-Flash", "api_endpoint":"https://...", "token":"sk-new..." }
-成功: { "uid":0, "username":"__builtin__", "model":"GLM-4.7-Flash", "api_endpoint":"https://...", "token_masked":"sk-****wxyz", "hasToken": true }
+{
+    "default_action": "idle",
+    "max_message_length": 200,
+    "supports_tts": false,
+    "mode": "fallback",
+    "version": "0.7.2"
+}
 ```
 
----
+### `POST /api/auth/register`
 
-### 需签名的接口（Token 管理，legacy）
+用于独立部署服务注册账户：
 
-> 以下为旧接口，仅向后兼容，前端设置界面已不再使用。需客户端 ed25519 签名头：
-> `X-Client-Id`、`X-Client-Timestamp`、`X-Client-Nonce`、`X-Client-Signature`。
-> 后端 `requestSigner.js` 用公钥做 ed25519 校验 + 时间戳/nonce 防重放。
-
-#### `POST /api-client/register`
-注册客户端身份，绑定 `userid`。
 ```json
-请求: { "userid": 1, "clientId": "<uuid>", "publicKey": "<PEM>" }
-成功: { "registered": true }
-冲突: 409 { "message":"客户端已绑定其他身份" }
+{
+    "username": "alice",
+    "password": "请使用足够强的密码"
+}
 ```
 
-#### `GET /api-token/status?userid=1`
+成功返回：
+
 ```json
-{ "configured": true, "model":"GLM-4.7-Flash", "api_endpoint":"https://open.bigmodel.cn/api/paas/v4/" }
+{
+    "uid": 100000
+}
 ```
 
-#### `POST /api-token`
-设置 Token / 查看密码 / 模型 / 端点（端点缺省用 `MODEL_API_ENDPOINT`）。
+程序保留 UID 为 `0-99999`，独立部署注册账户从 `100000` 起分配。不要在示例或日志中使用真实密码。
+
+### `POST /api/auth/login`
+
+请求：
+
 ```json
-请求: { "userid":1, "token":"sk-...", "viewPassword":"1234", "model":"GLM-4.7-Flash", "apiEndpoint":"https://..." }
-成功: { "message":"API令牌设置成功" }
+{
+    "username": "alice",
+    "password": "你的密码"
+}
 ```
 
-#### `POST /api-token/model`
-```json
-请求: { "userid":1, "model":"GLM-4.7-Flash" }
-成功: { "model":"GLM-4.7-Flash" }
+成功返回 `uid` 和会话令牌。之后访问账户接口时使用：
+
+```text
+Authorization: Bearer <session-token>
 ```
 
-#### `POST /api-token/endpoint`
+### `GET /api/auth/me`
+
+使用 Bearer 会话令牌，返回当前登录账户信息。
+
+### `GET /api/profile`
+
+使用以下任一种凭证：
+
+- `X-Builtin-Token: <builtin-token>`
+- `Authorization: Bearer <session-token>`
+
+返回当前账户的模型配置档案。密钥只返回掩码和是否已配置状态，不返回完整密钥。
+
+### `PUT /api/profile`
+
+请求示例：
+
 ```json
-请求: { "userid":1, "apiEndpoint":"https://open.bigmodel.cn/api/paas/v4/" }
-成功: { "api_endpoint":"https://open.bigmodel.cn/api/paas/v4/" }
+{
+    "model": "模型名称",
+    "api_endpoint": "https://example.com/v1",
+    "token": "新的模型服务密钥"
+}
 ```
 
-#### `POST /api-token/verify`
-用查看密码校验并取回 Token。
-```json
-请求: { "userid":1, "viewPassword":"1234" }
-成功: { "valid": true, "token":"sk-..." }
-失败: 403 { "valid": false, "message":"查看密码错误" }
+模型名和地址可更新；`token` 为空时保留原值。提交真实密钥时请使用 HTTPS，并避免写入日志。
+
+## legacy 接口
+
+以下接口只为旧客户端兼容保留：
+
+- `POST /api-client/register`
+- `GET /api-token/status`
+- `POST /api-token`
+- `POST /api-token/model`
+- `POST /api-token/endpoint`
+- `POST /api-token/verify`
+
+这些接口需要客户端 ed25519 签名头：
+
+```text
+X-Client-Id
+X-Client-Timestamp
+X-Client-Nonce
+X-Client-Signature
 ```
 
----
+新客户端和新功能应使用 `/api/auth/*`、`/api/auth/me` 与 `/api/profile`，不要继续扩展 legacy 接口。
 
-## 🔒 安全与限制
+## 最小联调
 
-1. **API Token 与模型配置**
-   - Token / 模型名 / 端点由前端"设置"页提交并加密存入 SQLite。
-   - 未配置端点时使用 `.env` 的 `MODEL_API_ENDPOINT`（内置默认 ChatAnywhere `api.chatanywhere.tech`；本地 `.env` 可覆盖为智谱 `open.bigmodel.cn` 等）。
-   - 读取档案时 Token 以掩码（`sk-****abcd`）返回，**不再需要"查看密码"**。改动 Token 只需填入新值直接替换。
+启动服务后，先确认：
 
-2. **账户鉴权**
-   - 本地部署：内置账户（uid=0）+ 共享 `X-Builtin-Token`，仅在客户端与服务端同在本地时使用。
-   - 服务端部署：用户名/密码登录换取 HMAC 会话令牌（`SESSION_SECRET` 签名，7 天有效），请求带 `Authorization: Bearer`。
-   - 旧的 ed25519 客户端签名仅保留给 legacy `/api-token/*` 接口。
-
-3. **uid 规则**
-   - `0-99999` 为程序保留账户（本地内置账户 = 0）。
-   - 独立部署服务端注册的真实用户从 `100000` 起。
-
-4. **待实现**
-   - 速率限制（按 `uid` / `session_id`）
-   - `content` 长度硬性限制（当前 `/config` 声明 200，但 WS 未强制）
-   - 更细粒度错误码
-
----
-
-## 🧪 测试方法
-
-### WebSocket
 ```bash
-wscat -c ws://localhost:9089/ws
-{"type":"user_message","session_id":"test","userid":1,"content":"你好"}
+curl http://127.0.0.1:9089/health
+curl http://127.0.0.1:9089/config
 ```
 
-### REST
+然后使用带令牌的 WebSocket 客户端连接：
+
 ```bash
-curl http://localhost:9089/health
-curl http://localhost:9089/config
+wscat -c "ws://127.0.0.1:9089/ws?token=<session-or-builtin-token>"
 ```
 
----
+连接成功后发送 JSON 消息。端口不是 `9089` 时，以服务启动日志显示的端口替换示例值。
 
-## 🚀 未来扩展
+## 安全边界
 
-1. **OneBot / QQ 适配器**：把 QQ 消息桥接进 `/ws` 的消息处理逻辑（当前最大缺口）。
-2. 多 `userid` 映射（多 QQ 号 / 群）→ `session_id`。
-3. CQ 码（表情/图片/@）编解码。
-4. 新增 WS 消息类型：`system_event` / `memory_update` / `tool_result`。
-5. 新增 REST：`POST /tools/weather`、`POST /memory/save`、`GET /memory/load`。
-
----
-
-## ✅ 总结
-
-当前已实现：WebSocket 主通道、REST 健康检查与配置、大模型回复（主）+ 预设兜底（次）、SQLite 持久化、API Token 签名体系。
-最关键的待办是 **OneBot / QQ 适配器**，使桌宠能从纯本地客户端演进为可接入 QQ 的机器人。
+- `.env`、模型密钥、内置令牌、会话密钥、生产数据库和用户数据不得提交到仓库。
+- 独立部署建议使用 HTTPS/WSS、反向代理和访问控制，不要直接把管理接口暴露到公网。
+- 不要把 `X-Builtin-Token` 用作公网服务的长期认证方案。
+- 第三方模型、天气、搜索和知识源服务有各自的费用、速率和使用限制。
