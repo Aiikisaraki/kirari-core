@@ -87,24 +87,49 @@ SQLite 数据目录可通过运行环境调整；打包模式通常由桌面端�
 
 ## 连接方式
 
-### 桌面端本地模式
+### 机器人接入（推荐）
 
-> 桌面版（kirari-desktop）自带大脑，不再拉起本服务。本仓库只在你主动部署它时才需要。
+这是服务器版的主入口。任何能发 HTTP 请求的机器人框架都能调用，**不需要适配本项目协议**：
 
-### 独立部署
+```bash
+curl -X POST http://127.0.0.1:9089/v1/chat \
+  -H "Authorization: Bearer $BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"platform":"onebot","chatType":"group","groupId":"87654321","userId":"10001","content":"今天天气怎么样"}'
+```
 
-独立运行本服务后，在桌面端设置中填写后端地址。服务默认开放 HTTP 和 WebSocket：
+会话由服务端按「群号 / QQ 号」映射成稳定 ID（`bot:onebot:group:87654321`），
+同一个群**进程重启后仍接着上次聊**。完整字段、会话规则与鉴权说明见
+[`deploy/README.md`](./deploy/README.md)。
+
+### WebSocket 对话通道
+
+服务默认开放 HTTP 与 WebSocket：
 
 - HTTP：`http://<服务器地址>:<端口>`
 - WebSocket：`ws://<服务器地址>:<端口>/ws`
 
 生产环境应通过反向代理配置 HTTPS/WSS，并限制管理接口访问范围。
 
+## 部署
+
+```bash
+# Linux（systemd，崩溃自动重启 + 开机自启）
+sudo ./deploy/install-service.sh
+
+# Docker（数据卷持久化）
+cp .env.example .env      # 改 BIND_ADDR / PORT / BOT_TOKEN / SESSION_SECRET
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+Windows / NAS 的 nssm、PM2 方式，以及常见问题排查，见 [`deploy/README.md`](./deploy/README.md)。
+
 ## 认证与接口
 
 推荐接口：
 
 - `GET /health`：健康检查。
+- `POST /v1/chat`：**机器人接入主入口**，群号 / QQ 号自动映射会话。
 - `GET /config`：客户端能力和默认配置。
 - `POST /api/auth/register`：注册独立部署账户。
 - `POST /api/auth/login`：登录并获取会话凭证。
@@ -125,11 +150,11 @@ ws://127.0.0.1:9089/ws?token=<session-or-builtin-token>
 
 ## 与桌面端的关系
 
-- [`kirari-desktop`](https://github.com/Aiikisaraki/kirari-desktop)：Electron + Vue 3 桌面客户端。
-- 本服务：对话、记忆、知识库、账户和工具能力。
-- OneBot / QQ：由桌面端适配器负责接入，再通过已认证连接转发到本服务。
+- [`kirari-desktop`](https://github.com/Aiikisaraki/kirari-desktop)：Electron + Vue 3 桌宠，**自带大脑，不依赖本服务**。
+- 本服务：服务器上的机器人核心运行时，对话、记忆、知识库、账户与工具能力。
+- 机器人接入：优先用 `POST /v1/chat`，自行在机器人侧对接 OneBot / 其他平台即可。
 
-桌面端还可以托管外部工具、技能和私人知识库检索，并通过 WebSocket 桥接给本服务使用。
+桌宠端还能托管外部工具（MCP）与技能；本服务侧目前不依赖这些能力，机器人场景够用。
 
 ## 当前边界
 

@@ -21,6 +21,7 @@ const { findAvailablePort } = require("./utils/portHelper");
 const corsMiddleware = require("./middleware/cors");
 const dbStorage = require("./db/dbStorage");
 const { createConnectionAiContext, cleanupConnectionAiContext } = require("./ai/connectionAiContext");
+const contextPool = require("./ai/contextPool");
 const dailyBriefing = require("./services/dailyBriefingService");
 
 // 每天 08:00 / 16:00 / 22:00 各主动刷新一次当日简报（"每日记忆"）。
@@ -112,6 +113,17 @@ function createServer() {
 
     startServer();
     scheduleDailyBriefing();
+    // 回收闲置的 AI 上下文（HTTP 接入没有连接概念，靠空闲超时释放）。
+    // 定时器已 unref，不会阻止进程退出。
+    contextPool.startIdleSweeper();
+
+    // 退出时释放所有上下文，避免 OpenAI 客户端的连接池悬挂。
+    const shutdown = () => {
+        console.log("[exit] 正在释放资源…");
+        contextPool.invalidateAll();
+    };
+    process.on("SIGINT", () => { shutdown(); process.exit(0); });
+    process.on("SIGTERM", () => { shutdown(); process.exit(0); });
 }
 
 module.exports = { createServer };

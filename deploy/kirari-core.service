@@ -1,0 +1,52 @@
+[Unit]
+Description=Kirari Core · 绮莉机器人核心运行时
+Documentation=https://github.com/Aiikisaraki/kirari-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 用独立用户运行，不要 root：机器人被外部输入触发，越权风险越低。
+# 安装脚本会创建这个用户。
+User=kirari
+Group=kirari
+WorkingDirectory=/opt/kirari-core
+
+# 配置由 systemd 注入（优先于代码里的 dotenv）。
+# 注意：NODE_ENV=production 会让 dotenv 不再覆盖已存在的环境变量。
+EnvironmentFile=/opt/kirari-core/.env
+Environment=NODE_ENV=production
+
+ExecStart=/usr/bin/node server.js
+
+# 崩溃自动重启：7×24 在线的关键。
+# 5 秒起步，避免配置错误时疯狂重启刷满日志（systemd 本身也有频率限制，
+# 但提前退避能更快暴露出「起不来」这个问题）。
+Restart=always
+RestartSec=5
+# 正常退出（SIGTERM）不重启 —— 运维主动 stop 时应当安静退出。
+SuccessExitStatus=143
+
+# 日志进 journald：journalctl -u kirari-core -f 实时看。
+# 需要落盘文件日志时给 ExecStart 追加 >> /var/log/kirari-core.log 2>&1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kirari-core
+
+# ── 安全加固（可选但推荐）────────────────────────────────
+# 机器人对外暴露 HTTP 接口，下列限制能显著缩小被攻击面。
+NoNewPrivileges=true
+PrivateTmp=true
+# 只读系统目录：服务自身不需要写 /usr /etc
+ProtectSystem=full
+ProtectHome=true
+# 不给 sudo / su
+RestrictSUIDSGID=true
+
+# ── 资源限制（按机器调整）───────────────────────────────
+# Node 单进程默认堆上限已够用；这里限制的是「万一失控」的兜底。
+# MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

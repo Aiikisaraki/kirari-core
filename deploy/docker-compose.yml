@@ -1,0 +1,53 @@
+# Kirari Core · Docker Compose
+#
+# 用法：
+#   cp .env.example .env      # 改端口与 BOT_TOKEN
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# 注意：.env 里除了 docker compose 自己用的变量，还被容器内的服务读取
+# （docker-compose.yml 里已把关键项透传进容器）。
+
+services:
+  kirari-core:
+    build:
+      # Dockerfile 放在 deploy/ 下，构建上下文要指到仓库根
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: kirari-core:0.8.0
+    container_name: kirari-core
+    restart: unless-stopped # 崩溃自动重启，等价于 systemd 的 Restart=always
+
+    ports:
+      # 只在需要从宿主机/局域网访问时映射；仅本机调用可整段删掉。
+      # 服务器上建议改成 127.0.0.1:${PORT:-9089}:9089，只允许本机访问，
+      # 由反向代理对外，这样容器不直接暴露到公网。
+      - "${BIND_ADDR:-0.0.0.0}:${PORT:-9089}:9089"
+
+    environment:
+      NODE_ENV: production
+      PORT: "9089"
+      HOST: "0.0.0.0" # 容器内必须听 0.0.0.0，否则映射进来的端口连不上
+      STORAGE_TYPE: db
+      # 模型服务地址：可用外部真实地址，也可用同一 compose 里的本机反代
+      MODEL_API_ENDPOINT: "${MODEL_API_ENDPOINT:-https://api.chatanywhere.tech/v1}"
+      # 机器人接入口令
+      BOT_TOKEN: "${BOT_TOKEN:?请在 .env 里设置 BOT_TOKEN}"
+      BOT_MODEL_UID: "${BOT_MODEL_UID:-1}"
+      BOT_GROUP_ISOLATE_PER_USER: "${BOT_GROUP_ISOLATE_PER_USER:-false}"
+      # 会话密钥
+      SESSION_SECRET: "${SESSION_SECRET:?请在 .env 里设置 SESSION_SECRET}"
+      BUILTIN_ACCOUNT_TOKEN: "${BUILTIN_ACCOUNT_TOKEN:-kirari-local-builtin}"
+
+    volumes:
+      # SQLite 数据（会话记忆、位置、每日简报）—— 一定要持久化，
+      # 容器删了记忆没了是机器人「失忆」的主因。
+      - kirari-data:/app/data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  kirari-data:

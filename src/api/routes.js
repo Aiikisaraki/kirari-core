@@ -294,6 +294,142 @@ function setupHttpRoutes(app) {
     );
     return res.json(profile);
   });
+
+  setupBotChatRoute(app);
+}
+
+/**
+ * 机器人接入接口：POST /v1/chat
+ *
+ * 这是「服务器版机器人」的主入口。任何能发 HTTP 请求的机器人框架
+ * （OneBot 侧脚本、NoneBot、LangChain、自建 webhook…）都能调用它，
+ * 不需要额外适配本项目的协议。
+ *
+ * 鉴权：Bearer <BOT_TOKEN>。BOT_TOKEN 在 .env 里配置（见 .env.example）。
+ *   没配置时本接口直接拒绝并说明原因，不做「默认放行」这种危险兜底。
+ *
+ * 请求体：
+ *   {
+ *     "platform": "onebot",          // 可选，平台标识，用于隔离不同平台的同号
+ *     "chatType": "group" | "private",
+ *     "groupId": "123456",           // 群聊必填
+ *     "userId": "789",               // 私聊必填；群聊填了可标识发言人
+ *     "nickname": "小明",             // 可选，仅日志用
+ *     "content": "今天天气怎么样",     // 必填（或给 images）
+ *     "images": ["https://..."],      // 可选
+ *     "persona": "自定义人格"          // 可选，不传则用预设
+ *   }
+ *
+ * 响应体：
+ *   { "sessionId", "speech", "emotion", "images", "model" }
+ */
+function setupBotChatRoute(app) {
+  const { resolveIdentity } = require("../session/sessionMapping");
+  const contextPool = require("../ai/contextPool");
+  const aiReplyService = require("../services/aiReplyService");
+  const fallbackService = require("../services/fallbackService");
+  const sessionManager = require("../session/sessionManager");
+
+  app.post("/v1/chat", async (req, res) => {
+    const botToken = String(process.env.BOT_TOKEN || "").trim();
+    if (!botToken) {
+      return res.status(503).json({
+        error: "BOT_TOKEN_NOT_CONFIGURED",
+        message: "机器人接入未启用：请在 .env 里设置 BOT_TOKEN（随便一串够长的随机字符），然后重启服务。",
+      });
+    }
+    const auth = req.get("authorization") || "";
+    const match = /^Bearer\s+(.+)$/i.exec(auth);
+    if (!match || match[1].trim() !== botToken) {
+      return res.status(401).json({
+        error: "UNAUTHORIZED",
+        message: "接入口令不对。检查请求头 Authorization: Bearer <BOT_TOKEN> 是否与服务端 .env 里一致。",
+      });
+    }
+
+    const body = req.body || {};
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    const images = Array.isArray(body.images)
+      ? body.images.filter((x) => typeof x === "string" && x.trim()).slice(0, 9)
+      : [];
+    if (!content && images.length === 0) {
+      return res.status(400).json({
+        error: "EMPTY_MESSAGE",
+        message: "消息是空的。至少要传 content 或 images 其中之一。",
+      });
+    }
+
+    // 会话映射：群号 / QQ 号 → 稳定会话 ID。进程重启后同一个群仍然命中同一份上下文。
+    let identity;
+    try {
+      identity = resolveIdentity({
+        platform: body.platform,
+        chatType: body.chatType,
+        groupId: body.groupId,
+        userId: body.userId,
+        sessionId: body.sessionId,
+      });
+    } catch (e) {
+      return res.status(400).json({
+        error: "BAD_CHAT_TARGET",
+        message: `${e.message}。群聊请传 groupId，私聊请传 userId。`,
+      });
+    }
+
+    const who = identity.chatType === "group"
+      ? `群 ${identity.groupId}${body.nickname ? `（${String(body.nickname).slice(0, 20)}）` : ""}`
+      : `用户 ${identity.userId}${body.nickname ? `（${String(body.nickname).slice(0, 20)}）` : ""}`;
+
+    // 模型配置取自哪个账号：默认用内置账号，运维可在 .env 里改。
+    const modelUid = Number(process.env.BOT_MODEL_UID || BUILTIN_UID);
+
+    let reply;
+    try {
+      const aiContext = await contextPool.getContext(modelUid);
+      await sessionManager.initSession(identity.sessionId);
+      // 多模态：带图时 content 存为数组，模型才能看到图
+      const storedContent = images.length
+        ? [
+            ...(content ? [{ type: "text", text: content }] : []),
+            ...images.map((img) => ({ type: "image_url", image_url: { url: img } })),
+          ]
+        : content;
+      await sessionManager.saveMessage(identity.sessionId, "user", storedContent);
+
+      console.log(`[bot] ${who}: "${content.slice(0, 40)}"（图片 ${images.length} 张）`);
+      reply = await aiReplyService.getReply({
+        aiContext,
+        content,
+        images,
+        sessionId: identity.sessionId,
+        // 位置记忆按 scope 隔离：同一群共享一份位置
+        locationScope: identity.scope,
+        persona: typeof body.persona === "string" ? body.persona : null,
+        skillPrompts: [],
+        kbContext: null,
+        ws: null,
+      });
+      await sessionManager.saveMessage(identity.sessionId, "assistant", reply.speech);
+    } catch (error) {
+      const reason = error?.message || String(error);
+      console.error(`[bot] ${who} 处理失败:`, reason);
+      // 配置类错误直接告诉运维怎么改；其余错误让机器人也能有个兜底回复，不至于在群里装死。
+      const isConfigError = /未配置|尚未配置|还没连接|还没填写|还没选择/.test(reason);
+      if (isConfigError) {
+        return res.status(503).json({ error: "MODEL_NOT_CONFIGURED", message: reason });
+      }
+      reply = fallbackService.getReply({ content, persona: null });
+      reply = { ...reply, images: [] };
+    }
+
+    return res.json({
+      sessionId: identity.sessionId,
+      speech: reply.speech,
+      emotion: reply.emotion ?? null,
+      images: Array.isArray(reply.images) ? reply.images : [],
+      model: reply.model || "",
+    });
+  });
 }
 
 module.exports = { setupHttpRoutes };
