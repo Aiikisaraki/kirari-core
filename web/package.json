@@ -1,0 +1,18 @@
+{
+  "name": "kirari-console",
+  "private": true,
+  "version": "0.8.0",
+  "type": "module",
+  "description": "kirari-core 的网页控制台：聊天页 + 设置页。构建产物由服务端 express.static 托管。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "vue": "^3.5.35"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "vite": "^8.0.16"
+  }
+}

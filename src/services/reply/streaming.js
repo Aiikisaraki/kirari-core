@@ -9,7 +9,10 @@ const { buildBasePrompt } = require('./promptBuilder');
 // reasoning_content（思考过程）与 content（最终答案）。这里统一走 stream:true 拉 chunks，
 // 累积成与 ChatCompletion 同形的对象返回，下游（completion.choices[0].message / usage / model）
 // 无需改动。对非流式供应商同样兼容：拿到流后累积等价于一次完整响应。
-async function streamChatCompletion(openai, params, { signal } = {}) {
+//
+// onDelta：正文（content）每到一个增量就回调一次，给上层做逐字展示用。
+//   回调抛异常会被吞掉（流式展示是锦上添花，绝不能因为它打断生成）。
+async function streamChatCompletion(openai, params, { signal, onDelta } = {}) {
   const stream = await openai.chat.completions.create(
     { ...params, stream: true, stream_options: { include_usage: true } },
     { signal },
@@ -32,7 +35,12 @@ async function streamChatCompletion(openai, params, { signal } = {}) {
       const d = choice.delta;
       if (d) {
         if (d.role) role = d.role;
-        if (typeof d.content === 'string' && d.content.length) content += d.content;
+        if (typeof d.content === 'string' && d.content.length) {
+          content += d.content;
+          if (onDelta) {
+            try { onDelta(d.content); } catch {}
+          }
+        }
         if (typeof d.reasoning_content === 'string' && d.reasoning_content.length) reasoningContent += d.reasoning_content;
         if (Array.isArray(d.tool_calls)) {
           for (const tc of d.tool_calls) {
@@ -72,7 +80,8 @@ async function streamChatCompletion(openai, params, { signal } = {}) {
 // 把工具的原始数据交给 LLM 润色成符合人设的口语回复。
 // 成功返回模型解析结果；失败（异常 / 模型空回复 / 解析不出 speech）则抛出，由调用方回退到工具原始结果。
 // systemPromptOverride 可选：传入自定义 system 提示（如位置设置确认），此时仍用 {{TOOL_RESULTS}} 占位符注入事实。
-async function polishToolResult(rawToolText, aiContext, sessionId, userText, controller, systemPromptOverride) {
+// onDelta：润色正文逐字回调（同 streamChatCompletion 约定，null 表示作废重流——润色不会中途作废，仅透传）。
+async function polishToolResult(rawToolText, aiContext, sessionId, userText, controller, systemPromptOverride, onDelta = null) {
   // 润色任务只聚焦「当前用户问题 + 工具数据」，不引入完整对话历史。
   // 完整历史容易让模型把上一轮的反问/确认当成当前任务，导致"请稍等我获取"、"天气还是时间"等幻觉。
   const systemPrompt = (systemPromptOverride || buildBasePrompt())
@@ -88,7 +97,7 @@ async function polishToolResult(rawToolText, aiContext, sessionId, userText, con
   const completion = await streamChatCompletion(
     aiContext.openai,
     { model: aiContext.model, messages, max_tokens: 800 },
-    { signal: controller.signal },
+    { signal: controller.signal, onDelta },
   );
   console.log(`[polish] LLM 润色返回 @${Date.now()}`);
 

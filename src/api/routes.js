@@ -4,7 +4,13 @@ const { version: APP_VERSION } = require("../../package.json");
 const apiTokenManager = require("../token/apiTokenManager");
 const dbStorage = require("../db/dbStorage");
 const { verifySignedRequest } = require("./requestSigner");
-const { signSession, verifySession } = require("../auth/sessionAuth");
+// 组网：本机作为叶子时要改走上行（不在这里 require 组网实现本身，只借它的判定与上行）
+const netBootstrap = require("../net/bootstrap");
+// 私人知识库片段净化（/v1/chat 的 body.kbContext）
+const { sanitizeKbContext } = require("../knowledge/kbContext");
+// Web 控制台（单一管理口令鉴权，注册登录已下线）
+const { setupConsoleRoutes } = require("./consoleRoutes");
+const consoleSite = require("../web/consoleSite");
 const { invalidateUserContexts } = require("../websocket/socketServer");
 
 // 保留内置账户：uid 0-99999 为程序内置（本地部署内置账户 uid=0）。
@@ -12,16 +18,12 @@ const { invalidateUserContexts } = require("../websocket/socketServer");
 const BUILTIN_UID = 1;
 const BUILTIN_TOKEN = process.env.BUILTIN_ACCOUNT_TOKEN || "kirari-local-builtin";
 
-// 解析请求身份：本地部署内置账户（X-Builtin-Token）或远程会话令牌（Bearer）。
+// 解析请求身份：本地部署内置账户（X-Builtin-Token）。
+// ⚠️ 注册登录整套已下线（用户拍板）：Bearer 会话令牌不再被接受。
+// 远端桌宠的 WebSocket 鉴权走 socketServer 自己的 verifySession，与这里无关。
 function resolveAuthUid(req) {
     const builtin = req.get("x-builtin-token");
     if (builtin && builtin === BUILTIN_TOKEN) return { uid: BUILTIN_UID, kind: "builtin" };
-    const auth = req.get("authorization") || "";
-    const match = /^Bearer\s+(.+)$/i.exec(auth);
-    if (match) {
-        const uid = verifySession(match[1]);
-        if (uid != null) return { uid, kind: "session" };
-    }
     return null;
 }
 
@@ -125,11 +127,8 @@ function setupHttpRoutes(app) {
             model = "gpt-5.4-mini",
             apiEndpoint,
         } = req.body;
-        const normalizedEndpoint = parseApiEndpoint(
-            apiEndpoint ||
-                process.env.MODEL_API_ENDPOINT ||
-                "https://api.chatanywhere.tech/v1",
-        );
+        // 模型地址必须由调用方提供 —— .env 不再提供任何模型配置（模型只走控制台多模型）
+        const normalizedEndpoint = parseApiEndpoint(apiEndpoint || "");
         if (
             !userid ||
             typeof token !== "string" ||
@@ -197,38 +196,15 @@ function setupHttpRoutes(app) {
             : res.status(404).json({ valid: false, message: "未找到API令牌" });
     });
 
-    app.get("/", (_req, res) => res.send("Virtual Pet API is running!"));
+    // 首页 = 网页控制台（用户拍板：不想记 /console 这段路径）。
+    // 控制台没构建过（纯 API 部署）才回落到原来那行服务状态。
+    app.get("/", (_req, res) =>
+        consoleSite.available() ? consoleSite.sendIndex(res) : res.send("Virtual Pet API is running!"),
+    );
 
-    // ---- 账号体系（独立部署服务端时使用）----
-    app.post("/api/auth/register", async (req, res) => {
-        const { username, password } = req.body || {};
-        if (typeof username !== "string" || username.length < 3 || username.length > 32)
-            return res.status(400).json({ message: "用户名需 3-32 个字符" });
-        if (typeof password !== "string" || password.length < 6)
-            return res.status(400).json({ message: "密码至少 6 位" });
-        const uid = await dbStorage.registerUser(username, password);
-        if (!uid) return res.status(409).json({ message: "用户名已被占用" });
-        return res.json({ uid });
-    });
-
-    app.post("/api/auth/login", async (req, res) => {
-        const { username, password } = req.body || {};
-        if (typeof username !== "string" || typeof password !== "string")
-            return res.status(400).json({ message: "参数无效" });
-        const uid = await dbStorage.verifyUser(username, password);
-        if (uid == null) return res.status(401).json({ message: "用户名或密码错误" });
-        return res.json({ uid, sessionToken: signSession(uid) });
-    });
-
-    // 当前登录用户态：供桌宠在分离（远端）模式下登录后拉取自身信息（如用户名）。
-    // 鉴权方式与 /api/profile 一致（内置账户 X-Builtin-Token 或 Bearer 会话令牌）。
-    app.get("/api/auth/me", async (req, res) => {
-        const auth = resolveAuthUid(req);
-        if (!auth) return res.status(401).json({ message: "未认证" });
-        const profile = await dbStorage.getProfile(auth.uid);
-        if (!profile) return res.status(404).json({ message: "账户不存在" });
-        return res.json(profile);
-    });
+    // ---- 账号体系：已整体下线 ----
+    // 注册 / 登录 / 会话令牌全部移除（用户拍板「现在没有用户登录注册的概念了」）。
+    // 管理面收敛为单一管理口令（见 consoleRoutes.js），机器人接入仍走 BOT_TOKEN。
 
     // ---- 配置档案（替代旧的 /api-token/*，认证后无感读写）----
     app.get("/api/profile", async (req, res) => {
@@ -242,39 +218,40 @@ function setupHttpRoutes(app) {
   app.put("/api/profile", async (req, res) => {
     const auth = resolveAuthUid(req);
     if (!auth) return res.status(401).json({ message: "未认证" });
-    const { model, api_endpoint, token, search_key, search_endpoint, search_provider } = req.body || {};
+    // 字段约定与桌面端 config.json 一致（endpoint / key / searchKey ...，camelCase）
+    const { model, endpoint, key, searchKey, searchEndpoint, searchProvider } = req.body || {};
     const patch = {};
     if (model !== undefined) {
       if (typeof model !== "string" || !model.trim() || model.length > 120)
         return res.status(400).json({ message: "模型名称无效" });
       patch.model = model.trim();
     }
-    if (api_endpoint !== undefined) {
-      const normalized = parseApiEndpoint(api_endpoint);
+    if (endpoint !== undefined) {
+      const normalized = parseApiEndpoint(endpoint);
       if (!normalized) return res.status(400).json({ message: "模型 API 端点无效" });
-      patch.api_endpoint = normalized;
+      patch.endpoint = normalized;
     }
-    if (token !== undefined) {
-      if (typeof token !== "string" || !token.trim())
+    if (key !== undefined) {
+      if (typeof key !== "string" || !key.trim())
         return res.status(400).json({ message: "Token 不能为空" });
-      patch.token = token.trim();
+      patch.key = key.trim();
     }
-    if (search_key !== undefined) {
-      if (typeof search_key !== "string" || !search_key.trim())
+    if (searchKey !== undefined) {
+      if (typeof searchKey !== "string" || !searchKey.trim())
         return res.status(400).json({ message: "搜索 API Key 不能为空" });
-      patch.search_key = search_key.trim();
+      patch.searchKey = searchKey.trim();
     }
-    if (search_endpoint !== undefined) {
-      if (typeof search_endpoint !== "string" || !search_endpoint.trim())
+    if (searchEndpoint !== undefined) {
+      if (typeof searchEndpoint !== "string" || !searchEndpoint.trim())
         return res.status(400).json({ message: "搜索服务地址不能为空" });
       // 归一化为不含末尾斜杠的 base URL
-      patch.search_endpoint = search_endpoint.trim().replace(/\/+$/, '');
+      patch.searchEndpoint = searchEndpoint.trim().replace(/\/+$/, '');
     }
-    if (search_provider !== undefined) {
+    if (searchProvider !== undefined) {
       const allowed = ['uapis', 'tavily', 'searxng'];
-      if (typeof search_provider !== 'string' || !allowed.includes(search_provider))
+      if (typeof searchProvider !== 'string' || !allowed.includes(searchProvider))
         return res.status(400).json({ message: "搜索提供商无效" });
-      patch.search_provider = search_provider;
+      patch.searchProvider = searchProvider;
     }
     await dbStorage.setProfile(auth.uid, patch);
     // 配置已写入 DB，但用户可能正持有一条 WS 连接，其 aiContext 在首条消息时已用旧配置建好并缓存复用。
@@ -285,15 +262,17 @@ function setupHttpRoutes(app) {
       console.warn('[profile] 失效 WS 上下文失败（可忽略，下次重连自动生效）:', invErr?.message || invErr);
     }
     const profile = await dbStorage.getProfile(auth.uid);
-    // 模型信息设置成功日志：输出用户与模型信息（token 仅打印掩码，避免泄露明文）。
-    const tokenMask = profile?.token ? `${profile.token.slice(0, 4)}***${profile.token.slice(-4)}` : '(空)';
+    // 模型信息设置成功日志：getProfile 只回掩码，直接用它（不泄明文；原来读 profile?.token 恒为 undefined）
     console.log(
       `[profile] 模型信息设置成功 userid=${auth.uid} ` +
-      `model=${profile?.model || '(空)'} api_endpoint=${profile?.api_endpoint || '(空)'} ` +
-      `search_provider=${profile?.search_provider || '(默认)'} token=${tokenMask}`,
+      `model=${profile?.model || '(空)'} endpoint=${profile?.endpoint || '(空)'} ` +
+      `searchProvider=${profile?.searchProvider || '(默认)'} key=${profile?.keyMasked || '(空)'}`,
     );
     return res.json(profile);
   });
+
+  // Web 控制台：状态 / 设置 / 聊天（SSE），单一管理口令鉴权
+  setupConsoleRoutes(app);
 
   setupBotChatRoute(app);
 }
@@ -383,6 +362,38 @@ function setupBotChatRoute(app) {
     // 模型配置取自哪个账号：默认用内置账号，运维可在 .env 里改。
     const modelUid = Number(process.env.BOT_MODEL_UID || BUILTIN_UID);
 
+    // 私人知识库随请求携带（客户端本地检索好附上来，后端零存储）。
+    // 不带就是 null，公用知识源照常在服务端检索 —— 两条路互不影响。
+    const kbContext = sanitizeKbContext(body.kbContext);
+
+    // ── 组网叶子：本机不再调模型，把消息上行给主机 ──
+    // 这是活锁模型的核心（ARCHITECTURE-PLAN 3.1「全网只有主机一个出口」），
+    // 也是「叶子端不需要配置 Key」的原因：花钱的是主机。
+    //
+    // ⚠️ 上行成功时**不再本地存一份**：主机那边按 net:<本机设备号>:<sessionId>
+    //    记录了这次对话，本地再存一遍只会产生两套会分叉的历史。
+    //    上行失败则回退到本机独立处理（组网断掉不该让机器人变砖）。
+    if (netBootstrap.shouldUplink()) {
+      const up = await netBootstrap.uplinkChat({
+        sessionId: identity.sessionId,
+        content,
+        images,
+        kbContext,
+      });
+      if (up.ok) {
+        console.log(`[bot] ${who}: "${content.slice(0, 40)}"（图片 ${images.length} 张）→ 已由组网主机回复`);
+        return res.json({
+          sessionId: identity.sessionId,
+          speech: up.frame.speech,
+          emotion: up.frame.emotion ?? null,
+          // 组网回包协议目前只带 speech / emotion，不带图片
+          images: [],
+          model: "（组网主机）",
+        });
+      }
+      console.warn(`[bot] 上行组网主机失败（${up.reason}），回退到本机独立处理`);
+    }
+
     let reply;
     try {
       const aiContext = await contextPool.getContext(modelUid);
@@ -406,7 +417,7 @@ function setupBotChatRoute(app) {
         locationScope: identity.scope,
         persona: typeof body.persona === "string" ? body.persona : null,
         skillPrompts: [],
-        kbContext: null,
+        kbContext,
         ws: null,
       });
       await sessionManager.saveMessage(identity.sessionId, "assistant", reply.speech);

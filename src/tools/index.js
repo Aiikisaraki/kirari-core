@@ -392,6 +392,14 @@ async function runTool(name, args = {}, ctx = {}) {
     case 'generate_image':
       return await generateImage(args, ctx);
     default:
+      // 本地托管工具（核心版自己的 MCP / 技能工具）：查注册表就地执行
+      if (localToolRegistry.has(name)) {
+        try {
+          return String(await localToolRegistry.get(name).execute(args || {}));
+        } catch (e) {
+          return `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
       return `未知工具：${name}`;
   }
 }
@@ -438,6 +446,56 @@ function mergeTools() {
   return [...back, ...front];
 }
 
+// ── 本地托管工具（核心版自己的 MCP / 技能工具）──────────────────────
+// 与上面的 frontend__ 托管工具互补：那类是「后端只持 schema、执行要回调解
+// Electron 主进程」；这一类是**核心版自己执行** —— 控制台/独立部署时没有
+//  Electron 前端可回调，MCP server 由核心版直连、技能工具由核心版直接跑 HTTP。
+//
+// 命名约定（与 frontend__ 对称，便于日志与排错）：
+//   mcp__<serverId>__<toolName>     MCP server 提供的工具
+//   skill__<skillId>__<toolName>    用户自建技能绑定的工具
+// 前缀由注册方保证，runTool 这里只按注册表精确匹配，不再猜。
+/** @type {Map<string, { description:string, parameters:any, execute:(args:any)=>Promise<string> }>} */
+const localToolRegistry = new Map();
+
+/**
+ * 注册一批本地可执行工具（整体覆盖，与 setFrontendTools 同语义：
+ * 配置变了就整表替换，避免删掉的工具残留在注册表里）。
+ * @param {Array<{name:string, description:string, parameters:any, execute:Function}>} tools
+ */
+function setLocalTools(tools) {
+  localToolRegistry.clear();
+  for (const t of Array.isArray(tools) ? tools : []) {
+    if (!t || typeof t.name !== 'string' || !t.name.trim()) continue;
+    if (typeof t.execute !== 'function') continue;
+    localToolRegistry.set(t.name, {
+      description: String(t.description || '').slice(0, 500),
+      parameters: t.parameters || { type: 'object', properties: {} },
+      execute: t.execute,
+    });
+  }
+  return localToolRegistry.size;
+}
+
+function getLocalToolNames() {
+  return new Set(localToolRegistry.keys());
+}
+
+/** 本地托管工具的 OpenAI function schema（供 mergeTools 并入）。 */
+function localToolSchemas() {
+  return [...localToolRegistry.entries()].map(([name, t]) => ({
+    type: 'function',
+    function: { name, description: t.description, parameters: t.parameters },
+  }));
+}
+
+// 合并后端内置工具 + 前端托管工具（WS 回调）+ 本地托管工具（核心版自执行）。
+function mergeTools() {
+  const back = TOOL_DEFS.map(normalizeTool).filter(Boolean);
+  const front = frontendToolRegistry.map(normalizeTool).filter(Boolean);
+  return [...back, ...front, ...localToolSchemas()];
+}
+
 module.exports = {
   TOOL_DEFS,
   runTool,
@@ -445,5 +503,7 @@ module.exports = {
   geocodeCandidates,
   setFrontendTools,
   getFrontendToolNames,
+  setLocalTools,
+  getLocalToolNames,
   mergeTools,
 };

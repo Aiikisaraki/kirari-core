@@ -25,7 +25,7 @@ const MAX_ROUNDS = 5;
 // 兜底收尾：当模型在工具循环末尾只吐了 reasoning / 流被截断而 content 为空时，
 // 用 tools:undefined + 一句强指令强制模型直接产出最终文本（不再调用任何工具）。
 // 自带独立 AbortController（不与主请求共享），避免主超时已触发导致救回也一并被掐断。
-async function salvageAsText(aiContext, messages) {
+async function salvageAsText(aiContext, messages, onDelta = null) {
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), 60000);
   try {
@@ -38,10 +38,14 @@ async function salvageAsText(aiContext, messages) {
     const patched = cleaned.map((m) =>
       m.role === 'system' ? { ...m, content: (m.content || '') + FORCE } : m,
     );
+    // 前面流出去的碎片已作废（主请求没产出可用 content），先让调用方清空
+    if (onDelta) {
+      try { onDelta(null); } catch {}
+    }
     const completion = await streamChatCompletion(
       aiContext.openai,
       { model: aiContext.model, messages: patched, max_tokens: 1500 },
-      { signal: ctrl.signal },
+      { signal: ctrl.signal, onDelta },
     );
     return completion.choices?.[0]?.message?.content || '';
   } finally {
@@ -49,7 +53,11 @@ async function salvageAsText(aiContext, messages) {
   }
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, onDelta = null } = {}) {
+  // onDelta：正文逐字回调（上层做流式展示）。约定：
+  //   onDelta(text)  —— 追加一段正文增量
+  //   onDelta(null)  —— 前面流出的内容作废（工具轮碎片/换收尾路径），调用方应清空
+  // 回调抛出的异常一律吞掉：流式展示是锦上添花，绝不能因为它打断生成。
   if (!aiContext || aiContext.closed || !aiContext.openai) {
     throw new Error('AI 连接上下文不可用');
   }
@@ -113,7 +121,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       const raw = buildLocationSetRaw(preflight.setLocation.location, preflight.setLocation.ambiguous);
       try {
         console.log('[aiReply] location set, polishing confirmation via LLM...');
-        const c = await polishToolResult(raw, aiContext, sessionId, text, controller, sys.locationSet);
+        const c = await polishToolResult(raw, aiContext, sessionId, text, controller, sys.locationSet, onDelta);
         confirmSpeech = c.speech;
       } catch (e) {
         console.warn('[aiReply] 位置设置确认润色失败，回退到底层提示语：', e?.message || e);
@@ -140,7 +148,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       try {
         console.log('[aiReply] direct tool hit, polishing via LLM...');
         const polishUserText = preflight.direct.userText || text;
-        const polished = await polishToolResult(rawText, aiContext, sessionId, polishUserText, controller, sys.polish);
+        const polished = await polishToolResult(rawText, aiContext, sessionId, polishUserText, controller, sys.polish, onDelta);
         console.log('[aiReply] polished reply via LLM OK');
         if (confirmSpeech) {
           // 合并句：时间/天气答复 + 位置设置确认（两者均经 LLM 润色）
@@ -283,7 +291,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             tool_choice: useTools ? toolChoice : undefined,
             max_tokens: 1500,
           },
-          { signal: controller.signal },
+          { signal: controller.signal, onDelta },
         );
       } catch (e) {
         const errMsg = e?.message || String(e);
@@ -299,7 +307,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
               messages,
               max_tokens: 1500,
             },
-            { signal: controller.signal },
+            { signal: controller.signal, onDelta },
           );
         } else if (aborted) {
           // 主请求超时/中断（如 120s 上限触发）：当前轮流被截断。
@@ -307,7 +315,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
           // 实在救不回才冒泡到外层通用兜底，避免直接崩成"还在学习中"。
           console.warn(`[aiReply] 主请求超时/中断（${errMsg}），尝试纯文本收尾`);
           try {
-            const salvaged = await salvageAsText(aiContext, messages);
+            const salvaged = await salvageAsText(aiContext, messages, onDelta);
             if (salvaged && salvaged.trim()) {
               const { speech, emotion } = parseModelReply(salvaged.trim());
               if (speech) {
@@ -362,7 +370,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             `[aiReply] round=${round} 内容为空，尝试强制纯文本收尾 model=${aiContext.model} reasoning_len=${completion._reasoningContent?.length || 0} chunks=${completion._chunkCount}`,
           );
           try {
-            const salvaged = await salvageAsText(aiContext, messages);
+            const salvaged = await salvageAsText(aiContext, messages, onDelta);
             if (salvaged && salvaged.trim()) {
               const { speech, emotion, images } = parseModelReply(salvaged.trim());
               if (speech) {
@@ -402,7 +410,11 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         };
       }
 
-      // 有工具调用 → 执行并回灌
+      // 有工具调用 → 这轮吐过的正文碎片全部作废（那不是最终回复），让调用方清空。
+      // 然后执行工具并回灌，下一轮重新流。
+      if (onDelta) {
+        try { onDelta(null); } catch {}
+      }
       for (const tc of msg.tool_calls) {
         let result;
         try {

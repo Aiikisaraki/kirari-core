@@ -18,6 +18,13 @@ WorkingDirectory=/opt/kirari-core
 EnvironmentFile=/opt/kirari-core/.env
 Environment=NODE_ENV=production
 
+# ── 组网（看 .env 里的 NET_ROLE，默认 off 不参与）────────────
+# host 角色时会额外监听固定端口 19760，需要放行防火墙：
+#   RHEL 系 / OpenCloudOS：sudo firewall-cmd --permanent --add-port=19760/tcp && sudo firewall-cmd --reload
+#   Debian/Ubuntu：        sudo ufw allow 19760/tcp
+# 主机还建议在 .env 里设 NET_ADVERTISE_HOST=<局域网 IP> —— 机器多网卡时
+# 自动猜的那张未必是别人能访问到的那张，猜错的话连接码里的地址就是错的。
+# 组网端口只对局域网开，**不要**把它暴露到公网。
 ExecStart=/usr/bin/node server.js
 
 # 崩溃自动重启：7×24 在线的关键。

@@ -23,6 +23,14 @@ const dbStorage = require("./db/dbStorage");
 const { createConnectionAiContext, cleanupConnectionAiContext } = require("./ai/connectionAiContext");
 const contextPool = require("./ai/contextPool");
 const dailyBriefing = require("./services/dailyBriefingService");
+const netBootstrap = require("./net/bootstrap");
+// 智能机器人助手本体（用户拍板：MCP + 机器人都搬进核心版）：
+//   工具具体系启动时连 MCP server、注册本地工具；
+//   机器人适配器启动时连 OneBot，收到消息直接走内核回复。
+const mcpManager = require("./mcp/mcpManager");
+const botManager = require("./bot/botManager");
+const consoleSite = require("./web/consoleSite");
+const { dataDir, dataDirSource, dataDirDetail } = require("./dataDir");
 
 // 每天 08:00 / 16:00 / 22:00 各主动刷新一次当日简报（"每日记忆"）。
 // 三次均强制重新采集（generateDailyBrief），覆盖当天同一份简报，使注入的【今日背景】
@@ -72,13 +80,35 @@ function createServer() {
     const app = express();
     const server = http.createServer(app);
 
+    // 数据目录一句话说清：自动接管桌宠版数据时，用户能立刻看到「读的是哪一份」。
+    console.log(`[data-dir] 数据目录 = ${dataDir}（来源：${dataDirSource}）`);
+
     // 中间件
+    // 头像上传是 base64（5MB 图片≈6.7MB 文本），只对这条路径放宽体积限制；
+    // 它必须排在全局 express.json 之前，否则 100kb 的默认限制会先把请求挡掉。
+    app.use("/api/avatar/user", express.json({ limit: "8mb" }));
     app.use(express.json());
     // CORS：放业务路由之前，处理跨域预检与响应头（独立网页前端 / 分离部署需要）。
     app.use(corsMiddleware);
 
-    // 1. 挂载 HTTP 路由
+    // Web 控制台静态页（web/ 目录构建产物），与 API 同端口共存。
+    // 两个入口指向同一份产物：/（首页，不用记路径）和 /console/（老入口，保留）。
+    // 没构建过就都不挂 —— 服务本体不依赖控制台的存在。
+    const consoleReady = consoleSite.available();
+    if (consoleReady) {
+        app.use("/console", express.static(consoleSite.DIST, consoleSite.staticOptions()));
+    }
+
+    // 1. 挂载 HTTP 路由（首页 / 在这里面：控制台可用就送界面，否则回落到服务状态一行字）
     setupHttpRoutes(app);
+
+    // 控制台的资源文件也在**根路径**下备一份：首页从 / 打开时，相对路径的
+    // ./assets/xxx.js 就落在 /assets/xxx.js。放在 HTTP 路由之后注册，
+    // 保证 /api、/health 这些永远优先于静态文件匹配。
+    if (consoleReady) {
+        app.use("/", express.static(consoleSite.DIST, consoleSite.staticOptions()));
+        console.log("[console] 网页控制台已启用: /（/console/ 也可用）");
+    }
 
     // 2. 挂载 WebSocket 逻辑
     setupWebSocket(server);
@@ -105,9 +135,18 @@ function createServer() {
             console.log(`
 ✨ 虚拟桌宠 API 服务启动成功！
 ✅ 运行地址: http://${HOST}:${port}
+🖥️  网页控制台: http://127.0.0.1:${port}/${consoleReady ? "（首页直接进）" : "（未构建，先 npm run build）"}
 📡 WebSocket: ws://${HOST}:${port}/ws
 🏥 健康检查: http://${HOST}:${port}/health
             `);
+            // 组网在主服务起来之后才启动：它是可选的，任何配置问题都只跳过组网，
+            // 不阻断机器人接消息。角色由 .env 的 NET_ROLE 决定（默认 off）。
+            netBootstrap.start();
+
+            // 工具与机器人：服务真的在监听后才起，避免启动期报错掩盖监听失败。
+            // 两者都是可选能力，失败只打警告、不影响 API 本体。
+            mcpManager.initTools();
+            botManager.initBots();
         });
     }
 
@@ -120,6 +159,9 @@ function createServer() {
     // 退出时释放所有上下文，避免 OpenAI 客户端的连接池悬挂。
     const shutdown = () => {
         console.log("[exit] 正在释放资源…");
+        // 先退组网：主机退出后其他设备会自动转为独立工作（组网铁律：不留半死状态）
+        netBootstrap.stop();
+        botManager.stopAll();
         contextPool.invalidateAll();
     };
     process.on("SIGINT", () => { shutdown(); process.exit(0); });

@@ -13,6 +13,12 @@ services:
       # Dockerfile 放在 deploy/ 下，构建上下文要指到仓库根
       context: ..
       dockerfile: deploy/Dockerfile
+      # 组网层 kirari-net 是与本仓库**平级**的本地包（package.json 里写的是
+      # file:../kirari-net），它不在构建上下文里，所以额外挂一个上下文。
+      # ⚠️ 构建前先在 kirari-net 里跑一次 `npm run build`（取的是它的 dist）。
+      # 需要 Compose 2.17+ / BuildKit；老版本见 deploy/README.md 的替代做法。
+      additional_contexts:
+        kirari_net: ../../kirari-net
     image: kirari-core:0.8.0
     container_name: kirari-core
     restart: unless-stopped # 崩溃自动重启，等价于 systemd 的 Restart=always
@@ -22,14 +28,19 @@ services:
       # 服务器上建议改成 127.0.0.1:${PORT:-9089}:9089，只允许本机访问，
       # 由反向代理对外，这样容器不直接暴露到公网。
       - "${BIND_ADDR:-0.0.0.0}:${PORT:-9089}:9089"
+      # ── 组网端口（默认注释掉）──────────────────────────────────
+      # 只有 NET_ROLE=host 时才需要：这是其他设备主动连进来的端口。
+      # 打开时**必须**同时设 NET_ADVERTISE_HOST，否则连接码里写的是容器
+      # 内网地址（172.x），对方拿到码也连不上。
+      # 叶子角色不需要它（叶子是主动外连的一方）。
+      # - "19760:19760"
 
     environment:
       NODE_ENV: production
       PORT: "9089"
       HOST: "0.0.0.0" # 容器内必须听 0.0.0.0，否则映射进来的端口连不上
       STORAGE_TYPE: db
-      # 模型服务地址：可用外部真实地址，也可用同一 compose 里的本机反代
-      MODEL_API_ENDPOINT: "${MODEL_API_ENDPOINT:-https://api.chatanywhere.tech/v1}"
+      # ⚠️ 模型配置不在 .env / compose 里：唯一入口是控制台「大脑」（/console，存 SQLite）
       # 机器人接入口令
       BOT_TOKEN: "${BOT_TOKEN:?请在 .env 里设置 BOT_TOKEN}"
       BOT_MODEL_UID: "${BOT_MODEL_UID:-1}"
@@ -37,6 +48,17 @@ services:
       # 会话密钥
       SESSION_SECRET: "${SESSION_SECRET:?请在 .env 里设置 SESSION_SECRET}"
       BUILTIN_ACCOUNT_TOKEN: "${BUILTIN_ACCOUNT_TOKEN:-kirari-local-builtin}"
+      # ── 组网（默认不参与）──────────────────────────────────────
+      # off 不参与 / host 当模型出口 / leaf 上行给别的主机
+      NET_ROLE: "${NET_ROLE:-off}"
+      # ⚠️ 组网**没有密钥要配**：当主机时本机自签一把（落在 /app/data/net 里），
+      #    当叶子时凭连接码在配对那一刻领。历史变量 KIRARI_NET_SECRET 已删除。
+      # 只有 NET_ROLE=host 且需要把连接码打进日志时才设 1
+      NET_PRINT_PAIRING: "${NET_PRINT_PAIRING:-0}"
+      # 只有 NET_ROLE=leaf **首次**接入时填（主机那边生成的连接码，整串复制）
+      NET_PAIRING_CODE: "${NET_PAIRING_CODE:-}"
+      # 容器里当主机**必填**：连接码里写哪个地址给别的设备用（宿主机局域网 IP）
+      NET_ADVERTISE_HOST: "${NET_ADVERTISE_HOST:-}"
 
     volumes:
       # SQLite 数据（会话记忆、位置、每日简报）—— 一定要持久化，
