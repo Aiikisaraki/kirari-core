@@ -104,8 +104,12 @@ jobs:
           context: .
           file: ./deploy/Dockerfile
           platforms: linux/amd64
-          # 组网层作为附加构建上下文喂给 Dockerfile 的COPY --from=kirari_net
-          contexts: |
+          # 组网层作为附加构建上下文喂给 Dockerfile 的 COPY --from=kirari_net。
+          # ⚠️ 参数名是 build-contexts（带 s），不是 contexts ——
+          #    写错会被 action **静默忽略**（只在日志里留一行 warning），
+          #    结果 BuildKit 把 kirari_net 当成 Docker Hub 上的镜像名去拉，
+          #    报 insufficient_scope: authorization failed。
+          build-contexts: |
             kirari_net=./kirari-net
           push: true
           tags: ${{ steps.meta.outputs.tags }}
