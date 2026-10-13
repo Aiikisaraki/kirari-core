@@ -56,10 +56,16 @@ jobs:
 
       # ── 3. 产出组网层的 dist ─────────────────────────────────────────
       # 只取 dist/，不带它的 node_modules（构建上下文越小越快）。
+      # 用 npm install 而非 npm ci：kirari-net 仓库**没有 package-lock.json**，
+      # npm ci 在那种情况下直接报 EUSAGE 退出。
       - name: 构建组网层 dist
         working-directory: kirari-net
         run: |
-          npm ci --no-audit --no-fund
+          npm install --no-audit --no-fund
+          # kirari-net 的 package.json 有 "prepare": "npm run build"，
+          # npm install 结束时通常已经编过一次；这里再显式跑一遍是为了
+          # **不依赖那个隐式行为**（npm 版本差异可能导致 prepare 被跳过），
+          # tsc 幂等，重复执行只多花几秒。
           npm run build
           # 存在性自检：Dockerfile 会COPY 这个目录，缺了就构建失败
           test -f dist/index.js || { echo "::error::dist/index.js 未生成，tsc 构建有问题"; exit 1; }
