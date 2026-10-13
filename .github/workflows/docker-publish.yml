@@ -1,0 +1,108 @@
+# Kirari Core · 容器镜像构建与发布
+#
+# 产出镜像：docker.io/<用户名>/kirari-core
+#
+# 触发时机：
+#   - 推送 tag（v0.8.0 这类）→ 推语义版本标签（0.8.0）+ latest
+#   - 推送 main 分支        → 推 edge（以及 latest）
+# 推 main 不会发正式版本，latest 只在 main 与 tag 都命中时更新，
+# 这样「main 还没验证完」不会把 latest 抢先覆盖掉。
+#
+# ── 为什么必须同时 checkout 两个仓库 ────────────────────────────────────
+# package.json 里组网层写的是 "kirari-net": "file:../kirari-net"，
+# 它是一个**平级的独立仓库**，不在本仓库里。
+# 而 deploy/Dockerfile 通过 additional_contexts（构建上下文 kirari_net）
+# 取它的 package.json 与 dist/，所以：
+#   1. 先把 kirari-net 拉到 ../kirari-net
+#   2. 在里面 npm install && npm run build 产出 dist/
+#   3. 再交给 Docker 构建
+# 少了第 2 步，Dockerfile 里的 `node -e "require('/app/node_modules/kirari-net')"`
+# 会直接失败 —— 这是刻意设计的「构建即校验」，比运行期才崩要好。
+
+name: Docker Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: kirari-core
+  NET_REPO: Aiikisaraki/kirari-net
+
+jobs:
+  build:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      # ── 1. 检出本仓库 ────────────────────────────────────────────────
+      - name: 检出 kirari-core
+        uses: actions/checkout@v4
+
+      # ── 2. 检出组网层到 ../kirari-net（必须是平级目录）─────────────────
+      - name: 检出组网层 kirari-net
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NET_REPO }}
+          # 必须和 core 同在 $GITHUB_WORKSPACE 的父目录下，
+          # 才能对上 package.json 里的 file:../kirari-net
+          path: kirari-net
+          ref: main
+
+      # ── 3. 产出组网层的 dist ─────────────────────────────────────────
+      # 只取 dist/，不带它的 node_modules（构建上下文越小越快）。
+      - name: 构建组网层 dist
+        working-directory: kirari-net
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          # 存在性自检：Dockerfile 会COPY 这个目录，缺了就构建失败
+          test -f dist/index.js || { echo "::error::dist/index.js 未生成，tsc 构建有问题"; exit 1; }
+          echo "dist 文件数：$(find dist -type f | wc -l)"
+
+      # ── 4. 准备 Buildx ───────────────────────────────────────────────
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 5. 登录 Docker Hub ───────────────────────────────────────────
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── 6. 生成标签 ──────────────────────────────────────────────────
+      - name: 计算镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # ── 7. 构建并推送 ────────────────────────────────────────────────
+      # 单架构 linux/amd64：VPS / openEuler / OpenCloudOS / NAS 主流都是 x86，
+      # 单架构能省掉 QEMU 跨架构模拟，构建快且不会出模拟环境的玄学问题。
+      # 要加 arm64 时把 platforms 改成 linux/amd64,linux/arm64 即可
+      # （better-sqlite3 / sharp 在 arm64 有预编译产物，一般不用真编译）。
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          platforms: linux/amd64
+          # 组网层作为附加构建上下文喂给 Dockerfile 的COPY --from=kirari_net
+          contexts: |
+            kirari_net=./kirari-net
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
