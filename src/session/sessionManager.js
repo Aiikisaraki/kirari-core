@@ -29,8 +29,15 @@ class SessionManager {
     return await this.storage.getSession(sessionId);
   }
 
-  async saveMessage(sessionId, role, content) {
-    return await this.storage.saveMessage(sessionId, role, content);
+  /**
+   * 存一条消息。
+   *
+   * ⚠️ extras 必须原样透传给存储层：图片/情绪存在 messages 表的 images_json / emotion
+   *    两列里（桌宠版引擎直连 storage 传 4 参；本包装层早期只收 3 参，把 extras
+   *    静默丢了 —— 控制台聊天和机器人路径的图片/情绪全部没入库，属迁移漏项）。
+   */
+  async saveMessage(sessionId, role, content, extras = null) {
+    return await this.storage.saveMessage(sessionId, role, content, extras);
   }
 
   async getRecentMessages(sessionId, limit = 5) {

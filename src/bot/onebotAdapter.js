@@ -10,8 +10,9 @@
 //   发：send_msg action；图片走 base64:// 直传（不落盘）
 //   断线：5 秒后自动重连
 //
-// 与桌宠版的差异只有一处：ws 库用 npm 的 `ws`（Node 服务没有浏览器全局 WebSocket），
+// 与桌宠版的差异只有两处：ws 库用 npm 的 `ws`（Node 服务没有浏览器全局 WebSocket），
 // 以及 get_image 回调 map 同一套逻辑。
+const fs = require('fs');
 const WebSocket = require('ws');
 
 const RECONNECT_DELAY = 5000;
@@ -34,10 +35,17 @@ class OneBotAdapter {
         this.connected = false;
         this.lastError = '';
         this.disposed = false;
+        // 主人账号（协议端 QQ 号）：botManager.setOwner 实时同步，与桌宠版 BotAdapter.setOwner 同语义
+        this.ownerAccount = '';
     }
 
     setError(msg) {
         this.lastError = msg || '';
+    }
+
+    /** 设/取消主人（空 = 取消）。只影响路由，不重连。 */
+    setOwner(accountKey) {
+        this.ownerAccount = String(accountKey || '').trim() || '';
     }
 
     connect() {
@@ -119,6 +127,21 @@ class OneBotAdapter {
         this.disconnect();
     }
 
+    /**
+     * 运行中更新连接配置（控制台保存设置时由 botManager 调用）。
+     * 与桌宠版 adapter-manager update() 同语义：配置有变化就断开重连，
+     * 没变化就不动（避免误伤正常连接）。群设置等非连接字段也在 config 里，
+     * 桌宠版同样是任何 config 变化都重连，保持一致。
+     */
+    updateConfig(nextConfig) {
+        const before = JSON.stringify(this.config);
+        this.config = nextConfig || {};
+        if (JSON.stringify(this.config) !== before) {
+            this.disconnect();
+            this.connect();
+        }
+    }
+
     async handleFrame(raw) {
         let frame;
         try {
@@ -149,6 +172,9 @@ class OneBotAdapter {
         const msgType = frame.message_type || (frame.group_id ? 'group' : 'private');
         const userId = String(frame.user_id ?? frame.sender?.user_id ?? '');
         const groupId = frame.group_id ? String(frame.group_id) : '';
+
+        // 事件帧自带的 self_id 比 get_login_info 更可靠（且能立刻用于 @ 判断）—— 与桌宠版同行为
+        if (frame.self_id) this.selfQQ = String(frame.self_id);
 
         // 群消息两层闸门（与桌宠版同语义）
         if (msgType === 'group') {
@@ -358,6 +384,14 @@ function normalizeGetImageResult(d) {
     }
     if (typeof d.file === 'string' && d.file.startsWith('base64://')) return d.file.slice('base64://'.length);
     if (typeof d.url === 'string' && /^https?:\/\//i.test(d.url)) return d.url;
+    // 本地文件路径（go-cqhttp/LLOneBot 拿不到外链时会返路径）：读盘转 base64，与桌宠版同行为
+    if (typeof d.file === 'string' && (d.file.startsWith('/') || /^[A-Za-z]:[\\/]/.test(d.file) || d.file.startsWith('file://'))) {
+        try {
+            return fs.readFileSync(d.file.replace(/^file:\/\//, '')).toString('base64');
+        } catch {
+            return null;
+        }
+    }
     return null;
 }
 

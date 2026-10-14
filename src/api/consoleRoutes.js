@@ -25,6 +25,7 @@ const userKnowledge = require("../knowledge/userKnowledge");
 const mcpManager = require("../mcp/mcpManager");
 const botManager = require("../bot/botManager");
 const clientConfig = require("../settings/clientConfig");
+const consoleAppearance = require("../settings/consoleAppearance");
 const localSession = require("../session/localSession");
 const { dataDir } = require("../dataDir");
 // 说明：头像上传走 JSON（base64，最大 5MB 图片→约 6.7MB 文本），体积限制在
@@ -435,7 +436,11 @@ function setupConsoleRoutes(app) {
                     send("delta", chunk === null ? { reset: true } : { text: String(chunk) });
                 },
             });
-            await sessionManager.saveMessage(sessionId, "assistant", reply.speech);
+            await sessionManager.saveMessage(sessionId, "assistant", reply.speech, {
+                // 情绪/图片进 extras 列（桌宠版引擎同样存）：共享历史里桌宠端原样带回
+                emotion: reply.emotion ?? null,
+                images: Array.isArray(reply.images) ? reply.images : [],
+            });
             send("done", {
                 speech: reply.speech,
                 emotion: reply.emotion ?? null,
@@ -450,23 +455,41 @@ function setupConsoleRoutes(app) {
         }
     });
 
-    // ---- 外观主题（pet-client.config.json 的 theme，与桌宠版「外观」页同一份）----
-    // 桌宠版里主题 ≠ 形象：形象是角色皮肤（核心版没有桌宠，不做），
-    // 主题只是配色，控制台照样能套同一套，所以这里要跟着桌宠版走。
-    app.get("/api/theme", (req, res) => {
+    // ---- 控制台外观（配色 + 明暗）----
+    // 与桌宠版「外观」页**不互通**：网页后台和桌面小窗是两种场景，一套设置两头改
+    // 只会互相干扰。核心版存自己的 data/console-appearance.json，字段名也叫
+    // consoleAppearance 而不是 theme，跟 pet-client.config.json 的 theme 彻底分开。
+    // （桌宠版保存配置是整体覆盖写回，塞进共享文件的陌生键会被它抹掉 —— 详见
+    //  src/settings/consoleAppearance.js 的文件头注释。）
+    app.get("/api/appearance", (req, res) => {
         if (!requireAdmin(req, res)) return;
-        return res.json({ theme: clientConfig.getTheme(), themes: clientConfig.THEMES });
+        const now = consoleAppearance.getAppearance();
+        return res.json({
+            ...now,
+            themes: consoleAppearance.THEMES,
+            modes: consoleAppearance.MODES,
+        });
     });
 
-    app.put("/api/theme", (req, res) => {
+    app.put("/api/appearance", (req, res) => {
         if (!requireAdmin(req, res)) return;
-        const value = String(req.body?.theme || "").trim();
-        if (!clientConfig.THEME_IDS.includes(value)) {
-            return res.status(400).json({ message: "没有这个主题" });
+        const body = req.body || {};
+        const patch = {};
+        if (body.theme !== undefined) {
+            if (typeof body.theme !== "string" || !consoleAppearance.THEME_IDS.includes(body.theme.trim())) {
+                return res.status(400).json({ message: "没有这个配色" });
+            }
+            patch.theme = body.theme;
         }
-        const saved = clientConfig.setTheme(value);
-        console.log(`[console] 外观主题已切换为 ${saved}`);
-        return res.json({ theme: saved });
+        if (body.mode !== undefined) {
+            if (typeof body.mode !== "string" || !consoleAppearance.MODE_IDS.includes(body.mode.trim())) {
+                return res.status(400).json({ message: "没有这个明暗模式" });
+            }
+            patch.mode = body.mode;
+        }
+        const saved = consoleAppearance.setAppearance(patch);
+        console.log(`[console] 控制台外观已切换为 ${saved.theme} / ${saved.mode}`);
+        return res.json(saved);
     });
 
     // ---- 通用：备注名（pet-client.config.json 的 petName，与桌宠版同一份文件同一个键）----
@@ -792,6 +815,9 @@ function setupConsoleRoutes(app) {
             type,
             name,
             enabled: body.enabled !== false,
+            // 主人账号（可后补）：被设为 owner 的协议端账号，其消息并入本机会话
+            ownerAccount:
+                typeof body.ownerAccount === "string" && body.ownerAccount.trim() ? body.ownerAccount.trim() : null,
             config: body.config && typeof body.config === "object" ? body.config : {},
         });
         botManager.writeAdapters(adapters);
@@ -813,12 +839,34 @@ function setupConsoleRoutes(app) {
             next.name = n;
         }
         if (body.enabled !== undefined) next.enabled = !!body.enabled;
+        if (body.ownerAccount !== undefined) {
+            // 空串/空白 = 取消主人；桌宠版 update() 同样透传该字段
+            next.ownerAccount = String(body.ownerAccount || "").trim() || null;
+        }
         if (body.config !== undefined && typeof body.config === "object") next.config = body.config;
         adapters[idx] = next;
         botManager.writeAdapters(adapters);
         botManager.applyConfig();
         console.log(`[console] 机器人适配器已更新 id=${req.params.id}`);
         return res.json({ ok: true });
+    });
+
+    /**
+     * 设/取消机器人主人。主人账号之后发来的消息并入「本机会话」
+     * （与桌宠版、控制台共用同一段主对话）；account 为空 = 取消。
+     * 对应桌宠版 IPC adapter:set-owner，配置键同名、同一份 pet-client.config.json。
+     * 走 botManager.setOwner：写盘 + 实时同步到运行中的适配器（不用重启即生效）。
+     */
+    app.post("/api/bot/:id/owner", (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const account = String((req.body || {}).account || "").trim();
+        try {
+            const ownerAccount = botManager.setOwner(req.params.id, account);
+            console.log(`[console] 机器人适配器主人已${account ? `设为 ${account}` : "取消"} id=${req.params.id}`);
+            return res.json({ ok: true, ownerAccount });
+        } catch (e) {
+            return res.status(404).json({ message: e?.message || "设置失败" });
+        }
     });
 
     app.delete("/api/bot/:id", (req, res) => {

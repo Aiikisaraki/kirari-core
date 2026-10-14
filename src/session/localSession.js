@@ -17,7 +17,8 @@
 //     两台机器写死同一个 id 会把两边的上下文搅在一起。
 //
 // ⚠️ 机器人会话（bot-*）永远独立，不参与收口：那是 QQ 群里多方的对话，
-//    和人机私聊不是一回事。
+//    和人机私聊不是一回事。唯一例外是「主人」：botManager 把主人账号的消息
+//    直接以本机会话 id 入库（不走 bot- 前缀），所以天然就在主对话里。
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');

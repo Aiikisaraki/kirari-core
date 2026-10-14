@@ -6,8 +6,7 @@
 // 没有桌宠窗口、也没有形象，但它必须和桌宠版**共享**其中的跨端字段 —— 用户拍板：
 // 「一台机子装过桌宠版，核心版直接读取桌宠版的所有配置和记录」。
 //
-// 于是这里只认四个跨端字段：
-//   theme      外观主题（配色）—— 桌宠版「外观」页就是它，和「形象换皮肤」是两回事
+// 于是这里只认三个跨端字段：
 //   petName    备注名（桌宠版聊天窗口标题、核心版控制台侧栏都显示它）
 //   userAvatar 我的头像（useravatar:// 协议地址，指向 userData/user-avatar/avatar<ext>）
 //   adapters   机器人适配器（OneBot 等）—— 桌宠版与核心版共用同一份列表
@@ -20,21 +19,20 @@ const path = require("path");
 const { readJson, writeJsonMerged, filePath, dataDir } = require("./localSettings");
 
 const FILE = "pet-client.config.json";
-/** 允许被核心版覆盖的顶层键。之外的键一律从现有文件原样搬回。 */
-const KNOWN_KEYS = ["theme", "petName", "userAvatar", "adapters"];
+/**
+ * 允许被核心版覆盖的顶层键。之外的键一律从现有文件原样搬回。
+ *
+ * 注意 **theme 不在这里**：桌宠版的 theme 是给桌面小窗用的，控制台跑在浏览器里，
+ * 共用一套只会互相干扰。核心版的外观存自己的 data/console-appearance.json
+ * （见 settings/consoleAppearance.js）。桌宠版那份 theme 核心版不读也不写。
+ */
+const KNOWN_KEYS = ["petName", "userAvatar", "adapters"];
 
 // 桌宠版 main.ts 的默认值，两边必须一致（loadClientConfig 里写的就是 Kirari）。
 const DEFAULT_PET_NAME = "Kirari";
 
-// 四套主题与桌宠版 stores/theme.ts 的 THEMES 一一对应（id / 名 / 副标题都照抄）。
-const THEMES = [
-    { id: "aurora-glass", label: "极光玻璃", sub: "Aurora Glass" },
-    { id: "pet-pink", label: "樱粉", sub: "Pet Pink" },
-    { id: "mint-soft", label: "薄荷嫩芽", sub: "Mint Soft" },
-    { id: "lavender-mist", label: "薰衣草晨雾", sub: "Lavender Mist" },
-];
-const DEFAULT_THEME = "aurora-glass";
-const THEME_IDS = THEMES.map((t) => t.id);
+// 注意：外观主题（桌宠版 stores/theme.ts 的 THEMES）不在这个文件里。
+// 核心版控制台的配色 + 明暗走 src/settings/consoleAppearance.js，与桌宠版不互通。
 
 /** 头像文件所在目录（与桌宠版 userData/user-avatar 同名同位置）。 */
 const AVATAR_DIR_NAME = "user-avatar";
@@ -59,21 +57,6 @@ function exists() {
     } catch {
         return false;
     }
-}
-
-// ------------------------------ 外观主题 ------------------------------
-
-/** 与桌宠版同规则：不认识的主题名一律回退默认，绝不把脏值写回去。 */
-function getTheme() {
-    const raw = readRaw();
-    const v = raw && typeof raw.theme === "string" ? raw.theme.trim() : "";
-    return THEME_IDS.includes(v) ? v : DEFAULT_THEME;
-}
-
-function setTheme(value) {
-    const next = typeof value === "string" && THEME_IDS.includes(value.trim()) ? value.trim() : DEFAULT_THEME;
-    writeJsonMerged(FILE, { theme: next }, KNOWN_KEYS);
-    return next;
 }
 
 // ------------------------------ 备注名 ------------------------------
@@ -224,15 +207,10 @@ module.exports = {
     FILE,
     KNOWN_KEYS,
     DEFAULT_PET_NAME,
-    THEMES,
-    DEFAULT_THEME,
-    THEME_IDS,
     clientConfigPath,
     userAvatarDir,
     exists,
     readRaw,
-    getTheme,
-    setTheme,
     getPetName,
     setPetName,
     getUserAvatar,
