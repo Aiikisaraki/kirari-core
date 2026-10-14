@@ -50,9 +50,9 @@ export const api = {
     updateModel: (id, p) => request(`/api/models/${id}`, { method: "PUT", body: JSON.stringify(p) }),
     deleteModel: (id) => request(`/api/models/${id}`, { method: "DELETE" }),
     setActiveModel: (id) => request("/api/models/active", { method: "PUT", body: JSON.stringify({ id }) }),
-    // 外观主题（与桌宠版共用 pet-client.config.json 的 theme）
-    getTheme: () => request("/api/theme"),
-    saveTheme: (theme) => request("/api/theme", { method: "PUT", body: JSON.stringify({ theme }) }),
+    // 控制台外观（配色 + 明暗）。只管网页控制台这一边，和桌宠版的主题互不影响。
+    getAppearance: () => request("/api/appearance"),
+    saveAppearance: (p) => request("/api/appearance", { method: "PUT", body: JSON.stringify(p) }),
     // 备注名（与桌宠版共用 pet-client.config.json 的 petName）
     getPetName: () => request("/api/pet-name"),
     savePetName: (petName) => request("/api/pet-name", { method: "PUT", body: JSON.stringify({ petName }) }),
@@ -90,6 +90,9 @@ export const api = {
     addBot: (p) => request("/api/bot", { method: "POST", body: JSON.stringify(p) }),
     updateBot: (id, p) => request(`/api/bot/${id}`, { method: "PUT", body: JSON.stringify(p) }),
     deleteBot: (id) => request(`/api/bot/${id}`, { method: "DELETE" }),
+    // 设/取消主人：account 为空 = 取消。主人的消息会并进主对话（与桌宠版同一功能）
+    setBotOwner: (id, account) =>
+        request(`/api/bot/${id}/owner`, { method: "POST", body: JSON.stringify({ account }) }),
     // 聊天记录（与桌宠版同源，默认就是本机会话）
     // 本机会话 id：控制台和桌宠版共用的那一个，开页面时先问一次
     getSession: () => request("/api/session"),

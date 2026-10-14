@@ -555,7 +555,7 @@ onUnmounted(() => {
 }
 .segmented button.on {
     background: var(--brand);
-    color: #fff;
+    color: var(--on-brand);
 }
 .segmented button:disabled {
     opacity: 0.5;

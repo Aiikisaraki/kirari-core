@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { api, getToken, setToken, clearToken } from "./api.js";
 import ChatPane from "./components/ChatPane.vue";
 import SettingsNav from "./components/SettingsNav.vue";
@@ -14,6 +14,9 @@ import McpSettings from "./components/settings/McpSettings.vue";
 import BotSettings from "./components/settings/BotSettings.vue";
 import SyncSettings from "./components/settings/SyncSettings.vue";
 
+// 外观缓存的 localStorage 键（防刷新闪白用，真正的配置以服务端那份为准）
+const APPEARANCE_CACHE = "kirari-console-appearance";
+
 // 未验证口令前先门口令；验证通过才进主界面
 const authed = ref(false);
 const checking = ref(false);
@@ -25,7 +28,47 @@ const brainReady = ref(null);
 const netInfo = ref(null);
 const petName = ref("Kirari");
 const savedOk = ref("");
+const navOpen = ref(false); // 移动端抽屉开关
+// 控制台外观：{ theme 配色, mode 明暗 }。mode 存的是用户选的意图，
+// auto 会在 applyAppearance 里按系统偏好算成 light/dark 再显示。
+// 初值取上次缓存 —— 深色用户刷新时不会先闪一帧白（服务端那份要等鉴权后才拿得到）。
+const isDark = ref(false); // 当前实际是不是深色（跟随系统算出来的结果）
+const appearance = ref((() => {
+    try {
+        const c = JSON.parse(localStorage.getItem(APPEARANCE_CACHE) || "null");
+        if (c && typeof c.theme === "string") {
+            return { theme: c.theme, mode: ["light", "dark", "auto"].includes(c.mode) ? c.mode : "light" };
+        }
+    } catch {
+        /* 缓存坏了就走默认 */
+    }
+    return { theme: "aurora-glass", mode: "light" };
+})());
 let savedTimer = null;
+
+// 面包屑：聊天 / 设置 · <子页>。这份 key→文案 和 SettingsNav 的 items 保持一致，
+// 拆成共享模块反而要为一个标题加一层依赖，不值得（改文案时两处一起搜「label」即可）。
+const SETTINGS_LABELS = {
+    appearance: "外观",
+    general: "通用",
+    profile: "个人",
+    persona: "人格",
+    model: "大脑",
+    skill: "技能",
+    knowledge: "知识库",
+    mcp: "工具服务",
+    bot: "机器人",
+    sync: "组网",
+};
+const crumbMain = computed(() => (page.value === "chat" ? "聊天" : "设置"));
+const crumbSub = computed(() =>
+    page.value === "settings" ? SETTINGS_LABELS[settingsPage.value] || "" : ""
+);
+
+// 移动端：切页即收起抽屉（点导航本来就为去别的页面）
+watch([page, settingsPage], () => {
+    navOpen.value = false;
+});
 
 async function tryToken(t) {
     // 口令两端空白先去掉：服务端 requireAdmin 也会 trim，这里对齐，
@@ -47,7 +90,7 @@ async function tryToken(t) {
         authed.value = true;
         brainReady.value = s.brainReady;
         netInfo.value = s.net;
-        loadTheme();
+        loadAppearance();
         loadPetName();
     } catch (e) {
         if (e.authFailed) {
@@ -67,20 +110,75 @@ function logout() {
     clearToken();
     authed.value = false;
     tokenInput.value = "";
+    navOpen.value = false;
 }
 
-/** 套用外观主题：在 <html> 上打 data-theme，配色由 style.css 里的四套变量接管。 */
-function applyTheme(name) {
-    if (name) document.documentElement.setAttribute("data-theme", name);
+function systemPrefersDark() {
+    return typeof window !== "undefined" && window.matchMedia
+        ? window.matchMedia("(prefers-color-scheme: dark)").matches
+        : false;
 }
 
-/** 主题 + 备注名都从 pet-client.config.json 读（桌宠版改了这边同步显示）。 */
-async function loadTheme() {
+/**
+ * 把外观打到 <html> 上，配色和明暗由 style.css 接管。
+ *   data-theme  配色（极光玻璃 / 樱粉 / 薄荷嫩芽 / 薰衣草晨雾）
+ *   data-mode   明暗（light / dark）。mode=auto 时按系统偏好现算 ——
+ *               存的是用户选的「意图」，显示的是算出来的结果。
+ */
+function applyToDom(theme, mode) {
+    if (theme) document.documentElement.setAttribute("data-theme", theme);
+    const pref = mode || "light";
+    const effective = pref === "auto" ? (systemPrefersDark() ? "dark" : "light") : pref;
+    document.documentElement.setAttribute("data-mode", effective);
+    isDark.value = effective === "dark";
+}
+
+/** 顶栏一键切换深浅：从「跟随系统」切走时，落定成当前的反面（auto → 手动）。 */
+async function toggleDark() {
+    const next = isDark.value ? "light" : "dark";
+    applyAppearance(null, next);
     try {
-        const r = await api.getTheme();
-        if (r?.theme) applyTheme(r.theme);
+        await api.saveAppearance({ mode: next });
+    } catch {
+        /* 存不下也先让界面变了，下次进来会回到上次存的值 */
+    }
+}
+
+/** 记录当前外观（写缓存是为了下次进页面先按它上色，不等服务端返回）。 */
+function applyAppearance(theme, mode) {
+    if (theme) appearance.value = { ...appearance.value, theme };
+    if (mode) appearance.value = { ...appearance.value, mode };
+    applyToDom(appearance.value.theme, appearance.value.mode);
+    try {
+        localStorage.setItem(APPEARANCE_CACHE, JSON.stringify(appearance.value));
+    } catch {
+        /* 隐私模式下写不了就算了，只是少一层防闪 */
+    }
+}
+
+let darkQuery = null;
+function onSystemSchemeChange() {
+    // 只有「跟随系统」才需要实时跟着变；手动选了浅/深的别去覆盖
+    if (appearance.value.mode === "auto") applyAppearance(null, null);
+}
+
+/**
+ * 控制台外观读的是核心版自己的 data/console-appearance.json —— 与桌宠版不互通。
+ * 备注名那边仍然共享（见 loadPetName）。
+ */
+async function loadAppearance() {
+    try {
+        const r = await api.getAppearance();
+        if (r?.theme || r?.mode) {
+            applyAppearance(r.theme || "aurora-glass", r.mode || "light");
+        }
     } catch {
         /* 读不到就用默认配色 */
+    }
+    // 跟随系统：注册一次监听，之后系统切深色这边立刻跟上（不刷新页面）
+    if (window.matchMedia && !darkQuery) {
+        darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+        darkQuery.addEventListener?.("change", onSystemSchemeChange);
     }
 }
 
@@ -102,6 +200,9 @@ function flashSaved(msg) {
 }
 
 onMounted(() => {
+    // 先把缓存的外观打上再谈别的：口令门那一步还没鉴权，服务端那份拿不到，
+    // 深色用户不该为此先挨一帧白屏。
+    applyToDom(appearance.value.theme, appearance.value.mode);
     const saved = getToken();
     if (saved) tryToken(saved);
 });
@@ -112,6 +213,7 @@ onMounted(() => {
     <!-- 口令门 -->
     <div v-if="!authed" class="gate">
       <div class="gate-card">
+        <span class="gate-mark">✦</span>
         <h1>kirari 控制台</h1>
         <p class="hint">输入服务端 .env 里设置的管理口令</p>
         <input
@@ -127,9 +229,53 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 主界面：左导航 + 右内容（与桌宠版设置窗口同构） -->
+    <!-- 主界面：顶栏 +（侧栏 + 内容），SnowLuma 式骨架 -->
     <template v-else>
-      <div class="layout">
+      <header class="topbar">
+        <button
+          class="tb-burger"
+          :aria-expanded="navOpen"
+          aria-label="打开导航菜单"
+          @click="navOpen = !navOpen"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        <div class="crumb">
+          <strong>{{ crumbMain }}</strong>
+          <span v-if="crumbSub" class="crumb-sub">· {{ crumbSub }}</span>
+        </div>
+        <div class="tb-right">
+          <span class="pill" :class="brainReady ? 'ok' : 'bad'">
+            <span class="dot" :class="brainReady ? 'ok' : 'bad'" />
+            {{ brainReady ? "大脑已就绪" : "还没配大脑" }}
+          </span>
+          <button
+            class="tb-icon"
+            :title="isDark ? '切换成浅色' : '切换成深色'"
+            :aria-label="isDark ? '切换成浅色' : '切换成深色'"
+            @click="toggleDark"
+          >
+            <svg v-if="isDark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />
+            </svg>
+          </button>
+          <button class="tb-icon" title="退出登录" aria-label="退出登录" @click="logout">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H15" />
+              <path d="M10 8l-4 4 4 4M6 12h10" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="layout" :class="{ 'nav-open': navOpen }">
+        <div class="scrim" @click="navOpen = false" />
         <aside class="sidebar">
           <div class="side-brand">
             <span class="side-avatar">✦</span>
@@ -139,10 +285,7 @@ onMounted(() => {
             </div>
           </div>
           <SettingsNav v-model:page="page" v-model:settings="settingsPage" />
-          <div class="side-foot">
-            <span class="dot" :class="brainReady ? 'ok' : 'bad'" />
-            {{ brainReady ? "大脑已就绪" : "还没配大脑" }}
-          </div>
+          <div class="side-foot">聊天记录与桌宠版互通</div>
         </aside>
 
         <main class="content">
@@ -150,8 +293,8 @@ onMounted(() => {
           <template v-else>
             <AppearanceSettings
               v-if="settingsPage === 'appearance'"
-              @saved="flashSaved('主题已切换')"
-              @theme-change="applyTheme"
+              @saved="flashSaved('外观已切换')"
+              @appearance-change="applyAppearance"
             />
             <GeneralSettings
               v-if="settingsPage === 'general'"

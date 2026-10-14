@@ -4,6 +4,34 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>kirari 控制台</title>
+    <!-- 图标用相对路径：控制台有 / 和 /console/ 两个入口（同一份产物），
+         写死 /favicon.ico 从 /console/ 进来会 404。 -->
+    <link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <!-- 移动端浏览器地址栏着色，跟随明暗模式（与控制台的深色模式呼应） -->
+    <meta name="theme-color" content="#0ea5e9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
+    <script>
+      // 首屏防闪：主 JS 还没加载时先把上次的外观打到 <html> 上。
+      // 不然深色用户每次刷新都要先白一帧（口令门那一步还没鉴权，
+      // 服务端那份配置要等进去之后才拿得到）。真正的配置由 App.vue 拉取覆盖。
+      (function () {
+        try {
+          var c = JSON.parse(localStorage.getItem("kirari-console-appearance") || "null");
+          var mode = (c && c.mode) || "light";
+          if (mode === "auto") {
+            mode =
+              window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          }
+          document.documentElement.setAttribute("data-theme", (c && c.theme) || "aurora-glass");
+          document.documentElement.setAttribute("data-mode", mode);
+        } catch (e) {
+          /* 缓存坏了就用默认浅色，不挡住进页面 */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

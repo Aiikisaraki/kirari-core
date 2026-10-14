@@ -5,7 +5,10 @@
 // 两层安全闸门（默认全关，绝不无差别骚扰群聊）：
 //   1. 群消息回复触发方式：off（不回群消息）/ mention（被 @ 才回）/ all（全回）
 //   2. 群范围：whitelist（只回白名单群）/ blacklist（除了黑名单都回）
-import { ref, onMounted } from "vue";
+//
+// 主人绑定（与桌宠版同一功能）：把某个 QQ 号设为「主人」后，该账号发来的消息
+// 会并进主对话（和控制台、桌宠版共用同一段聊天记录），不再是独立的机器人会话。
+import { ref, onMounted, onUnmounted } from "vue";
 import { api } from "../../api.js";
 
 const emit = defineEmits(["saved"]);
@@ -43,6 +46,7 @@ function defaultConfig() {
     return {
         wsUrl: "",
         token: "",
+        protocol: "onebot11",
         groupReplyMode: "off",
         groupFilter: "whitelist",
         groupAllowlist: [],
@@ -117,7 +121,38 @@ async function remove(a) {
     }
 }
 
-onMounted(load);
+// 设为主人：该账号之后发来的消息并进主对话（和控制台/桌宠版共用同一段记录）
+async function setOwner(a) {
+    try {
+        await api.setBotOwner(a.id, a._ownerKey || "");
+        notice.value = "已设好主人，之后这个账号的消息会并进主对话";
+        await load();
+        emit("saved");
+    } catch (e) {
+        errorMsg.value = e.authFailed ? "口令不对，请重新进入" : e.message || "设置失败";
+    }
+}
+
+async function clearOwner(a) {
+    try {
+        await api.setBotOwner(a.id, "");
+        notice.value = "已取消主人";
+        await load();
+        emit("saved");
+    } catch (e) {
+        errorMsg.value = e.authFailed ? "口令不对，请重新进入" : e.message || "取消失败";
+    }
+}
+
+// 连接状态、新出现的账号每隔几秒自动刷新（桌宠版是主进程推送，控制台用轮询等效）
+let statusTimer = null;
+onMounted(() => {
+    load();
+    statusTimer = setInterval(load, 5000);
+});
+onUnmounted(() => {
+    if (statusTimer) clearInterval(statusTimer);
+});
 </script>
 
 <template>
@@ -148,6 +183,24 @@ onMounted(load);
         </div>
         <div class="list-desc dim">{{ a.config?.wsUrl || "（没填地址）" }}</div>
         <div v-if="a.lastError" class="list-desc error">{{ a.lastError }}</div>
+
+        <!-- 主人绑定：被设为 owner 的账号，消息并进主对话（与桌宠版同一功能） -->
+        <div class="owner-row">
+          <template v-if="a.ownerAccount">
+            <span class="pill ok">主人：{{ a.ownerAccount }}</span>
+            <button class="mini" @click="clearOwner(a)">取消主人</button>
+          </template>
+          <template v-else>
+            <select v-model="a._ownerKey" class="owner-select">
+              <option value="">设为某账号为主人…</option>
+              <option v-for="acc in a.knownAccounts || []" :key="acc" :value="acc">{{ acc }}</option>
+            </select>
+            <button class="mini primary" :disabled="!a._ownerKey" @click="setOwner(a)">设为主人</button>
+          </template>
+        </div>
+        <p v-if="!(a.knownAccounts || []).length" class="list-desc dim">
+          连接后收到消息，这里才会出现可设为主人的账号。
+        </p>
       </div>
       <div class="list-ops">
         <button class="mini" @click="startEdit(a)">编辑</button>
@@ -214,3 +267,17 @@ onMounted(load);
     <button v-else class="ghost add-btn" @click="startAdd">＋ 添加一个</button>
   </section>
 </template>
+
+<style scoped>
+/* 主人绑定行：与列表项其它控件同一节奏，select 继承 .card select 全局样式 */
+.owner-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+.owner-select {
+    min-width: 160px;
+}
+</style>
