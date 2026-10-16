@@ -5,7 +5,7 @@
 // 所以桌宠里聊过的内容，控制台打开就能看到，反过来也一样。
 // 以前这里是每次开页面现生成一个 `console-<uuid>`，还从不读历史，
 // 表现就是「明明聊过，界面永远是空的」。
-import { ref, nextTick, onMounted } from "vue";
+import { ref, nextTick, onMounted, onUnmounted } from "vue";
 import { api } from "../api.js";
 
 const props = defineProps({ petName: { type: String, default: "Kirari" } });
@@ -44,29 +44,56 @@ function splitContent(content) {
     return { text, images };
 }
 
+/** 库里的原始记录 → 界面用的消息对象。loadHistory / refreshHistory 共用。 */
+function mapItems(items) {
+    return (items || [])
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => {
+            const { text, images } = splitContent(m.content);
+            return {
+                role: m.role === "assistant" ? "pet" : "me",
+                text,
+                // 库里的 images 字段是额外的附图（桌宠版存进来的），合并展示
+                images: [...images, ...(Array.isArray(m.images) ? m.images : [])],
+            };
+        });
+}
+
 async function loadHistory() {
     loadingHistory.value = true;
     try {
         const s = await api.getSession();
         sessionId.value = s.sessionId || "";
         const r = await api.getHistory(sessionId.value, 200);
-        messages.value = (r.items || [])
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => {
-                const { text, images } = splitContent(m.content);
-                return {
-                    role: m.role === "assistant" ? "pet" : "me",
-                    text,
-                    // 库里的 images 字段是额外的附图（桌宠版存进来的），合并展示
-                    images: [...images, ...(Array.isArray(m.images) ? m.images : [])],
-                };
-            });
+        messages.value = mapItems(r.items);
         scrollBottom();
     } catch (e) {
         // 历史读不出来不该挡住发消息，提示一下就行
         errorMsg.value = e.message || "聊天记录读取失败";
     } finally {
         loadingHistory.value = false;
+    }
+}
+
+/**
+ * 定时拉一次历史：QQ 那边发来的消息（主人并进主对话的那些）不用手动刷新就能看到。
+ *
+ * 两条约束：
+ *   · 正在发送/流式生成时跳过 —— 否则会把正在流入的那条冲掉；
+ *   · 用户往上翻看历史时不抢滚动条，只有本来就在底部才自动跟到底。
+ */
+async function refreshHistory() {
+    if (sending.value || streamingText.value || !sessionId.value) return;
+    try {
+        const r = await api.getHistory(sessionId.value, 200);
+        const next = mapItems(r.items);
+        if (JSON.stringify(next) === JSON.stringify(messages.value)) return;
+        const el = listEl.value;
+        const atBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        messages.value = next;
+        if (atBottom) scrollBottom();
+    } catch {
+        /* 轮询失败静默，下一次再来 */
     }
 }
 
@@ -159,7 +186,18 @@ async function clearAll() {
     }
 }
 
-onMounted(loadHistory);
+let pollTimer = null;
+
+onMounted(async () => {
+    await loadHistory();
+    // 5 秒一次：QQ 端来的新消息能自己冒出来，不用手动刷新页面
+    pollTimer = setInterval(refreshHistory, 5000);
+});
+
+onUnmounted(() => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+});
 </script>
 
 <template>
