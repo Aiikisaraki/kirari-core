@@ -857,13 +857,17 @@ function setupConsoleRoutes(app) {
      * 对应桌宠版 IPC adapter:set-owner，配置键同名、同一份 pet-client.config.json。
      * 走 botManager.setOwner：写盘 + 实时同步到运行中的适配器（不用重启即生效）。
      */
-    app.post("/api/bot/:id/owner", (req, res) => {
+    app.post("/api/bot/:id/owner", async (req, res) => {
         if (!requireAdmin(req, res)) return;
         const account = String((req.body || {}).account || "").trim();
         try {
-            const ownerAccount = botManager.setOwner(req.params.id, account);
-            console.log(`[console] 机器人适配器主人已${account ? `设为 ${account}` : "取消"} id=${req.params.id}`);
-            return res.json({ ok: true, ownerAccount });
+            // setOwner 会顺带把该账号此前以客人身份攒下的私聊记录并进主对话
+            const { ownerAccount, moved } = await botManager.setOwner(req.params.id, account);
+            console.log(
+                `[console] 机器人适配器主人已${account ? `设为 ${account}` : "取消"} id=${req.params.id}` +
+                    (moved > 0 ? `（并入 ${moved} 条旧记录）` : ""),
+            );
+            return res.json({ ok: true, ownerAccount, moved });
         } catch (e) {
             return res.status(404).json({ message: e?.message || "设置失败" });
         }

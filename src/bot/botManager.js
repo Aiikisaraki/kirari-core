@@ -174,11 +174,46 @@ function applyConfig() {
 }
 
 /**
+ * 把某账号**设为主人之前**攒下的私聊记录并进主对话。
+ *
+ * 为什么必须有这一步：主人只能从 knownAccounts 里挑，而 knownAccounts 要「对方先发过
+ * 消息」才有 —— 也就是说用户一定先以客人身份聊过一段，那段记录落在
+ * `bot-<适配器>-private:<QQ>` 里。而 bot- 前缀被 localSession 的排除名单挡着，
+ * 永远不会被收口并进主对话。只改路由的话，老记录就永远丢在客人会话里了。
+ *
+ * 只并**私聊**（1:1 对话，搬过去最自然）；群里那段是多方上下文，不往主对话里掺。
+ *
+ * @returns {Promise<number>} 实际搬过去多少条
+ */
+async function mergeOwnerHistory(adapterId, accountKey) {
+    const legacy = `bot-${adapterId}-private:${accountKey}`;
+    try {
+        const all = (await sessionManager.listSessions()) || [];
+        if (!all.includes(legacy)) return 0;
+        const localId = await localSession.ensureLocalSessionId({ quiet: true });
+        if (legacy === localId) return 0;
+        const moved = (await sessionManager.mergeSessions([legacy], localId)) || 0;
+        if (moved > 0) {
+            console.log(`[bot] 已把主人 ${accountKey} 此前 ${moved} 条私聊记录并进主对话`);
+        }
+        return moved;
+    } catch (e) {
+        console.warn('[bot] 合并主人旧记录失败（不影响新消息）:', e?.message || e);
+        return 0;
+    }
+}
+
+/**
  * 设置某账号为主人：之后该账号的消息并入「本机会话」（与桌宠/控制台共用同一段主对话）。
  * accountKey 为空表示取消主人。写盘 + 实时同步到运行中的实例（与桌宠版 setOwner 同语义：
  * 改的是路由决策，不重连适配器）。
+ *
+ * 顺带把该账号此前以客人身份攒下的私聊记录并进主对话（见 mergeOwnerHistory）。
+ * 取消主人不反向拆回 —— 已经并进主对话的记录不会再拆出去。
+ *
+ * @returns {Promise<{ ownerAccount: string|null, moved: number }>}
  */
-function setOwner(adapterId, accountKey) {
+async function setOwner(adapterId, accountKey) {
     const adapters = readAdapters();
     const c = adapters.find((a) => a.id === adapterId);
     if (!c) throw new Error('适配器不存在');
@@ -187,7 +222,8 @@ function setOwner(adapterId, accountKey) {
     const inst = running.get(adapterId);
     if (inst) inst.setOwner(c.ownerAccount);
     console.log(`[bot] 适配器 ${adapterId} 主人已${c.ownerAccount ? `设为 ${c.ownerAccount}` : '取消'}`);
-    return c.ownerAccount;
+    const moved = c.ownerAccount ? await mergeOwnerHistory(adapterId, c.ownerAccount) : 0;
+    return { ownerAccount: c.ownerAccount, moved };
 }
 
 /** 服务启动时调用一次（顺带把核心版早期的 adapter.json 迁进桌宠版那份配置）。 */

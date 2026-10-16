@@ -124,8 +124,12 @@ async function remove(a) {
 // 设为主人：该账号之后发来的消息并进主对话（和控制台/桌宠版共用同一段记录）
 async function setOwner(a) {
     try {
-        await api.setBotOwner(a.id, a._ownerKey || "");
-        notice.value = "已设好主人，之后这个账号的消息会并进主对话";
+        const r = await api.setBotOwner(a.id, a._ownerKey || "");
+        const moved = r?.moved || 0;
+        notice.value =
+            moved > 0
+                ? `已设好主人，还把之前聊过的 ${moved} 条记录并进了主对话`
+                : "已设好主人，之后这个账号的消息会并进主对话";
         await load();
         emit("saved");
     } catch (e) {
