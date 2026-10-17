@@ -19,7 +19,7 @@ services:
       # 需要 Compose 2.17+ / BuildKit；老版本见 deploy/README.md 的替代做法。
       additional_contexts:
         kirari_net: ../../kirari-net
-    image: kirari-core:0.8.0
+    image: kirari-core:0.8.1
     container_name: kirari-core
     restart: unless-stopped # 崩溃自动重启，等价于 systemd 的 Restart=always
 

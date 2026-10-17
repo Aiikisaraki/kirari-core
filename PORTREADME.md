@@ -1,6 +1,6 @@
 # Kirari Core 接口合约
 
-> 当前实现版本：`0.8.0`
+> 当前实现版本：`0.8.1`
 > 通信方式：WebSocket 为主，REST 为辅
 > 数据格式：JSON
 
@@ -143,7 +143,7 @@ ws://127.0.0.1:9089/ws?token=<builtin-token>
 {
     "status": "ok",
     "message": "虚拟桌宠服务运行正常",
-    "version": "0.8.0",
+    "version": "0.8.1",
     "uptime": 123
 }
 ```
@@ -158,7 +158,7 @@ ws://127.0.0.1:9089/ws?token=<builtin-token>
     "max_message_length": 200,
     "supports_tts": false,
     "mode": "fallback",
-    "version": "0.8.0"
+    "version": "0.8.1"
 }
 ```
 

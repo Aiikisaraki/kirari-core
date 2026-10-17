@@ -1,7 +1,7 @@
 {
   "name": "kirari-console",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "description": "kirari-core 的网页控制台：聊天页 + 设置页。构建产物由服务端 express.static 托管。",
   "scripts": {

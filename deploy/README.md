@@ -25,7 +25,7 @@ npm start
 
 ```bash
 curl http://127.0.0.1:9089/health
-# {"status":"ok","message":"虚拟桌宠服务运行正常","version":"0.8.0",...}
+# {"status":"ok","message":"虚拟桌宠服务运行正常","version":"0.8.1",...}
 ```
 
 起得来再往下走。起不来的常见原因见 [常见问题](#常见问题)。
@@ -143,7 +143,7 @@ docker compose -f deploy/docker-compose.yml logs -f
 ```bash
 docker buildx build \
   --build-context kirari_net=../kirari-net \
-  -f deploy/Dockerfile -t kirari-core:0.8.0 ..
+  -f deploy/Dockerfile -t kirari-core:0.8.1 ..
 ```
 
 **安全提醒**：服务器上建议把端口绑定改成 `127.0.0.1`（在 `.env` 里设 `BIND_ADDR=127.0.0.1`），

@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-Kirari Core 是 Kirari 的智能机器人助手本体，当前版本 `0.8.0`。它负责对话、会话记忆、
+Kirari Core 是 Kirari 的智能机器人助手本体，当前版本 `0.8.1`。它负责对话、会话记忆、
 知识库、模型配置、工具调用（MCP 与技能）、机器人平台接入（OneBot）和 WebSocket 实时通信；
 只有桌面窗口、动画、点穿、换肤属于 `kirari-desktop`。
 
