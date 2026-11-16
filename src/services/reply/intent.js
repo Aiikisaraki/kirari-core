@@ -5,6 +5,9 @@
 //   搜索（direct=false）    → 后端调工具 → 结果注入 system prompt，由 LLM 总结
 
 const { mergeTools, runTool, getFrontendToolNames, geocode } = require('../../tools');
+// 阶段 D：preflight 快路径也走统一 dispatch（统一超时 + 截断），scope 用固定 local。
+const capabilities = require('../../capabilities/registry');
+const PREFLIGHT_SCOPE = capabilities.scopeKey('local', 'preflight');
 const locationSvc = require('../locationService');
 const sessionManager = require('../../session/sessionManager');
 const { GREETING_MESSAGE } = require('./promptBuilder');
@@ -110,10 +113,11 @@ async function runDirectToolsByIntents(intents, userid, clientIp, searchCtx, sco
       } else if (intentName === 'get_current_time') {
         args = { timezone: loc.timezone || null };
       }
-      const result = await runTool(intentName, args, {
+      const dispatched = await capabilities.dispatch(PREFLIGHT_SCOPE, intentName, args, {
         searchKey: searchCtx.searchKey,
         searchEndpoint: searchCtx.searchEndpoint,
       });
+      const result = dispatched.content;
       results.push(result);
     } catch (e) {
       results.push(`${intentName} error: ${e instanceof Error ? e.message : String(e)}`);
@@ -315,7 +319,8 @@ async function preflightTools(content, searchCtx = {}, clientIp = '', sessionId 
         }
         // 无 location 也无坐标（极端兜底失败）时时间查询走服务器本地时间降级
       }
-      const result = await runTool(intent.name, args, { searchKey: searchCtx.searchKey, searchEndpoint: searchCtx.searchEndpoint });
+      const dispatched = await capabilities.dispatch(PREFLIGHT_SCOPE, intent.name, args, { searchKey: searchCtx.searchKey, searchEndpoint: searchCtx.searchEndpoint });
+      const result = dispatched.content;
       console.log(`[aiReply] preflight ${intent.name} OK: ${result.slice(0, 80)}`);
       results.push(result);
     } catch (e) {

@@ -459,11 +459,8 @@ function normalizeTool(t) {
   };
 }
 
-function mergeTools() {
-  const back = TOOL_DEFS.map(normalizeTool).filter(Boolean);
-  const front = frontendToolRegistry.map(normalizeTool).filter(Boolean);
-  return [...back, ...front];
-}
+// 阶段 D：删除旧的 mergeTools 死代码（第一个定义，只合并 back+front 从不被调用）。
+// 生效的 mergeTools 在文件末尾（含 local 工具），保留供 buildTools 兼容。
 
 // ── 本地托管工具（核心版自己的 MCP / 技能工具）──────────────────────
 // 与上面的 frontend__ 托管工具互补：那类是「后端只持 schema、执行要回调解
@@ -518,6 +515,11 @@ function mergeTools() {
 module.exports = {
   TOOL_DEFS,
   runTool,
+  // 阶段 D：底层工具函数导出给 capabilities/builtin/*.js 委托执行。
+  getCurrentTime,
+  getWeather,
+  webSearch,
+  generateImage,
   geocode,
   geocodeCandidates,
   setFrontendTools,

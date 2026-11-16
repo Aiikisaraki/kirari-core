@@ -75,7 +75,11 @@ async function refreshTools({ immediate = false } = {}) {
             }
         }
 
-        const total = setLocalTools([...mcpTools, ...skillTools]);
+        // 阶段 D：MCP/技能工具注册进统一能力注册表（scope=global，所有客户端可见），
+        // 走统一的超时 + 截断流水线。保留 setLocalTools 兼容旧调用方（preflight 直调）。
+        setLocalTools([...mcpTools, ...skillTools]);
+        const capabilities = require('../capabilities/registry');
+        const total = capabilities.registerGlobal([...mcpTools, ...skillTools]);
         console.log(`[mcp] 已注册本地工具 ${total} 个（MCP ${mcpTools.length} + 技能 ${skillTools.length}）`);
         return { total, mcp: mcpTools.length, skill: skillTools.length };
     };

@@ -4,6 +4,7 @@ const sessionManager = require("../session/sessionManager");
 const fallbackService = require("../services/fallbackService");
 const aiReplyService = require("../services/aiReplyService");
 const toolsModule = require("../tools");
+const capabilities = require("../capabilities/registry");
 const { createConnectionAiContext, cleanupConnectionAiContext } = require("../ai/connectionAiContext");
 const { createFrontendToolBridge } = require("../tools/bridge");
 const { normalizeImages } = require("./imageNormalizer");
@@ -63,6 +64,9 @@ function setupWebSocket(server, options = {}) {
         const clientIp = (req && req.socket && req.socket.remoteAddress) || '';
         console.log(`✅ 已认证客户端连接 (uid=${authUid})`);
         ws.authUid = authUid; // 供 invalidateUserContexts 按 uid 精确匹配连接
+        // 阶段 D：每条连接一个唯一能力作用域，frontend 工具按此隔离，互不覆盖。
+        ws.__capScopeId = `ws-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+        ws.__capScope = capabilities.scopeKey('ws', ws.__capScopeId);
         ws.aiContext = null;
         // 前端托管工具（MCP server / skill 提供的工具）schema 列表，由前端通过
         // register_tools 消息上报；后端把它们并入模型的 function-calling 工具集。
@@ -85,9 +89,14 @@ function setupWebSocket(server, options = {}) {
                 ws.frontendTools = list.filter(
                     (t) => t && t.function && typeof t.function.name === 'string',
                 );
-                // 合并进全局注册表，供 aiReplyService 构建工具集时使用。
-                toolsModule.setFrontendTools(ws.frontendTools);
-                console.log(`🔧 前端注册工具 ${ws.frontendTools.length} 个: ${ws.frontendTools.map((t) => t.function.name).join(', ')}`);
+                // 阶段 D：按连接作用域注册 schema + 执行器（替换旧 setFrontendTools 全局覆盖，
+                // 那是多客户端串线的根因）。执行器是 (name, args) → 该连接的 toolBridge。
+                capabilities.registerConnection(
+                    ws.__capScope,
+                    ws.frontendTools,
+                    (toolName, args) => ws.toolBridge.invokeFrontendTool(toolName, args),
+                );
+                console.log(`🔧 前端注册工具 ${ws.frontendTools.length} 个 (scope=${ws.__capScope}): ${ws.frontendTools.map((t) => t.function.name).join(', ')}`);
                 return;
             }
             if (message.type === 'register_skills') {
@@ -225,6 +234,7 @@ function setupWebSocket(server, options = {}) {
                     persona: ws.persona || null,
                     kbContext,
                     ws,
+                    scopeId: ws.__capScope, // 阶段 D：能力作用域，前端工具按连接隔离
                 });
                 console.log(`[WS-PERF] ← getReply 返回 @${Date.now()} 总耗时 ${Date.now()-_wsT0}ms`);
                 } catch (error) {
@@ -297,6 +307,8 @@ function setupWebSocket(server, options = {}) {
             if (ws.toolBridge) {
                 ws.toolBridge.clearPending('WS 连接关闭，前端工具调用中断');
             }
+            // 阶段 D：注销该连接的能力作用域，避免工具/schema 残留到后续连接。
+            if (ws.__capScope) capabilities.unregisterConnection(ws.__capScope);
             cleanupConnectionAiContext(ws.aiContext);
             ws.aiContext = null;
             console.log("🔌 客户端断开连接");
@@ -306,6 +318,7 @@ function setupWebSocket(server, options = {}) {
             if (ws.toolBridge) {
                 ws.toolBridge.clearPending('WS 连接出错，前端工具调用中断');
             }
+            if (ws.__capScope) capabilities.unregisterConnection(ws.__capScope);
             cleanupConnectionAiContext(ws.aiContext);
             ws.aiContext = null;
         });

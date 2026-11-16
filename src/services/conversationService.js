@@ -12,11 +12,13 @@ const {
   LOCATION_ASK_MESSAGE,
   stripNonConversational,
 } = require('./reply/promptBuilder');
-const { preflightTools, buildTools, detectCorrectionIntent } = require('./reply/intent');
+const { preflightTools, detectCorrectionIntent } = require('./reply/intent');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
 const dailyBriefing = require('./dailyBriefingService');
 const knowledgeRetrieval = require('../knowledge/retrievalService');
-const { runTool, getFrontendToolNames } = require('../tools');
+// 阶段 D：统一能力注册表（scope 隔离 + 超时 + 截断），SKILL.md 目录摘要。
+const capabilities = require('../capabilities/registry');
+const skillMd = require('../skills/skillMd');
 const sessionManager = require('../session/sessionManager');
 // 事件流：把「模型看到的东西」收归 append-only 事件流。
 // 共享包只放纯逻辑，db 连接由 eventRecorder/eventStore 注入（不碰 native 模块）。
@@ -66,7 +68,10 @@ async function salvageAsText(aiContext, messages, onDelta = null, profile = null
   }
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, onDelta = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, scopeId = null, onDelta = null } = {}) {
+  // 阶段 D：能力作用域。优先用调用方显式传入；否则从 ws 派生（WS 链路）；再否则回退到 uid。
+  // 这是 frontend 工具与技能执行器的隔离维度——A 连接注册的工具不会出现在 B 连接。
+  const capScope = scopeId || (ws ? capabilities.scopeKey('ws', ws.__capScopeId || String(ws.authUid || 'anon')) : capabilities.scopeKey('local', String(aiContext.userid ?? 'anon')));
   // onDelta：正文逐字回调（上层做流式展示）。约定：
   //   onDelta(text)  —— 追加一段正文增量
   //   onDelta(null)  —— 前面流出的内容作废（工具轮碎片/换收尾路径），调用方应清空
@@ -243,12 +248,14 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     const taskResume = taskRuntime.resumeBlock(sessionId);
     if (taskResume) systemPrompt += taskResume;
 
-    // 注入前端托管的 skill 行为模板（提示词形态能力）：把启用中的 skill 指令追加到 system，
-    // 让模型在回复时遵循这些「技能设定」。
+    // 阶段 D：SKILL.md 渐进披露——system 里只放「name: description」目录摘要，
+    // 模型需要时用 load_skill(name) 才加载正文（装十个技能也不再全量吃 token）。
+    const skillCatalog = skillMd.catalogBlock();
+    // 前端 WS 链路 register_skills 上报的行为模板仍保留（与 SKILL.md 是两类能力）。
     const skillBlock =
-      Array.isArray(skillPrompts) && skillPrompts.length
+      (Array.isArray(skillPrompts) && skillPrompts.length
         ? '\n\n# 已启用的技能（请遵循以下设定）\n' + skillPrompts.join('\n\n')
-        : '';
+        : '') + skillCatalog;
 
     // 历史消息 content 可能是字符串，或 [text, image_url] 多模态数组（JSON 序列化存储）；
     // 统一归一化为 OpenAI 消息格式，确保发送过的图片在上下文里不被丢弃。
@@ -309,7 +316,9 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     ];
 
     const correctionMode = detectCorrectionIntent(text);
-    const allTools = taskRuntime.withTaskTools(buildTools());
+    // 阶段 D：工具集统一从能力注册表按 scope 列举（内置 + 全局 MCP/技能 + 本连接前端工具）。
+    // builtin 能力文件已含 plan / schedule_reminder / load_skill，不再额外 withTaskTools。
+    const allTools = capabilities.listTools(capScope);
     // 纠正场景【放开搜索、但有限度】：主人指出"你说错了/她没说过"时，宠物的正确反应是
     // 去搜索找出真正的正确答案，而不是盲信自己或硬抗。所以 web_search 仍可用。
     // 但搜索必须"有限度"——用 webSearchCap 兜底：纠正模式限 2 次、普通模式限 4 次，
@@ -565,24 +574,23 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
               degenerateLoop = true;
             }
           }
-          // 前端托管工具（MCP/skill 提供，总是以 frontend__ 前缀标识）：
-          // 后端无法本地执行，必须通过 WS 回调解 Electron 主进程执行后取回结果。
-          const frontendToolNames = aiContext.invokeFrontendTool ? getFrontendToolNames() : null;
-          if (frontendToolNames && frontendToolNames.has(toolName)) {
-            result = await aiContext.invokeFrontendTool(toolName, args);
-          } else {
-            result = await runTool(toolName, args, {
-              searchKey: aiContext.searchKey,
-              searchEndpoint: aiContext.searchEndpoint,
-              searchProvider: aiContext.searchProvider,
-              openai: aiContext.openai,
-              // 阶段 C 任务工具所需上下文（非任务工具会忽略这些字段）。
-              sessionId,
-              turnId,
-              uid: aiContext.userid,
-              origin: 'core',
-            });
-          }
+          // 阶段 D：统一 dispatch 流水线——按 scope 选执行器（内置/全局/本连接前端）
+          // + 统一超时 + 统一截断。前端执行器由 socketServer 按连接注册进注册表，
+          // 不再用全局 getFrontendToolNames 判断归属（那正是串线根因）。
+          const dispatched = await capabilities.dispatch(capScope, toolName, args, {
+            searchKey: aiContext.searchKey,
+            searchEndpoint: aiContext.searchEndpoint,
+            searchProvider: aiContext.searchProvider,
+            openai: aiContext.openai,
+            sessionId,
+            turnId,
+            uid: aiContext.userid,
+            origin: 'core',
+            // 前端工具执行器：若本 scope 注册了 connection 能力，registry 会用它；
+            // 这里兜底挂上（兼容尚未按新接口注册的旧调用方）。
+            invokeFrontendTool: aiContext.invokeFrontendTool,
+          });
+          result = dispatched.content;
         } catch (e) {
           result = `error: ${e instanceof Error ? e.message : String(e)}`;
         }
@@ -591,7 +599,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
           tool_call_id: tc.id,
           content: String(result),
         });
-        // 保持无截断（阶段 A 行为等价）：统一截断放到 D 阶段的 dispatch 流水线。
+        // 阶段 D：截断已在 capabilities.dispatch 流水线里统一执行。
         recorder.enqueue({
           origin: 'core',
           sessionId,
