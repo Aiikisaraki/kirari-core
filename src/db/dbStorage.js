@@ -562,10 +562,31 @@ module.exports = {
       .run(userid, date, briefText, JSON.stringify(topics));
     return true;
   },
-  // 列出所有已配置 Token 的用户（用于定时预生成简报）
+  // 列出所有需要预生成简报的用户。
+  // 阶段 E 修正：过去只查 api_tokens，控制台账户（模型套存在 model_profiles /
+  // settings_kv，且 uid=1 靠 config.json）根本没有 token 行，于是永远漏跑。
+  // 现在以 users 为主表并集 api_tokens：注册过就有资格，配置不全由生成时跳过。
   getAllUserids: async () => {
-    const rows = db.prepare("SELECT userid FROM api_tokens WHERE token IS NOT NULL AND token != ''").all();
+    const rows = db
+      .prepare(
+        `SELECT uid AS userid FROM users
+         UNION
+         SELECT userid FROM api_tokens WHERE token IS NOT NULL AND token != ''
+         ORDER BY userid`,
+      )
+      .all();
     return rows.map((r) => r.userid);
+  },
+
+  // ---- 阶段 E：settings_kv 抢占式锁（两端共库，保证同档简报只跑一次）----
+  /** 尝试写入一个键；返回 true=抢到（此前不存在），false=已被占用。 */
+  claimSetting: (key, value = '1') => {
+    const info = db.prepare('INSERT OR IGNORE INTO settings_kv (key, value) VALUES (?, ?)').run(key, value);
+    return info.changes > 0;
+  },
+  /** 释放抢占（生成失败时回滚锁，让另一进程/下一轮还能补）。 */
+  releaseSetting: (key) => {
+    db.prepare('DELETE FROM settings_kv WHERE key = ?').run(key);
   },
 
   // ---- 阶段 C：tasks / scheduled_jobs 行级 CRUD ----

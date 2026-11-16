@@ -33,6 +33,11 @@ async function scanOnce() {
             emotion: 'happy',
           });
           console.log(`[sched] 提醒 job=${job.jobId} uid=${job.uid} 送达 ${delivered} 个连接`);
+        } else if (job.kind === 'daily_brief') {
+          // 阶段 E：简报任务（每 uid × 08/16/22 三档）。生成成功与否都顺延，
+          // 失败时 briefSchedule 内部已回滚档位锁并 warn，不会形成 15s 热循环。
+          const briefSchedule = require('./briefSchedule');
+          await briefSchedule.fireDailyBrief(job, now);
         }
         // 没有在线连接也算触发过：once 任务不能因为「没连上」而永远 pending 反复推。
         const next = fireJob(job, now);

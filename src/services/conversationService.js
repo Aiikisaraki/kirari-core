@@ -582,6 +582,9 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             searchEndpoint: aiContext.searchEndpoint,
             searchProvider: aiContext.searchProvider,
             openai: aiContext.openai,
+            // 阶段 E：子 agent 要用同一套模型与同一 scope 的工具集。
+            model: aiContext.model,
+            capScope,
             sessionId,
             turnId,
             uid: aiContext.userid,

@@ -19,11 +19,9 @@ const { setupHttpRoutes } = require("./api/routes");
 const { setupWebSocket } = require("./websocket/socketServer");
 const { findAvailablePort } = require("./utils/portHelper");
 const corsMiddleware = require("./middleware/cors");
-const dbStorage = require("./db/dbStorage");
-const { createConnectionAiContext, cleanupConnectionAiContext } = require("./ai/connectionAiContext");
 const contextPool = require("./ai/contextPool");
-const dailyBriefing = require("./services/dailyBriefingService");
 const scheduledJobsService = require("./services/scheduledJobsService");
+const briefSchedule = require("./services/briefSchedule");
 const netBootstrap = require("./net/bootstrap");
 // 智能机器人助手本体（用户拍板：MCP + 机器人都搬进核心版）：
 //   工具具体系启动时连 MCP server、注册本地工具；
@@ -33,43 +31,10 @@ const botManager = require("./bot/botManager");
 const consoleSite = require("./web/consoleSite");
 const { dataDir, dataDirSource, dataDirDetail } = require("./dataDir");
 
-// 每天 08:00 / 16:00 / 22:00 各主动刷新一次当日简报（"每日记忆"）。
-// 三次均强制重新采集（generateDailyBrief），覆盖当天同一份简报，使注入的【今日背景】
-// 始终为最新快照；对话时的 ensureDailyBrief 仍作兜底（三档全错过时首句也有简报）。
-const BRIEF_SLOTS = [8, 16, 22]; // 每天这几个整点刷新
-
-function msToNextSlot(now) {
-  const candidates = BRIEF_SLOTS.map((h) => {
-    const d = new Date(now);
-    d.setHours(h, 0, 0, 0);
-    if (d <= now) d.setDate(d.getDate() + 1);
-    return d;
-  });
-  candidates.sort((a, b) => a - b);
-  return candidates[0] - now;
-}
-
-function scheduleDailyBriefing() {
-  const now = new Date();
-  const ms = msToNextSlot(now);
-  setTimeout(async () => {
-    try {
-      const userids = await dbStorage.getAllUserids();
-      for (const uid of userids) {
-        try {
-          const ctx = await createConnectionAiContext(uid);
-          await dailyBriefing.generateDailyBrief(ctx);
-          cleanupConnectionAiContext(ctx);
-        } catch (e) {
-          console.warn(`[dailyBrief-sched] 用户 ${uid} 简报生成失败:`, e?.message || e);
-        }
-      }
-    } catch (e) {
-      console.warn("[dailyBrief-sched] 定时生成失败:", e?.message || e);
-    }
-    scheduleDailyBriefing();
-  }, ms);
-}
+// 每日简报（"每日记忆"）的调度已迁到落库任务表（阶段 E）：
+// 每个 uid × 08/16/22 三档一条 daily_brief job，由 scheduledJobsService 统一扫描。
+// 好处：重启不丢触发、停机跨档只补跑一次、生成过程留事件、三档不再靠进程内递归。
+// 对话时的 ensureDailyBrief 仍是兜底（三档全错过时的首句也能拿到简报）。
 
 // 绑定网卡（HOST）：
 // - 默认 0.0.0.0（监听所有网卡），适合分离式 / 远程部署，开箱即用。
@@ -152,8 +117,12 @@ function createServer() {
     }
 
     startServer();
-    scheduleDailyBriefing();
-    // 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢）。
+    // 阶段 E：先把简报任务补齐（每 uid × 三档），再启动统一调度器。
+    // 已过期但仍是 pending 的旧 job 会被调度器在启动首扫时补跑一次。
+    void briefSchedule
+      .ensureJobs()
+      .catch((e) => console.warn("[brief] 初始化简报任务失败:", e?.message || e));
+    // 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢；阶段 E 起也负责简报）。
     scheduledJobsService.start();
     // 回收闲置的 AI 上下文（HTTP 接入没有连接概念，靠空闲超时释放）。
     // 定时器已 unref，不会阻止进程退出。

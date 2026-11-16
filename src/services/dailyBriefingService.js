@@ -3,6 +3,12 @@
 // 用 LLM 压缩为 3-5 条要点存入 daily_memory，对话时注入 system prompt 让回答更有底。
 const dbStorage = require('../db/dbStorage');
 const { runTool } = require('../tools');
+// 阶段 E：简报的模型调用统一走内核的流式封装（与主对话同一条路径），
+// 并落一条 request 事件——简报了过去是「直连 SDK 的黑盒」，现在可追溯。
+const { streamChatCompletion } = require('./reply/streaming');
+const { recorder } = require('../session/eventRecorder');
+
+const BRIEF_MAX_TOKENS = 600;
 
 // 本地日期 YYYY-MM-DD（避免 toISOString 的 UTC 偏移导致跨日错位）
 function todayStr() {
@@ -83,11 +89,26 @@ async function generateDailyBrief(aiContext) {
     `原始信息：\n${raw}`;
 
   let brief = '';
+  const messages = [{ role: 'user', content: prompt }];
   try {
-    const completion = await aiContext.openai.chat.completions.create({
+    // 落 request 事件（与主对话同形）：sessionId 用独立的 brief:<uid>，
+    // 不占用户会话，也不会被聊天 UI 当成一轮对话展示。
+    recorder.enqueue({
+      origin: 'core',
+      sessionId: `brief:${userid}`,
+      turnId: `brief-${date}-${Date.now().toString(36)}`,
+      type: 'request',
+      payload: {
+        round: 0,
+        callSite: 'daily_brief',
+        params: { model: aiContext.model, max_tokens: BRIEF_MAX_TOKENS },
+        messages: JSON.parse(JSON.stringify(messages)),
+      },
+    });
+    const completion = await streamChatCompletion(aiContext.openai, {
       model: aiContext.model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 600,
+      messages,
+      max_tokens: BRIEF_MAX_TOKENS,
       temperature: 0.3,
     });
     brief = (completion.choices?.[0]?.message?.content || '').trim();
