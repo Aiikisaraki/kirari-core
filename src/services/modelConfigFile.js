@@ -22,6 +22,9 @@
 //    缺任何一个 = 未配置，绝不静默套默认地址。
 const fs = require('fs');
 const path = require('path');
+// AgentProfile：默认常量只在首次迁移写盘用一次；运行期读取一律走 parseAgentProfile 严格校验，
+// 缺字段 / 坏值显式报错，绝不静默回退默认值（共享包红线，两端同构）。
+const { parseAgentProfile, DEFAULT_AGENT_PROFILE } = require('kirari-agent');
 
 // 数据目录统一走 src/dataDir.js（自动探测桌宠版 userData，见该文件注释）。
 const { dataDir: DATA_DIR } = require('../dataDir');
@@ -39,6 +42,7 @@ const KNOWN_TOP_KEYS = [
     'models',
     'activeModelId',
     'seeded',
+    'agentProfile',
 ];
 
 let initialized = false;
@@ -165,12 +169,31 @@ function ensureInitialized() {
     if (raw === null) {
         // 首次：从 SQLite 迁移（没有可迁的就是一份空配置）
         const uid = Number(process.env.BOT_MODEL_UID || 1);
-        writeRaw(migrateFromDb(uid));
+        const migrated = migrateFromDb(uid);
+        // 阶段 B：首次建配置时把默认 agentProfile 落盘一次。
+        // 只在此处用默认值——之后运行期缺字段一律报错，不再兜底（用户拍板）。
+        if (!migrated.agentProfile) migrated.agentProfile = { ...DEFAULT_AGENT_PROFILE };
+        writeRaw(migrated);
         console.log(`[model-config] 已创建 ${CONFIG_FILE}`);
     } else {
         config = raw;
+        // 存量配置升级：老用户 config.json 没有 agentProfile，补写一份默认值落盘（一次）。
+        // 走 writeRaw → mergePreservingUnknown，手写的未知字段原样保留。
+        if (!raw.agentProfile) {
+            writeRaw({ ...raw, agentProfile: { ...DEFAULT_AGENT_PROFILE } });
+            console.log('[model-config] 已为存量配置补写默认 agentProfile');
+        }
     }
     startWatch();
+}
+
+/**
+ * 运行期读取 agentProfile。配置不存在 / 字段缺失 / 值非法都显式抛错，不回退默认值。
+ * fs.watch 已把文件内容同步进内存 config，改完配置立即生效。
+ */
+function getAgentProfile() {
+    ensureInitialized();
+    return parseAgentProfile(config.agentProfile, 'config.json.agentProfile');
 }
 
 // ── 对外：多模型 CRUD（与桌面端同语义）────────────────────────────
@@ -379,6 +402,7 @@ module.exports = {
     getSearch,
     onConfigChanged,
     startWatch,
+    getAgentProfile,
     getConfigPath: () => CONFIG_FILE,
     getDataDir: () => DATA_DIR,
 };

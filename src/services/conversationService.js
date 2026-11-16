@@ -20,16 +20,23 @@ const { runTool, getFrontendToolNames } = require('../tools');
 const sessionManager = require('../session/sessionManager');
 // 事件流：把「模型看到的东西」收归 append-only 事件流。
 // 共享包只放纯逻辑，db 连接由 eventRecorder/eventStore 注入（不碰 native 模块）。
-const { createInjector, buildSystemContent } = require('kirari-agent');
+const {
+  createInjector,
+  buildSystemContent,
+  AgentRunner,
+  webSearchCapFor,
+  computeLoopTimeout,
+} = require('kirari-agent');
 const { recorder, beginTurn, endTurn, newTurnId } = require('../session/eventRecorder');
+const modelConfigFile = require('./modelConfigFile');
 
-// 工具循环最多轮数（也用于超时预算计算）。
-const MAX_ROUNDS = 5;
+// 工具循环参数已从硬编码常量收进 config.json 的 agentProfile（阶段 B）。
+// 数值逐字等于改造前的 MAX_ROUNDS=5 / max_tokens=1500 / 超时 60s+15s*轮-封顶120s。
 
 // 兜底收尾：当模型在工具循环末尾只吐了 reasoning / 流被截断而 content 为空时，
 // 用 tools:undefined + 一句强指令强制模型直接产出最终文本（不再调用任何工具）。
 // 自带独立 AbortController（不与主请求共享），避免主超时已触发导致救回也一并被掐断。
-async function salvageAsText(aiContext, messages, onDelta = null) {
+async function salvageAsText(aiContext, messages, onDelta = null, profile = null) {
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), 60000);
   try {
@@ -48,7 +55,7 @@ async function salvageAsText(aiContext, messages, onDelta = null) {
     }
     const completion = await streamChatCompletion(
       aiContext.openai,
-      { model: aiContext.model, messages: patched, max_tokens: 1500 },
+      { model: aiContext.model, messages: patched, max_tokens: profile ? profile.maxTokens : 1500 },
       { signal: ctrl.signal, onDelta },
     );
     return completion.choices?.[0]?.message?.content || '';
@@ -82,11 +89,15 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     throw new Error('消息不能为空');
   }
 
+  // 本轮工具循环参数从 config.json 的 agentProfile 读（改配置立即生效，fs.watch 同步）。
+  // 缺配置 / 坏值显式报错，不回退默认值——让配错可见。
+  const profile = modelConfigFile.getAgentProfile();
+
   const controller = new AbortController();
-  // 超时随"可能触发的工具轮次"放大：短消息默认仅 45s，但带工具的多轮 loop 很容易超过。
-  // 基线取消息复杂度超时，但至少 60s；再为每轮工具预留 15s，封顶 120s。
+  // 超时随"可能触发的工具轮次"放大：基线取消息复杂度超时，
+  // 再按 profile 的轮数 × 每轮预留放大，封顶由 profile 决定（数值见 computeLoopTimeout）。
   const baseTimeout = getRequestTimeout(text || '[用户发送了图片]');
-  const timeout = Math.min(120000, Math.max(baseTimeout, 60000) + MAX_ROUNDS * 15000);
+  const timeout = computeLoopTimeout(profile, baseTimeout);
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   aiContext.activeRequests.add(controller);
   const _t0 = Date.now();
@@ -103,7 +114,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       sessionId,
       turnId,
       type: 'turn_start',
-      payload: { userid: aiContext.userid, model: aiContext.model, maxRounds: MAX_ROUNDS, sessionId },
+      payload: { userid: aiContext.userid, model: aiContext.model, maxRounds: profile.maxRounds, sessionId },
     });
     // ── Step 1: 意图预检 ──
     //   时间/天气等 direct 工具 → 取回数据后交给 LLM 润色（见下方 direct 路径）
@@ -299,10 +310,13 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 达到上限即强制后续轮次纯文本收尾，避免无节制搜索把后端拖垮（原 45s 超时崩因）。
     const tools = allTools;
     const toolChoice = tools.length ? 'auto' : undefined;
-    const webSearchCap = correctionMode ? 2 : 4;
+    const webSearchCap = webSearchCapFor(profile, correctionMode);
     if (correctionMode) console.log(`[aiReply] 纠正意图命中，允许有限搜索（webSearchCap=${webSearchCap}）后强制收尾`);
 
-    // tool-call loop：模型可多次调用工具，直到产出最终文本
+    // tool-call loop：模型可多次调用工具，直到产出最终文本。
+    // 循环控制（何时收尾 / 熔断上限）交给共享包 AgentRunner，停止条件语义化：
+    // 有工具欠账就继续，maxRounds 只作熔断上限。IO 仍在本回调内（模型/工具/事件），
+    // runner 只做纯逻辑决策，符合「包只放纯逻辑」红线。
     let toolsDisabled = false; // 部分端点/模型（如 ModelScope 推理接口）不支持 function calling，
                                // 请求带 tools 会直接 400；此时降级为纯文本重试一次。
     // 退化循环保护：模型反复用近重复 query 调 web_search（搜了又搜、自证式空转）时，
@@ -310,7 +324,8 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     let degenerateLoop = false;
     const searchQueryHistory = [];
     let webSearchCount = 0; // 本轮 web_search 调用计数，配合 webSearchCap 实现"有限度"搜索
-    for (let round = 0; round < MAX_ROUNDS; round++) {
+    const runner = new AgentRunner(profile);
+    const finalReply = await runner.run(async (round, r) => {
       let completion;
       try {
         // 退化循环触发后不再带工具（useTools=false），模型只能直接文本作答。
@@ -328,7 +343,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             params: {
               model: aiContext.model,
               useTools: !!useTools,
-              max_tokens: 1500,
+              max_tokens: profile.maxTokens,
               tool_choice: useTools ? toolChoice : undefined,
               toolsCount: useTools ? tools.length : 0,
             },
@@ -342,7 +357,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             messages,
             tools: useTools ? tools : undefined,
             tool_choice: useTools ? toolChoice : undefined,
-            max_tokens: 1500,
+            max_tokens: profile.maxTokens,
           },
           { signal: controller.signal, onDelta },
         );
@@ -358,7 +373,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             {
               model: aiContext.model,
               messages,
-              max_tokens: 1500,
+              max_tokens: profile.maxTokens,
             },
             { signal: controller.signal, onDelta },
           );
@@ -368,22 +383,25 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
           // 实在救不回才冒泡到外层通用兜底，避免直接崩成"还在学习中"。
           console.warn(`[aiReply] 主请求超时/中断（${errMsg}），尝试纯文本收尾`);
           try {
-            const salvaged = await salvageAsText(aiContext, messages, onDelta);
+            const salvaged = await salvageAsText(aiContext, messages, onDelta, profile);
             if (salvaged && salvaged.trim()) {
               const { speech, emotion } = parseModelReply(salvaged.trim());
               if (speech) {
                 console.log('[aiReply] 超时后纯文本收尾成功');
                 return {
-                  speech,
-                  emotion,
-                  images: [],
-                  action: 'idle',
-                  mood: 'curious',
-                  source: 'model_salvaged',
-                  model: aiContext.model,
-                  usage: null,
-                  sessionId,
-                  userid: aiContext.userid,
+                  kind: 'final',
+                  value: {
+                    speech,
+                    emotion,
+                    images: [],
+                    action: 'idle',
+                    mood: 'curious',
+                    source: 'model_salvaged',
+                    model: aiContext.model,
+                    usage: null,
+                    sessionId,
+                    userid: aiContext.userid,
+                  },
                 };
               }
             }
@@ -441,22 +459,25 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             `[aiReply] round=${round} 内容为空，尝试强制纯文本收尾 model=${aiContext.model} reasoning_len=${completion._reasoningContent?.length || 0} chunks=${completion._chunkCount}`,
           );
           try {
-            const salvaged = await salvageAsText(aiContext, messages, onDelta);
+            const salvaged = await salvageAsText(aiContext, messages, onDelta, profile);
             if (salvaged && salvaged.trim()) {
               const { speech, emotion, images } = parseModelReply(salvaged.trim());
               if (speech) {
                 console.log('[aiReply] 纯文本收尾成功，救回回复');
                 return {
-                  speech,
-                  emotion,
-                  images: Array.isArray(images) ? images : [],
-                  action: 'idle',
-                  mood: 'curious',
-                  source: 'model_salvaged',
-                  model: completion.model,
-                  usage: completion.usage,
-                  sessionId,
-                  userid: aiContext.userid,
+                  kind: 'final',
+                  value: {
+                    speech,
+                    emotion,
+                    images: Array.isArray(images) ? images : [],
+                    action: 'idle',
+                    mood: 'curious',
+                    source: 'model_salvaged',
+                    model: completion.model,
+                    usage: completion.usage,
+                    sessionId,
+                    userid: aiContext.userid,
+                  },
                 };
               }
             }
@@ -468,16 +489,19 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         const { speech, emotion, images } = parseModelReply(rawContent);
         if (!speech) throw new Error('模型返回内容为空');
         return {
-          speech,
-          emotion,
-          images: Array.isArray(images) ? images : [],
-          action: 'idle',
-          mood: 'curious',
-          source: 'model',
-          model: completion.model,
-          usage: completion.usage,
-          sessionId,
-          userid: aiContext.userid,
+          kind: 'final',
+          value: {
+            speech,
+            emotion,
+            images: Array.isArray(images) ? images : [],
+            action: 'idle',
+            mood: 'curious',
+            source: 'model',
+            model: completion.model,
+            usage: completion.usage,
+            sessionId,
+            userid: aiContext.userid,
+          },
         };
       }
 
@@ -486,6 +510,10 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       if (onDelta) {
         try { onDelta(null); } catch {}
       }
+      // 领取本轮工具欠账：执行并回灌完毕后逐一 settle，账本清空才进下一轮。
+      // 这是阶段 C「任务欠账」的挂接点——届时外部任务 note 进来会让 turn 保持打开。
+      const toolCallIds = msg.tool_calls.map((tc) => tc.id);
+      r.note(toolCallIds);
       for (const tc of msg.tool_calls) {
         let result;
         try {
@@ -554,10 +582,14 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             isError: typeof result === 'string' && result.startsWith('error:'),
           },
         });
+        r.settle(tc.id); // 该工具结果已回灌，清偿欠账
       }
-    }
+      // 本轮工具全部回灌完毕、账本清空 → 欠账清零，请求 runner 进入下一轮。
+      return { kind: 'tools', toolCallIds };
+    });
 
-    throw new Error('工具调用轮次过多，未能生成最终回复');
+    // runner 在「无工具欠账」时才返回；跑满熔断上限会抛与原实现逐字一致的错误。
+    return finalReply;
   } finally {
     clearTimeout(timeoutId);
     aiContext.activeRequests.delete(controller);
