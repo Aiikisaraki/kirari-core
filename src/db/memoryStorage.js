@@ -3,7 +3,7 @@
 // 这样 sessionManager 换成哪个后端都不必改调用方。
 const sessionStore = new Map();
 
-/** 与 dbStorage 的 MAX_MESSAGES_PER_SESSION 一致：聊天记录真源化之后，10 条不够翻历史。 */
+/** 与 dbStorage 的 MAX_MESSAGES_PER_SESSION 一致：作为 UI 投影缓存，10 条不够翻历史。 */
 const MAX_MESSAGES_PER_SESSION = 500;
 
 module.exports = {
@@ -28,6 +28,19 @@ module.exports = {
 
   /** extras = { emotion?, images? }，桌宠版传入；核心版自己的调用方不传。 */
   saveMessage: async (sessionId, role, content, extras = null) => {
+    // 与 dbStorage 同口径：事件流旁路记录真源，原有内存逻辑一字不动。
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId,
+        turnId: currentTurnId(),
+        type: role === 'user' ? 'user_message' : 'assistant_message',
+        payload: { role, content, extras: extras || undefined },
+      });
+    } catch (e) {
+      console.warn('[events] 记录消息事件失败（已忽略）:', e?.message || e);
+    }
     const session = await module.exports.initSession(sessionId);
     session.push({
       role,
@@ -61,6 +74,19 @@ module.exports = {
 
   /** 清空指定会话（与 dbStorage 同语义）。 */
   clearSession: async (sessionId) => {
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId,
+        turnId: currentTurnId(),
+        type: 'session_cleared',
+        payload: { reason: 'clearSession' },
+      });
+      void recorder.flush();
+    } catch (e) {
+      console.warn('[events] 记录清空事件失败（已忽略）:', e?.message || e);
+    }
     sessionStore.delete(sessionId);
     return true;
   },
@@ -74,6 +100,19 @@ module.exports = {
       (s) => typeof s === 'string' && s && s !== intoSessionId,
     );
     if (!from.length) return 0;
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId: intoSessionId,
+        turnId: currentTurnId(),
+        type: 'messages_merged',
+        payload: { fromSessionIds: from, intoSessionId },
+      });
+      void recorder.flush();
+    } catch (e) {
+      console.warn('[events] 记录合并事件失败（已忽略）:', e?.message || e);
+    }
     const target = sessionStore.get(intoSessionId) || [];
     let moved = 0;
     for (const s of from) {

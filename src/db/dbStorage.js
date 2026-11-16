@@ -3,6 +3,9 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
+// 事件流 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
+// 保证同一份 pet_sessions.db 里的 session_events 不分叉。
+const { SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS } = require('kirari-agent');
 
 // 数据库目录：统一走 src/dataDir.js 解析（用户拍板：核心版自动接管桌宠版数据）。
 //   env PET_API_DATA_DIR  >  env KIRARI_DESKTOP_DATA_DIR  >  自动探测桌宠版 userData  >  包内 data
@@ -26,7 +29,7 @@ db.pragma('busy_timeout = 5000');
 /**
  * 单个会话保留的消息条数上限。
  *
- * 桌宠版与控制台现在共用这张表当聊天记录真源（用户拍板），所以这个值同时是
+ * 这张表现在是 UI 投影缓存（真源是 session_events 事件流），所以这个值同时是
  * 「界面能翻回多早」的界限。500 条足够日常使用又不至于让单文件无限膨胀；
  * 上下文窗口与此无关（由 getRecentMessages 按需取最近几条）。
  */
@@ -153,6 +156,17 @@ db.exec(`
   );
 `);
 
+// ── 事件流真源 ─────────────────────────────────────────────────────
+// DDL 文本来自 kirari-agent，两端各自执行同一份；补列清单也由包导出，
+// 未来加列只改包里一处，两端不会分叉。
+// seq 用 AUTOINCREMENT：两个进程直写同一个文件，应用层各自维护 seq 必然冲突，
+// SQLite 文件锁分配的 rowid 才是全局唯一且单调的因果序。
+db.exec(SESSION_EVENTS_DDL);
+const eventColumns = db.prepare('PRAGMA table_info(session_events)').all().map((c) => c.name);
+for (const col of SESSION_EVENTS_COLUMNS) {
+  if (!eventColumns.includes(col.name)) db.exec(`ALTER TABLE session_events ADD COLUMN ${col.ddl}`);
+}
+
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
 // 单独部署服务端时，真实用户注册从 100000 起，绝不占用保留区间。
 const BUILTIN_UID = 1;
@@ -216,6 +230,8 @@ if (!messageColumns.includes('emotion')) db.exec('ALTER TABLE messages ADD COLUM
 if (!messageColumns.includes('images_json')) db.exec('ALTER TABLE messages ADD COLUMN images_json TEXT');
 
 module.exports = {
+  /** 事件流适配器复用同一个连接，不在外部另开 DB。 */
+  getDb: () => db,
   initSession: async (sessionId) => module.exports.getSession(sessionId),
   getSession: async (sessionId) =>
     db.prepare('SELECT role, content, emotion, images_json FROM messages WHERE session_id = ? ORDER BY id ASC').all(sessionId)
@@ -228,6 +244,22 @@ module.exports = {
    * 桌宠版传入后，核心版读历史时能原样带回（两端记录完全互通的关键）。
    */
   saveMessage: async (sessionId, role, content, extras = null) => {
+    // 事件流旁路记录真源；原有 SQL 一字不动。
+    // 惰性 require 是为了避开 dbStorage ↔ eventRecorder ↔ eventStore 的顶层循环：
+    // 只有真正存消息时才加载记录器，那时 dbStorage 已经导出完毕。
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId,
+        turnId: currentTurnId(),
+        type: role === 'user' ? 'user_message' : 'assistant_message',
+        payload: { role, content, extras: extras || undefined },
+      });
+    } catch (e) {
+      // 红线：事件写失败只警告，绝不冒泡到用户、绝不打断存消息。
+      console.warn('[events] 记录消息事件失败（已忽略）:', e?.message || e);
+    }
     // content 可能是纯文本字符串，或 [text, image_url] 多模态数组；后者序列化为 JSON 存储。
     const c = typeof content === 'string' ? content : JSON.stringify(content);
     const emotion = extras && typeof extras.emotion === 'string' && extras.emotion.trim() ? extras.emotion.trim() : null;
@@ -236,13 +268,30 @@ module.exports = {
       : null;
     db.prepare('INSERT INTO messages (session_id, role, content, emotion, images_json) VALUES (?, ?, ?, ?, ?)')
       .run(sessionId, role, c, emotion, imagesJson);
-    // 保留上限：早期是 10 条（只够当上下文窗口用）。现在这张表同时是
-    // **桌宠版与控制台的聊天记录真源**（用户拍板：聊天记录统一用数据库），
+    // 保留上限：早期是 10 条（只够当上下文窗口用）。现在这张表是 UI 投影缓存，
     // 10 条等于看不了历史，所以提高到 500；上下文仍由 getRecentMessages 按需取，
     // 两边不耦合 —— 存得久不等于喂给模型的多。
     const ids = db.prepare('SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC').all(sessionId);
     if (ids.length > MAX_MESSAGES_PER_SESSION) {
       db.prepare(`DELETE FROM messages WHERE id IN (${ids.slice(MAX_MESSAGES_PER_SESSION).map((row) => row.id).join(',')})`).run();
+      // 只记审计信息：这里拿到的是 messages 表的 id，与事件流 seq 不是同一个编号空间，
+      // 不能拿来给投影器当 keptFromSeq 用。投影器自己按 UI_HISTORY_LIMIT 收口。
+      try {
+        const { recorder, currentTurnId } = require('../session/eventRecorder');
+        recorder.enqueue({
+          origin: 'core',
+          sessionId,
+          turnId: currentTurnId(),
+          type: 'messages_pruned',
+          payload: {
+            droppedCount: ids.length - MAX_MESSAGES_PER_SESSION,
+            remaining: MAX_MESSAGES_PER_SESSION,
+          },
+        });
+        void recorder.flush();
+      } catch (e) {
+        console.warn('[events] 记录裁剪事件失败（已忽略）:', e?.message || e);
+      }
     }
     return module.exports.getSession(sessionId);
   },
@@ -270,6 +319,20 @@ module.exports = {
   },
   /** 清空指定会话（用户点了「清空聊天记录」）。两端共用同一个会话，清的是同一份。 */
   clearSession: async (sessionId) => {
+    // 事件流不删自身，只记 tombstone：投影据此截断 UI 缓存，历史仍可审计。
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId,
+        turnId: currentTurnId(),
+        type: 'session_cleared',
+        payload: { reason: 'clearSession' },
+      });
+      void recorder.flush();
+    } catch (e) {
+      console.warn('[events] 记录清空事件失败（已忽略）:', e?.message || e);
+    }
     db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
     return true;
   },
@@ -292,6 +355,20 @@ module.exports = {
     const from = (Array.isArray(fromSessionIds) ? fromSessionIds : [])
       .filter((s) => typeof s === 'string' && s && s !== intoSessionId);
     if (!from.length) return 0;
+    // 事件里 session_id 保持原值不改，靠 messages_merged 表达「归属变了」。
+    try {
+      const { recorder, currentTurnId } = require('../session/eventRecorder');
+      recorder.enqueue({
+        origin: 'core',
+        sessionId: intoSessionId,
+        turnId: currentTurnId(),
+        type: 'messages_merged',
+        payload: { fromSessionIds: from, intoSessionId },
+      });
+      void recorder.flush();
+    } catch (e) {
+      console.warn('[events] 记录合并事件失败（已忽略）:', e?.message || e);
+    }
     const stmt = db.prepare('UPDATE messages SET session_id = ? WHERE session_id = ?');
     let moved = 0;
     for (const s of from) moved += stmt.run(intoSessionId, s).changes;

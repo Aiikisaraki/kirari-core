@@ -934,6 +934,54 @@ function setupConsoleRoutes(app) {
         }
     });
 
+    // ---- 事件流轨迹（只读，排障用）----
+    // session_events 是唯一真源，/api/history 读的是 UI 投影缓存。
+    // 这里只按 seq 升序返回事件，不写库、不触发对话、不改 messages。
+    // ⚠️ 响应可能包含发给模型的完整上下文与工具结果，含敏感信息，不要对公网开放。
+    app.get("/api/trajectory", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const sessionId =
+            typeof req.query.sessionId === "string" && req.query.sessionId
+                ? req.query.sessionId
+                : await localSession.ensureLocalSessionId();
+        const parseSeq = (v) => {
+            const n = Number(v);
+            return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+        };
+        const types =
+            typeof req.query.types === "string" && req.query.types.trim()
+                ? req.query.types.split(",").map((s) => s.trim()).filter(Boolean)
+                : undefined;
+        const query = {
+            sessionId,
+            fromSeq: parseSeq(req.query.fromSeq),
+            toSeq: parseSeq(req.query.toSeq),
+            turnId: typeof req.query.turnId === "string" && req.query.turnId ? req.query.turnId : undefined,
+            types,
+            limit: Math.min(2000, Math.max(1, Number(req.query.limit) || 500)),
+        };
+        try {
+            const { eventStore } = require("../session/eventStore");
+            const { deriveModelMessages, SCHEMA_VERSION } = require("kirari-agent");
+            const events = eventStore.query(query);
+            const body = {
+                sessionId,
+                schemaVersion: SCHEMA_VERSION,
+                events,
+                nextSeq: events.length ? events[events.length - 1].seq : eventStore.maxSeq(sessionId),
+                truncated: events.length >= query.limit,
+            };
+            // 验收用：直接给出「当时发给模型的 messages」，不必调用方自己投影。
+            if (req.query.project === "modelMessages") {
+                body.modelMessages = deriveModelMessages(events, { turnId: query.turnId });
+            }
+            return res.json(body);
+        } catch (e) {
+            console.warn("[console] 读取事件轨迹失败:", e?.message || e);
+            return res.status(500).json({ message: "读取事件轨迹失败" });
+        }
+    });
+
     // ---- 数据目录信息（设置页显示「读的是哪份数据」，排错用）----
     app.get("/api/data-info", (req, res) => {
         if (!requireAdmin(req, res)) return;

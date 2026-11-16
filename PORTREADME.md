@@ -16,6 +16,7 @@
 | REST | `/api/profile` | GET / PUT | 读取或更新模型配置档案 |
 | REST | `/`（首页；`/console/` 也可用） | GET | Web 控制台页面，口令在页面里输入 |
 | REST | `/api/*`、`/api/net/*` | 多种 | 控制台接口（需 `X-Admin-Token`，见[控制台接口](#web-控制台接口)） |
+| REST | `/api/trajectory` | GET | 会话事件轨迹（只读、需 `X-Admin-Token`，见[事件流与投影](#事件流与投影)） |
 | REST | `/v1/chat` | POST | 机器人接入主入口（`Authorization: Bearer <BOT_TOKEN>`） |
 | REST | `/api-client/register` | POST | legacy 客户端注册 |
 | REST | `/api-token/*` | 多种 | legacy Token 管理接口 |
@@ -206,10 +207,73 @@ ws://127.0.0.1:9089/ws?token=<builtin-token>
 | `/api/kb` `/api/kb/:id` `/api/kb/probe` | 多种 | 私人知识库条目与远程源（`knowledge.json`） |
 | `/api/bot` `/api/bot/:id` | 多种 | 机器人适配器（`pet-client.config.json` 的 `adapters[]`，与桌宠版同一份） |
 | `/api/session` | GET | 本机会话 id（`local-session.json`，与桌宠版同一段对话） |
-| `/api/history` | GET / DELETE | 聊天记录（默认本机会话）；DELETE = 清空，两端一起清 |
+| `/api/history` | GET / DELETE | 聊天记录（默认本机会话）；DELETE = 清空，两端一起清。读的是 **UI 投影缓存**，真源见[事件流与投影](#事件流与投影)；清空在事件流里记为 `session_cleared`，历史仍可审计 |
+| `/api/trajectory` | GET | 会话事件轨迹（只读，append-only `session_events`）。支持 `sessionId` / `fromSeq` / `toSeq` / `turnId` / `types` / `limit` / `project=modelMessages` |
 | `/api/chat` | POST | 聊天，SSE 事件流：`start` / `delta` / `done` / `error` |
 | `/api/net/*` | 多种 | 组网全量入口（state / addresses / host / pairing / join / resume / stop / sync …） |
 | `/api/data-info` | GET | 排错用：当前数据目录与各配置文件路径 |
+
+## 事件流与投影
+
+> 阶段 A（可观测）：把「模型看到的东西」收归一条 append-only 事件流。
+> 完成标志是杀掉进程重启后，能从 `session_events` 逐字重建出当时发给模型的 messages。
+
+### 语义
+
+- `session_events` 表是会话的**唯一真源**，只追加、不删不改。清空 / 合并 / 500 条裁剪
+  分别记为 `session_cleared` / `messages_merged` / `messages_pruned` tombstone 事件。
+- `messages` 表降级为 **UI 投影缓存**：表结构、`GET/DELETE /api/history` 与两端读历史
+  的代码完全不变，事件流旁路记录真源。阶段 A 不做「由投影回写 messages」，避免双写。
+- 核心版与桌宠版是**两个进程直写同一个 `pet_sessions.db`**：两端各自执行共享包
+  `kirari-agent` 导出的同一份 DDL，靠 `origin`（`core` / `desktop`）区分来源，
+  `seq INTEGER PRIMARY KEY AUTOINCREMENT` 由 SQLite 文件锁分配，是跨进程单调的因果序。
+  `UNIQUE(origin, event_id)` 保证批量 flush 重试幂等。
+- 事件写入是**旁路**：入内存队列、批量 flush、`user_message` 即时落库、每轮 `finally`
+  强制 flush；写失败只告警、队列保留待重试，绝不冒泡影响回复。不新增 `.env` 字段。
+
+### 事件类型
+
+`turn_start` / `turn_end`、`context_inject`（四段 system 注入，各自带来源与顺序）、
+`request`（调用模型前 messages 数组的逐字深拷贝，`callSite: "main"`）、
+`assistant_attempt` / `assistant_delta`、`tool_call` / `tool_result`、
+`user_message` / `assistant_message` / `external_message`、
+`session_cleared` / `messages_merged` / `messages_pruned` 等。
+新增类型只能追加，已有类型 payload 语义只读（靠 `schema_ver` 回放老事件）。
+
+### `GET /api/trajectory`
+
+复用控制台鉴权（`X-Admin-Token`），**只读**，不写库，也不改 `/api/history` 与 `POST /api/chat`。
+
+| 参数 | 说明 |
+| --- | --- |
+| `sessionId` | 缺省用本机会话 id |
+| `fromSeq` / `toSeq` | seq 区间（`fromSeq` 为开区间），用于增量消费 |
+| `turnId` | 只看某一轮 |
+| `types` | 逗号分隔的事件类型白名单 |
+| `limit` | 1–2000，缺省 500 |
+| `project=modelMessages` | 附带「当时发给模型的 messages」投影结果 |
+
+```bash
+curl -H "X-Admin-Token: <ADMIN_PASSWORD>" \
+  "http://127.0.0.1:9089/api/trajectory?types=request&project=modelMessages"
+```
+
+```json
+{
+    "sessionId": "desktop-main",
+    "schemaVersion": 1,
+    "events": [ { "seq": 12, "origin": "core", "type": "request", "payload": {} } ],
+    "nextSeq": 12,
+    "truncated": false,
+    "modelMessages": []
+}
+```
+
+`events` 按 seq 升序；`truncated` 为 true 时用 `nextSeq` 作为下一页 `fromSeq` 继续拉。
+`deriveModelMessages()` 只取最后一条 `callSite === "main"` 的 `request`，把
+`payload.messages` 直接还原 —— 这是「逐字重建」的权威路径，不是事后拼出来的。
+
+开关：`settings_kv.events_enabled`，值 `"0"` 关闭记录，缺省启用；读失败按启用处理。
 
 ## legacy 接口
 
@@ -254,5 +318,7 @@ wscat -c "ws://127.0.0.1:9089/ws?token=<builtin-token>"
 
 - `.env`、模型密钥、内置令牌、会话密钥、生产数据库和用户数据不得提交到仓库。
 - 独立部署建议使用 HTTPS/WSS、反向代理和访问控制，不要直接把管理接口暴露到公网。
+- `/api/trajectory` 会返回**完整模型输入**（system prompt、历史消息、工具结果、注入内容），
+  仅供本机排错与验收，**绝不对公网开放**；生产环境应额外限制来源 IP 或直接关闭该路由。
 - 不要把 `X-Builtin-Token` 用作公网服务的长期认证方案。
 - 第三方模型、天气、搜索和知识源服务有各自的费用、速率和使用限制。
