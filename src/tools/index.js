@@ -391,6 +391,25 @@ async function runTool(name, args = {}, ctx = {}) {
       return await webSearch(args, ctx);
     case 'generate_image':
       return await generateImage(args, ctx);
+    case 'plan':
+    case 'schedule_reminder': {
+      // 阶段 C：任务工具由 taskRuntime 执行（建任务/建提醒 + 落库 + 记事件）。
+      // 惰性 require 避开 tools ↔ taskRuntime ↔ session 的顶层循环依赖。
+      try {
+        const taskRuntime = require('../services/taskRuntime');
+        const ctxTask = {
+          sessionId: ctx.sessionId,
+          turnId: ctx.turnId,
+          uid: ctx.uid,
+          origin: ctx.origin || 'core',
+        };
+        return name === 'plan'
+          ? taskRuntime.handlePlan(args, ctxTask)
+          : taskRuntime.handleScheduleReminder(args, ctxTask);
+      } catch (e) {
+        return `error: 任务工具不可用——${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
     default:
       // 本地托管工具（核心版自己的 MCP / 技能工具）：查注册表就地执行
       if (localToolRegistry.has(name)) {

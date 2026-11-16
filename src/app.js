@@ -23,6 +23,7 @@ const dbStorage = require("./db/dbStorage");
 const { createConnectionAiContext, cleanupConnectionAiContext } = require("./ai/connectionAiContext");
 const contextPool = require("./ai/contextPool");
 const dailyBriefing = require("./services/dailyBriefingService");
+const scheduledJobsService = require("./services/scheduledJobsService");
 const netBootstrap = require("./net/bootstrap");
 // 智能机器人助手本体（用户拍板：MCP + 机器人都搬进核心版）：
 //   工具具体系启动时连 MCP server、注册本地工具；
@@ -152,6 +153,8 @@ function createServer() {
 
     startServer();
     scheduleDailyBriefing();
+    // 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢）。
+    scheduledJobsService.start();
     // 回收闲置的 AI 上下文（HTTP 接入没有连接概念，靠空闲超时释放）。
     // 定时器已 unref，不会阻止进程退出。
     contextPool.startIdleSweeper();
@@ -162,6 +165,7 @@ function createServer() {
         // 先退组网：主机退出后其他设备会自动转为独立工作（组网铁律：不留半死状态）
         netBootstrap.stop();
         botManager.stopAll();
+        scheduledJobsService.stop();
         contextPool.invalidateAll();
     };
     process.on("SIGINT", () => { shutdown(); process.exit(0); });

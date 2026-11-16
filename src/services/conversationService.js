@@ -29,6 +29,8 @@ const {
 } = require('kirari-agent');
 const { recorder, beginTurn, endTurn, newTurnId } = require('../session/eventRecorder');
 const modelConfigFile = require('./modelConfigFile');
+// 阶段 C 任务编排：plan / schedule_reminder 工具分派 + 未完成任务跨轮恢复。
+const taskRuntime = require('./taskRuntime');
 
 // 工具循环参数已从硬编码常量收进 config.json 的 agentProfile（阶段 B）。
 // 数值逐字等于改造前的 MAX_ROUNDS=5 / max_tokens=1500 / 超时 60s+15s*轮-封顶120s。
@@ -233,9 +235,13 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       console.warn('[aiReply] 知识库检索失败（已忽略）:', e?.message || e);
     }
 
-    const systemPrompt = preflight.injected
+    let systemPrompt = preflight.injected
       ? sys.withTools.replace('{{TOOL_RESULTS}}', preflight.injected.join('\n'))
       : sys.normal;
+    // 阶段 C：把该会话尚未完成的任务拼进 system.base，让「新消息进来先恢复未完成任务」
+    // 成立——进程重启后任务在库里，下一条消息自然恢复。注入段数不变（仍 4 段）。
+    const taskResume = taskRuntime.resumeBlock(sessionId);
+    if (taskResume) systemPrompt += taskResume;
 
     // 注入前端托管的 skill 行为模板（提示词形态能力）：把启用中的 skill 指令追加到 system，
     // 让模型在回复时遵循这些「技能设定」。
@@ -303,7 +309,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     ];
 
     const correctionMode = detectCorrectionIntent(text);
-    const allTools = buildTools();
+    const allTools = taskRuntime.withTaskTools(buildTools());
     // 纠正场景【放开搜索、但有限度】：主人指出"你说错了/她没说过"时，宠物的正确反应是
     // 去搜索找出真正的正确答案，而不是盲信自己或硬抗。所以 web_search 仍可用。
     // 但搜索必须"有限度"——用 webSearchCap 兜底：纠正模式限 2 次、普通模式限 4 次，
@@ -449,9 +455,21 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         });
       }
 
-      // 无工具调用 → 最终回复
+      // 无工具调用 → 模型想收尾
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         const rawContent = msg.content?.trim();
+        // 阶段 C：任务未完成时，纯文本收尾被拦截——text 步骤视为已完成先推进，
+        // 仍有未做步骤则注入 nudge、保持 turn 打开再转一轮（maxRounds 熔断兜底）。
+        if (taskRuntime.hasActiveTask(sessionId)) {
+          if (rawContent) taskRuntime.advancePendingStep(sessionId, 'text', null, rawContent.slice(0, 200));
+          if (taskRuntime.hasActiveTask(sessionId)) {
+            console.log('[aiReply] 任务未完成，拦截收尾并继续推进');
+            if (onDelta) { try { onDelta(null); } catch {} }
+            messages.push({ role: 'user', content: taskRuntime.pendingNudge(sessionId) });
+            return { kind: 'continue', reason: 'active task not finished' };
+          }
+          // 任务恰好在这轮全部完成 → 落到下方正常 final 收尾
+        }
         if (!rawContent) {
           // 流被截断（如超时 abort、reasoning 吃满 max_tokens）导致 content 为空：
           // 不再硬抛（会掉进"还在学习中"通用兜底），先强制一次"纯文本收尾"生成救回答案。
@@ -558,6 +576,11 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
               searchEndpoint: aiContext.searchEndpoint,
               searchProvider: aiContext.searchProvider,
               openai: aiContext.openai,
+              // 阶段 C 任务工具所需上下文（非任务工具会忽略这些字段）。
+              sessionId,
+              turnId,
+              uid: aiContext.userid,
+              origin: 'core',
             });
           }
         } catch (e) {
@@ -583,6 +606,12 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
           },
         });
         r.settle(tc.id); // 该工具结果已回灌，清偿欠账
+        // 阶段 C：工具成功后推进 active task 的对应 tool 步骤（plan/reminder 由
+        // taskRuntime 自身处理，这里对普通工具匹配 step.toolName）。
+        const isErr = typeof result === 'string' && result.startsWith('error:');
+        if (!isErr && !taskRuntime.isTaskTool(tc.function?.name)) {
+          taskRuntime.advancePendingStep(sessionId, 'tool', tc.function?.name, String(result).slice(0, 300));
+        }
       }
       // 本轮工具全部回灌完毕、账本清空 → 欠账清零，请求 runner 进入下一轮。
       return { kind: 'tools', toolCallIds };

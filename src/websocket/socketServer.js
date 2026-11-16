@@ -362,4 +362,30 @@ function requestKnowledgeFromFrontend(ws, query, timeout = 3000) {
     });
 }
 
-module.exports = { setupWebSocket, invalidateUserContexts, requestKnowledgeFromFrontend };
+// 阶段 C：向某 uid 的所有活跃连接主动推送一条提醒（定时任务到点触发）。
+// 不经过 getReply——提醒内容已在 scheduled_jobs.payload 里，直接以 pet_response 形状送达，
+// 桌宠端收到后按既有协议渲染。返回送达的连接数。
+function pushProactiveMessage(uid, message) {
+    if (!wss || !message) return 0;
+    let n = 0;
+    const payload = JSON.stringify({
+        type: "pet_response",
+        speech: String(message.speech || message.text || ''),
+        action: message.action || 'idle',
+        mood: message.mood || 'curious',
+        emotion: message.emotion || 'happy',
+        source: 'scheduled_reminder',
+        session_id: message.sessionId,
+        timestamp: Date.now(),
+    });
+    for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN && client.authUid === uid) {
+            try { client.send(payload); n++; } catch (e) {
+                console.warn('[ws] 主动提醒推送失败:', e?.message || e);
+            }
+        }
+    }
+    return n;
+}
+
+module.exports = { setupWebSocket, invalidateUserContexts, requestKnowledgeFromFrontend, pushProactiveMessage };

@@ -3,9 +3,13 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
-// 事件流 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
-// 保证同一份 pet_sessions.db 里的 session_events 不分叉。
-const { SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS } = require('kirari-agent');
+// 事件流 / 任务 / 定时任务的 schema 由平级共享包 kirari-agent 定义，两端各自执行同一份 DDL，
+// 保证同一份 pet_sessions.db 里的 session_events / tasks / scheduled_jobs 不分叉。
+const {
+  SESSION_EVENTS_DDL, SESSION_EVENTS_COLUMNS,
+  TASKS_DDL, TASKS_COLUMNS,
+  SCHEDULED_JOBS_DDL, SCHEDULED_JOBS_COLUMNS,
+} = require('kirari-agent');
 
 // 数据库目录：统一走 src/dataDir.js 解析（用户拍板：核心版自动接管桌宠版数据）。
 //   env PET_API_DATA_DIR  >  env KIRARI_DESKTOP_DATA_DIR  >  自动探测桌宠版 userData  >  包内 data
@@ -165,6 +169,19 @@ db.exec(SESSION_EVENTS_DDL);
 const eventColumns = db.prepare('PRAGMA table_info(session_events)').all().map((c) => c.name);
 for (const col of SESSION_EVENTS_COLUMNS) {
   if (!eventColumns.includes(col.name)) db.exec(`ALTER TABLE session_events ADD COLUMN ${col.ddl}`);
+}
+
+// ── 阶段 C：任务与定时任务表 ───────────────────────────────────────
+// 与事件表同构：DDL 来自共享包，PRAGMA 补列保证老库升级不丢数据。
+db.exec(TASKS_DDL);
+const taskColumns = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
+for (const col of TASKS_COLUMNS) {
+  if (!taskColumns.includes(col.name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col.ddl}`);
+}
+db.exec(SCHEDULED_JOBS_DDL);
+const jobColumns = db.prepare('PRAGMA table_info(scheduled_jobs)').all().map((c) => c.name);
+for (const col of SCHEDULED_JOBS_COLUMNS) {
+  if (!jobColumns.includes(col.name)) db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN ${col.ddl}`);
 }
 
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
@@ -550,6 +567,39 @@ module.exports = {
     const rows = db.prepare("SELECT userid FROM api_tokens WHERE token IS NOT NULL AND token != ''").all();
     return rows.map((r) => r.userid);
   },
+
+  // ---- 阶段 C：tasks / scheduled_jobs 行级 CRUD ----
+  // 对象 ↔ 行的转换放在 taskStore/jobStore 适配器里；这里只提供最小 SQL，
+  // 便于两端各自实现共享包定义的 TaskStore / JobStore 契约。
+  getTaskRow: (taskId) => db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) || null,
+  saveTaskRow: (row) => db.prepare(`
+    INSERT INTO tasks (task_id, session_id, turn_id, origin, uid, title, status, steps_json, current_step, created_at, updated_at, completed_at)
+    VALUES (@task_id, @session_id, @turn_id, @origin, @uid, @title, @status, @steps_json, @current_step, @created_at, @updated_at, @completed_at)
+    ON CONFLICT(task_id) DO UPDATE SET
+      session_id=excluded.session_id, turn_id=excluded.turn_id, title=excluded.title,
+      status=excluded.status, steps_json=excluded.steps_json, current_step=excluded.current_step,
+      updated_at=excluded.updated_at, completed_at=excluded.completed_at
+  `).run(row),
+  activeTaskRows: (sessionId) => db.prepare(
+    "SELECT * FROM tasks WHERE session_id = ? AND status IN ('pending','running') ORDER BY created_at ASC",
+  ).all(sessionId),
+  listTaskRows: (sessionId, limit) => db.prepare(
+    'SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC LIMIT ?',
+  ).all(sessionId, limit),
+  getJobRow: (jobId) => db.prepare('SELECT * FROM scheduled_jobs WHERE job_id = ?').get(jobId) || null,
+  saveJobRow: (row) => db.prepare(`
+    INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at)
+    VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at)
+    ON CONFLICT(job_id) DO UPDATE SET
+      title=excluded.title, payload=excluded.payload, due_at=excluded.due_at,
+      status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at
+  `).run(row),
+  dueJobRows: (now, limit) => db.prepare(
+    "SELECT * FROM scheduled_jobs WHERE status = 'pending' AND due_at <= ? ORDER BY due_at ASC LIMIT ?",
+  ).all(now, limit),
+  listJobRows: (sessionId, limit) => db.prepare(
+    'SELECT * FROM scheduled_jobs WHERE session_id = ? ORDER BY due_at DESC LIMIT ?',
+  ).all(sessionId, limit),
 
   // ---- 配置档案（复用 api_tokens 表，按 uid 存取）----
   // ⚠️ 字段约定：对外的形状与桌面端 config.json 一致（endpoint / key / keyMasked / hasKey /
