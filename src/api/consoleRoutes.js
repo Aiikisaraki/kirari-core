@@ -808,6 +808,12 @@ function setupConsoleRoutes(app) {
         if (type === "onebot" && !String(body.config?.wsUrl || "").trim()) {
             return res.status(400).json({ message: "OneBot 要填 WS 地址" });
         }
+        if (
+            type === "qqofficial" &&
+            (!String(body.config?.appId || "").trim() || !String(body.config?.clientSecret || "").trim())
+        ) {
+            return res.status(400).json({ message: "QQ 官方机器人要填 AppID 和 Client Secret" });
+        }
         const adapters = botManager.readAdapters();
         const id = `bot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         adapters.push({
@@ -986,7 +992,10 @@ function setupConsoleRoutes(app) {
     app.get("/api/data-info", (req, res) => {
         if (!requireAdmin(req, res)) return;
         return res.json({
+            // 数据根（~/.kirari）与它下面的完整布局：排错时一眼看清每个文件在哪
             dataDir,
+            layout: require("../dataDir").paths,
+            migration: require("../dataDir").migration,
             configFile: modelConfigFile.getConfigPath(),
             knowledgeFile: userKnowledge.filePath(),
             mcpFile: mcpManager.mcpFilePath(),
@@ -1004,9 +1013,9 @@ function setupConsoleRoutes(app) {
 
     // ---- 组网（与桌宠版 electron/net/ipc.ts 的入口一一对应）----
     //
-    // 配置文件与桌宠版**同一个目录、同一份文件、同一种格式**（net-state.json /
-    // net-identity.json，都在 dataDir 下）。本机装过桌宠版时，桌宠里配的组网
-    // 核心版原样接管；反过来在控制台里改，桌宠端也看得到。
+    // 配置文件与桌宠版**同一个目录、同一份文件、同一种格式**（network/net-state.json /
+    // network/net-identity.json）。桌宠里配的组网核心版原样接管；反过来在控制台里改，
+    // 桌宠端也看得到。
     //
     // 所有写操作都返回最新 snapshot，前端拿到直接刷新，不用再查一次。
 

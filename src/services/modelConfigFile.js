@@ -26,11 +26,14 @@ const path = require('path');
 // 缺字段 / 坏值显式报错，绝不静默回退默认值（共享包红线，两端同构）。
 const { parseAgentProfile, DEFAULT_AGENT_PROFILE } = require('kirari-agent');
 
-// 数据目录统一走 src/dataDir.js（自动探测桌宠版 userData，见该文件注释）。
-const { dataDir: DATA_DIR } = require('../dataDir');
-const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+// 数据目录统一走 src/dataDir.js → kirariHome.js 的 ~/.kirari 数据根（见 kirariHome 注释）。
+const { paths: HOME_PATHS, dataDir: DATA_DIR } = require('../dataDir');
+const modelsFile = require('./modelsFile');
+const CONFIG_FILE = HOME_PATHS.config;
 
 // 核心版认识的顶层字段。写回时：这些键可以改，其余一律保留原值。
+// ⚠️ 'models' 已迁出到 models.json，但**仍留在白名单**：老文件里可能还有这一项，
+//    要允许它被读取（只读不写），迁移完成后会用 delete 清掉，不能让写回逻辑忽略它。
 const KNOWN_TOP_KEYS = [
     'model',
     'endpoint',
@@ -107,11 +110,48 @@ function notify() {
     }, 200);
 }
 
-/** 外部编辑可能把 models 搞坏：形状不对就当没有（懒自愈，不报错）。 */
-function safeModels(cfg) {
-    return Array.isArray(cfg.models)
-        ? cfg.models.filter((m) => m && typeof m === 'object' && typeof m.id === 'number')
-        : [];
+/**
+ * 取全部模型套 —— 现在从 models.json 读（WorkBuddy 同构，可跨 agent 互拷）。
+ *
+ * 读失败（文件坏了）不让整个进程崩：返回空数组 + 打日志，用户在设置页能看到
+ * 「一套都没有」从而重新添加，而不是聊天直接抛异常。
+ */
+function safeModels() {
+    try {
+        return modelsFile.readModels();
+    } catch (e) {
+        console.warn('[model-config] 读取 models.json 失败（当作没有模型套）:', e instanceof Error ? e.message : String(e));
+        return [];
+    }
+}
+
+/**
+ * 把老 config.json 里的 models[] 迁到 models.json（一次性）。
+ *
+ * 触发条件：models.json 不存在的**且** config.json 里有 models[]。
+ * 迁移后从 config.json 里删掉该键（否则会长期存在两份真源，改一个另一个不生效）。
+ * 只删 models，其余字段（含桌宠版私有字段）原样保留。
+ */
+function migrateModelsOutOfConfig() {
+    if (!config || !Array.isArray(config.models) || !config.models.length) return 0;
+    if (fs.existsSync(modelsFile.MODELS_FILE)) return 0; // 已经有独立清单，不动
+    const moved = config.models;
+    try {
+        modelsFile.writeModels(moved);
+    } catch (e) {
+        console.warn('[model-config] 迁移 models[] 到 models.json 失败（保留原样）:', e instanceof Error ? e.message : String(e));
+        return 0;
+    }
+    const next = { ...config };
+    delete next.models;
+    config = next;
+    try {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+    } catch (e) {
+        console.warn('[model-config] 迁移后回写 config.json 失败:', e instanceof Error ? e.message : String(e));
+    }
+    console.log(`[model-config] 已把 config.json 里的 ${moved.length} 套模型迁到 models.json（config.json 只保留当前生效项）`);
+    return moved.length;
 }
 
 /** 迁移来源：从 SQLite 导出旧的多模型数据（惰性 require 避免循环依赖）。 */
@@ -131,12 +171,13 @@ function migrateFromDb(uid) {
         searchProvider: legacy.searchProvider || 'uapis',
         searchEndpoint: legacy.searchEndpoint || '',
         searchKey: legacy.searchKey || '',
-        models: [],
         activeModelId: null,
     };
+    // models 现在归 models.json 管，这里收集出来，由 ensureInitialized 单独写盘。
+    let seededModels = [];
     if (data.profiles && data.profiles.length > 0) {
-        // 已有多模型数据 → 整表搬进文件，顶层同步成当前套
-        cfg.models = data.profiles;
+        // 已有多模型数据 → 整表搬到 models.json，顶层同步成当前套
+        seededModels = data.profiles;
         const active = Number.isSafeInteger(data.activeId) && data.profiles.some((m) => m.id === data.activeId)
             ? data.activeId
             : data.profiles[0].id;
@@ -149,16 +190,16 @@ function migrateFromDb(uid) {
         }
     } else if (legacy.key && legacy.endpoint) {
         // 旧单套配置三件套齐全 → 导成「默认」套（与桌面端懒迁移同语义）
-        cfg.models = [{ id: 1, name: '默认', endpoint: legacy.endpoint, model: legacy.model || 'gpt-5.4-mini', key: legacy.key }];
+        seededModels = [{ id: 1, name: '默认', endpoint: legacy.endpoint, model: legacy.model || 'gpt-5.4-mini', key: legacy.key }];
         cfg.activeModelId = 1;
         cfg.endpoint = legacy.endpoint;
         cfg.model = legacy.model || 'gpt-5.4-mini';
         cfg.key = legacy.key;
-        console.log('[model-config] 已把 SQLite 里的旧单套配置迁移到 config.json（默认）');
+        console.log('[model-config] 已把 SQLite 里的旧单套配置迁移到 models.json（默认）');
     } else if (legacy.key || legacy.endpoint) {
         console.log('[model-config] 旧配置不完整（缺地址或密钥），不造模型套；顶层如实保留，聊天时会提示先配置');
     }
-    return cfg;
+    return { cfg, seededModels };
 }
 
 function ensureInitialized() {
@@ -169,18 +210,29 @@ function ensureInitialized() {
     if (raw === null) {
         // 首次：从 SQLite 迁移（没有可迁的就是一份空配置）
         const uid = Number(process.env.BOT_MODEL_UID || 1);
-        const migrated = migrateFromDb(uid);
+        const { cfg: migrated, seededModels } = migrateFromDb(uid);
         // 阶段 B：首次建配置时把默认 agentProfile 落盘一次。
         // 只在此处用默认值——之后运行期缺字段一律报错，不再兜底（用户拍板）。
         if (!migrated.agentProfile) migrated.agentProfile = { ...DEFAULT_AGENT_PROFILE };
         writeRaw(migrated);
+        // 模型清单单独落 models.json（不存在才写，绝不覆盖用户已有的清单）
+        if (seededModels.length && !fs.existsSync(modelsFile.MODELS_FILE)) {
+            try {
+                modelsFile.writeModels(seededModels);
+                console.log(`[model-config] 已创建 ${modelsFile.MODELS_FILE}（${seededModels.length} 套）`);
+            } catch (e) {
+                console.warn('[model-config] 写 models.json 失败:', e instanceof Error ? e.message : String(e));
+            }
+        }
         console.log(`[model-config] 已创建 ${CONFIG_FILE}`);
     } else {
         config = raw;
-        // 存量配置升级：老用户 config.json 没有 agentProfile，补写一份默认值落盘（一次）。
+        // 存量配置升级 1：models[] 从 config.json 搬到 models.json（一次性，幂等）
+        migrateModelsOutOfConfig();
+        // 存量配置升级 2：老用户 config.json 没有 agentProfile，补写一份默认值落盘（一次）。
         // 走 writeRaw → mergePreservingUnknown，手写的未知字段原样保留。
-        if (!raw.agentProfile) {
-            writeRaw({ ...raw, agentProfile: { ...DEFAULT_AGENT_PROFILE } });
+        if (!config.agentProfile) {
+            writeRaw({ ...config, agentProfile: { ...DEFAULT_AGENT_PROFILE } });
             console.log('[model-config] 已为存量配置补写默认 agentProfile');
         }
     }
@@ -200,7 +252,7 @@ function getAgentProfile() {
 
 function listModelProfiles() {
     ensureInitialized();
-    const models = safeModels(config);
+    const models = safeModels();
     return {
         items: models.map((m) => ({
             id: m.id,
@@ -216,12 +268,12 @@ function listModelProfiles() {
 
 function getModelProfile(id) {
     ensureInitialized();
-    return safeModels(config).find((m) => m.id === id) || null;
+    return safeModels().find((m) => m.id === id) || null;
 }
 
 function addModelProfile(p) {
     ensureInitialized();
-    const models = safeModels(config);
+    const models = safeModels();
     const id = models.reduce((max, m) => Math.max(max, m.id), 0) + 1;
     const profile = {
         id,
@@ -230,24 +282,26 @@ function addModelProfile(p) {
         model: String(p.model || '').trim(),
         key: String(p.key || '').trim(),
     };
-    const next = { ...config, models: [...models, profile] };
+    modelsFile.writeModels([...models, profile]);
     // 第一套自动成为当前使用（没有当前套就没法聊天）—— 覆盖顶层
     const hasValidActive =
-        typeof next.activeModelId === 'number' && models.some((m) => m.id === next.activeModelId);
+        typeof config.activeModelId === 'number' && models.some((m) => m.id === config.activeModelId);
     if (!hasValidActive) {
-        next.activeModelId = id;
-        next.endpoint = profile.endpoint;
-        next.model = profile.model;
-        next.key = profile.key;
+        writeRaw({
+            ...config,
+            activeModelId: id,
+            endpoint: profile.endpoint,
+            model: profile.model,
+            key: profile.key,
+        });
     }
-    writeRaw(next);
     return id;
 }
 
 /** 更新一套。key 传空串/undefined = 保持原值。 */
 function updateModelProfile(id, patch) {
     ensureInitialized();
-    const models = safeModels(config);
+    const models = safeModels();
     const cur = models.find((m) => m.id === id);
     if (!cur) return false;
     const nextModels = models.map((m) =>
@@ -261,25 +315,35 @@ function updateModelProfile(id, patch) {
               }
             : m,
     );
-    writeRaw({ ...config, models: nextModels });
+    modelsFile.writeModels(nextModels);
+    // 改的正好是当前生效那一套 → 顶层三件套跟着更新（否则聊天还用旧地址）
+    if (config.activeModelId === id) {
+        const cur2 = nextModels.find((m) => m.id === id);
+        if (cur2) {
+            writeRaw({ ...config, endpoint: cur2.endpoint, model: cur2.model, key: cur2.key });
+        }
+    }
     return true;
 }
 
 function deleteModelProfile(id) {
     ensureInitialized();
-    const models = safeModels(config);
+    const models = safeModels();
     if (!models.some((m) => m.id === id)) return false;
-    const next = { ...config, models: models.filter((m) => m.id !== id) };
+    modelsFile.writeModels(models.filter((m) => m.id !== id));
     // 与桌面端一致：删的是当前套 → activeId 置空，顶层字段保持（聊天还能用）
-    if (next.activeModelId === id) delete next.activeModelId;
-    writeRaw(next);
+    if (config.activeModelId === id) {
+        const next = { ...config };
+        delete next.activeModelId;
+        writeRaw(next);
+    }
     return true;
 }
 
 /** 「设为当前」：把那套覆盖到顶层生效字段 + 记 activeModelId。 */
 function activateModelProfile(id) {
     ensureInitialized();
-    const target = safeModels(config).find((m) => m.id === id);
+    const target = safeModels().find((m) => m.id === id);
     if (!target) return false;
     writeRaw({
         ...config,
@@ -299,7 +363,7 @@ function getActiveModelId() {
 /** 聊天用的「当前生效模型配置」（三件套可能为空串 = 未配置，由调用方报错指路）。 */
 function getActiveModelConfig() {
     ensureInitialized();
-    const models = safeModels(config);
+    const models = safeModels();
     const cur = typeof config.activeModelId === 'number' ? models.find((m) => m.id === config.activeModelId) : null;
     if (cur) return { model: cur.model, endpoint: cur.endpoint, key: cur.key, source: `model#${cur.id}(${cur.name})` };
     return { model: config.model || '', endpoint: config.endpoint || '', key: config.key || '', source: 'file' };
@@ -403,6 +467,7 @@ module.exports = {
     onConfigChanged,
     startWatch,
     getAgentProfile,
+    migrateModelsOutOfConfig,
     getConfigPath: () => CONFIG_FILE,
     getDataDir: () => DATA_DIR,
 };

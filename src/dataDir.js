@@ -1,52 +1,68 @@
 // src/dataDir.js
 // 数据目录解析：核心版（kirari-core）与桌宠版（kirari-desktop）**共用同一份数据**。
 //
-// 为什么要有这个模块（用户拍板）：核心版是「智能机器人助手本体」，
-// 桌宠版装了核心版就直接读它的配置和记录，不需要用户手动配任何路径。
-// 规则只有一条：**核心版没有的配置字段一律不碰，保持原样**，绝不因为
-// 「核心版不认识」就把桌宠版的字段删掉。
+// 历史：这里原本负责「自动探测桌宠版 userData（%APPDATA%\akisaki-kirari）」，
+// 没有就兜底到包内 data/。两套规则藏在多个文件里，换机器就得重新猜。
 //
-// 解析优先级（从高到低）：
-//   1. PET_API_DATA_DIR           显式指定（Docker / 服务器部署 / 高级用户）
-//   2. KIRARI_DESKTOP_DATA_DIR    显式指定桌宠版 userData（跨平台测试用）
-//   3. 自动探测桌宠版 userData     按 Electron 默认规则拼路径，存在且可写就用
-//   4. <包根>/data                兜底（服务器全新部署，本机没装过桌宠版）
+// 现在统一收口到 src/kirariHome.js 的 ~/.kirari 数据根（目录规范见 docs/home-layout.md）：
+//   · 唯一的规则来源是 kirariHome.js 的 LAYOUT；
+//   · 首次启动把旧位置（桌宠版 userData / 包内 data）的已知数据**复制**过来，原件不动；
+//   · 本文件只保留「向后兼容的 dataDir 别名」，让既有的
+//     `require('../dataDir').dataDir` 调用点不必一次全改。
 //
-// 桌宠版 userData 的 Electron 默认规则（app.getPath('userData')）：
-//   Windows  %APPDATA%\<name>         例：C:\Users\X\AppData\Roaming\akisaki-kirari
-//   macOS    ~/Library/Application Support/<name>
-//   Linux    ~/.config/<name>         （XDG_CONFIG_HOME 可覆盖）
-// <name> 取桌宠版 package.json 的 name 字段（未设 productName，故就是 name）。
+// ⚠️ 新代码请直接用 kirariHome.js 的 paths（带具体文件名），
+//    不要再往 dataDir 上拼文件名 —— 那正是这次迁移要消灭的扁平结构。
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const home = require('./kirariHome');
 
-// 与桌宠版 package.json 的 name 保持一致；改名时两边都要改。
-const DESKTOP_APP_NAME = 'akisaki-kirari';
-
-function desktopUserDataCandidates() {
-    const home = os.homedir();
-    const out = [];
-
-    if (process.platform === 'win32') {
-        // Electron 在 Windows 上读 %APPDATA%（而不是 %LOCALAPPDATA%）
-        const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-        out.push(path.join(appData, DESKTOP_APP_NAME));
-    } else if (process.platform === 'darwin') {
-        out.push(path.join(home, 'Library', 'Application Support', DESKTOP_APP_NAME));
-    } else {
-        const xdg = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
-        out.push(path.join(xdg, DESKTOP_APP_NAME));
+/** 一次性迁移（只在 home.json 没有迁移记录时执行；幂等）。 */
+function bootstrap() {
+    try {
+        return home.migrateLegacy(home.homeDir);
+    } catch (e) {
+        // 迁移失败不阻断启动：新目录该建的已经建好，用户原有数据仍在旧位置。
+        console.warn('[home] 旧数据迁移失败（原有数据未改动，可稍后手动迁移）:', e && e.message ? e.message : e);
+        try {
+            home.ensureLayout(home.homeDir);
+        } catch { /* ignore */ }
+        return { ran: false, reason: 'error', copied: [], skipped: [], failed: [] };
     }
-    return out;
 }
+
+const MIGRATION = bootstrap();
+
+/** 数据根（= ~/.kirari）。保留旧名字，兼容既有调用点。 */
+const DATA_DIR = home.homeDir;
+/** 全量路径对象：config / database / skillsRoot / logs ... 见 kirariHome.LAYOUT */
+const PATHS = home.paths;
+
+/** 旧的「根目录下扁平文件名」辅助：仅供尚未改写的调用点过渡使用。 */
+function legacyFlat(name) {
+    return path.join(DATA_DIR, name);
+}
+
+module.exports = {
+    /** @deprecated 用 paths.xxx（具体文件）代替 */
+    dataDir: DATA_DIR,
+    dataDirSource: home.homeSource,
+    dataDirDetail: DATA_DIR,
+    /** 具体路径真源 */
+    paths: PATHS,
+    home,
+    legacyFlat,
+    /** 迁移结果（启动日志 / 排错用） */
+    migration: MIGRATION,
+    /** 旧版兼容导出（单测与排错用） */
+    desktopUserDataCandidates: home.legacyRoots,
+    isWritableDir,
+};
 
 function isWritableDir(dir) {
     try {
         if (!fs.existsSync(dir)) return false;
         const st = fs.statSync(dir);
         if (!st.isDirectory()) return false;
-        // 真正探一下可写：目录可能存在但属于别的用户 / 只读
         const probe = path.join(dir, `.kirari-write-probe-${process.pid}`);
         fs.writeFileSync(probe, '');
         fs.unlinkSync(probe);
@@ -55,51 +71,3 @@ function isWritableDir(dir) {
         return false;
     }
 }
-
-function ensureDir(dir) {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    return dir;
-}
-
-/**
- * 解析数据目录。只做「选目录」这一件事，不创建文件、不写日志噪音。
- * 返回 { dir, source, detail } —— source 用于启动日志里说清用了哪份数据。
- */
-function resolveDataDir() {
-    // 1. 显式覆盖（最高优先级，兼容 Docker / 服务器既有部署）
-    if (process.env.PET_API_DATA_DIR && process.env.PET_API_DATA_DIR.trim()) {
-        const dir = path.resolve(process.env.PET_API_DATA_DIR.trim());
-        return { dir: ensureDir(dir), source: 'env:PET_API_DATA_DIR', detail: dir };
-    }
-
-    // 2. 显式指定桌宠版 userData
-    if (process.env.KIRARI_DESKTOP_DATA_DIR && process.env.KIRARI_DESKTOP_DATA_DIR.trim()) {
-        const dir = path.resolve(process.env.KIRARI_DESKTOP_DATA_DIR.trim());
-        if (isWritableDir(dir)) {
-            return { dir, source: 'env:KIRARI_DESKTOP_DATA_DIR', detail: dir };
-        }
-        console.warn(`[data-dir] KIRARI_DESKTOP_DATA_DIR 指向的目录不可写，已忽略：${dir}`);
-    }
-
-    // 3. 自动探测桌宠版 userData
-    for (const candidate of desktopUserDataCandidates()) {
-        if (isWritableDir(candidate)) {
-            return { dir: candidate, source: 'auto:desktop-userData', detail: candidate };
-        }
-    }
-
-    // 4. 兜底：包内 data 目录
-    const fallback = ensureDir(path.resolve(__dirname, '..', '..', 'data'));
-    return { dir: fallback, source: 'fallback:package-data', detail: fallback };
-}
-
-const RESOLVED = resolveDataDir();
-
-module.exports = {
-    dataDir: RESOLVED.dir,
-    dataDirSource: RESOLVED.source,
-    dataDirDetail: RESOLVED.detail,
-    /** 桌宠版 userData 的候选路径（探测逻辑单测 / 排错用） */
-    desktopUserDataCandidates,
-    isWritableDir,
-};

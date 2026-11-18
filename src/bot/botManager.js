@@ -12,6 +12,7 @@
 //   - 知识库检索 / 人格 / 技能提示词都在核心版本地取，不再依赖 WS 回传
 const clientConfig = require('../settings/clientConfig');
 const { OneBotAdapter } = require('./onebotAdapter');
+const { QQOfficialAdapter } = require('./qqofficialAdapter');
 const aiReplyService = require('../services/aiReplyService');
 const modelConfigFile = require('../services/modelConfigFile');
 const userKnowledge = require('../knowledge/userKnowledge');
@@ -35,7 +36,7 @@ function writeAdapters(adapters) {
     return clientConfig.setAdapters(adapters);
 }
 
-/** @type {Map<string, OneBotAdapter>} */
+/** @type {Map<string, OneBotAdapter|QQOfficialAdapter>} */
 const running = new Map();
 
 /**
@@ -129,7 +130,8 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
 /** 起一个适配器（内部）：连接 + 绑定消息处理 + 回发。 */
 function startAdapter(cfg) {
     if (running.has(cfg.id)) return running.get(cfg.id);
-    const adapter = new OneBotAdapter(cfg, async (incoming) => {
+    const AdapterClass = cfg.type === 'qqofficial' ? QQOfficialAdapter : OneBotAdapter;
+    const adapter = new AdapterClass(cfg, async (incoming) => {
         noteAccount(cfg.id, incoming.senderId);
         // ownerAccount 从实例实时读（设主人后即时生效，不等重启）
         const reply = await handleIncoming(cfg, incoming, adapter.ownerAccount);
@@ -150,7 +152,9 @@ function startAdapter(cfg) {
 
 /** 按当前配置整表重建（保存设置时调用）。 */
 function applyConfig() {
-    const configs = readAdapters().filter((a) => a.enabled !== false && a.type === 'onebot');
+    const configs = readAdapters().filter(
+        (a) => a.enabled !== false && (a.type === 'onebot' || a.type === 'qqofficial'),
+    );
     // 停掉不在新配置里的
     for (const [id, ad] of running) {
         if (!configs.some((c) => c.id === id)) {

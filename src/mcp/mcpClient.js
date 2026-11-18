@@ -55,6 +55,15 @@ class McpConnection {
                 Accept: 'application/json, text/event-stream',
                 'Content-Length': Buffer.byteLength(body),
             };
+            // 标准格式的自定义请求头（多数远程 MCP 靠它传 API key / Bearer token）。
+            // 放在最后覆盖，但不动 Content-* 与 session 头，避免用户手写把它们弄坏。
+            if (this.cfg.headers && typeof this.cfg.headers === 'object') {
+                for (const [k, v] of Object.entries(this.cfg.headers)) {
+                    if (!k || v === undefined || v === null) continue;
+                    if (/^(content-type|content-length|mcp-session-id)$/i.test(k)) continue;
+                    headers[k] = String(v);
+                }
+            }
             if (this.sessionId) headers['mcp-session-id'] = this.sessionId;
             const req = mod.request(
                 u,
@@ -87,7 +96,14 @@ class McpConnection {
         const cmd = String(this.cfg.command || '').trim();
         if (!cmd) throw new Error('stdio 型 MCP 没配启动命令');
         const args = Array.isArray(this.cfg.args) ? this.cfg.args.map(String) : [];
-        this.proc = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        // env / cwd：标准 MCP 格式（Claude/codebuddy/WorkBuddy）用它们传凭据和命令参数，
+        // 不支持就等于把这类 server 迁过来也跑不起来。
+        // env 与父进程合并而不是替换 —— 否则 PATH 没了，`npx` 这类命令直接找不到。
+        const env = this.cfg.env && typeof this.cfg.env === 'object'
+            ? { ...process.env, ...this.cfg.env }
+            : process.env;
+        const cwd = typeof this.cfg.cwd === 'string' && this.cfg.cwd.trim() ? this.cfg.cwd : undefined;
+        this.proc = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], env, cwd });
         this.proc.stdout.setEncoding('utf-8');
         this.proc.stdout.on('data', (chunk) => this.onStdoutData(chunk));
         this.proc.stderr.on('data', () => {

@@ -29,7 +29,7 @@ const netBootstrap = require("./net/bootstrap");
 const mcpManager = require("./mcp/mcpManager");
 const botManager = require("./bot/botManager");
 const consoleSite = require("./web/consoleSite");
-const { dataDir, dataDirSource, dataDirDetail } = require("./dataDir");
+const { dataDir, dataDirSource, dataDirDetail, migration } = require("./dataDir");
 
 // 每日简报（"每日记忆"）的调度已迁到落库任务表（阶段 E）：
 // 每个 uid × 08/16/22 三档一条 daily_brief job，由 scheduledJobsService 统一扫描。
@@ -46,8 +46,15 @@ function createServer() {
     const app = express();
     const server = http.createServer(app);
 
-    // 数据目录一句话说清：自动接管桌宠版数据时，用户能立刻看到「读的是哪一份」。
-    console.log(`[data-dir] 数据目录 = ${dataDir}（来源：${dataDirSource}）`);
+    // 数据根一句话说清：用户能立刻看到「读的是哪一份、从哪来」。
+    console.log(`[data-dir] 数据根 = ${dataDir}（来源：${dataDirSource}）`);
+    if (migration && migration.ran) {
+        console.log(
+            `[data-dir] 已把旧位置数据复制进新布局（来源：${migration.from || "无"}；` +
+                `复制 ${migration.copied.length} 项，跳过已存在 ${migration.skipped.length} 项）` +
+                `${migration.failed.length ? `，失败 ${migration.failed.length} 项（原件未动）` : ""}`,
+        );
+    }
 
     // 中间件
     // 头像上传是 base64（5MB 图片≈6.7MB 文本），只对这条路径放宽体积限制；

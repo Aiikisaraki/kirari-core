@@ -16,7 +16,7 @@
 // 但归属已经解耦：桌宠版增删主题不再影响控制台，反过来也一样。
 const { readJson, writeJsonMerged, filePath } = require('./localSettings');
 
-const FILE = 'console-appearance.json';
+const FILE = 'consoleAppearance';
 /** 允许被覆盖的顶层键。之外的键一律从现有文件原样搬回。 */
 const KNOWN_KEYS = ['theme', 'mode'];
 

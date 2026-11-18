@@ -16,7 +16,7 @@
 // 写回走 localSettings.writeJsonMerged 的「已知键白名单合并」，天然满足这一点。
 const fs = require("fs");
 const path = require("path");
-const { readJson, writeJsonMerged, filePath, dataDir } = require("./localSettings");
+const { readJson, writeJsonMerged, filePath, paths: HOME_PATHS } = require("./localSettings");
 
 const FILE = "pet-client.config.json";
 /**
@@ -34,15 +34,13 @@ const DEFAULT_PET_NAME = "Kirari";
 // 注意：外观主题（桌宠版 stores/theme.ts 的 THEMES）不在这个文件里。
 // 核心版控制台的配色 + 明暗走 src/settings/consoleAppearance.js，与桌宠版不互通。
 
-/** 头像文件所在目录（与桌宠版 userData/user-avatar 同名同位置）。 */
-const AVATAR_DIR_NAME = "user-avatar";
-
 function clientConfigPath() {
     return filePath(FILE);
 }
 
+/** 「我的头像」目录：数据根下的 user-avatar/（与桌宠版同名同位置，两端共用）。 */
 function userAvatarDir() {
-    return path.join(dataDir, AVATAR_DIR_NAME);
+    return HOME_PATHS.userAvatar;
 }
 
 /** 文件存在且能解析成对象就返回，否则 null（调用方按缺省值兜底）。 */

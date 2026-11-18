@@ -20,9 +20,8 @@
 //    和人机私聊不是一回事。唯一例外是「主人」：botManager 把主人账号的消息
 //    直接以本机会话 id 入库（不走 bot- 前缀），所以天然就在主对话里。
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
-const { dataDir } = require('../dataDir');
+const { paths } = require('../dataDir');
 
 const FILE = 'local-session.json';
 /** 不参与「本机会话」收口的会话前缀（每个前缀是一类独立对话）。 */
@@ -37,7 +36,7 @@ function loadStorage() {
 }
 
 function filePath() {
-    return path.join(dataDir, FILE);
+    return paths.localSession;
 }
 
 function readFile() {

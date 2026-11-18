@@ -11,11 +11,14 @@ const {
   SCHEDULED_JOBS_DDL, SCHEDULED_JOBS_COLUMNS,
 } = require('kirari-agent');
 
-// 数据库目录：统一走 src/dataDir.js 解析（用户拍板：核心版自动接管桌宠版数据）。
-//   env PET_API_DATA_DIR  >  env KIRARI_DESKTOP_DATA_DIR  >  自动探测桌宠版 userData  >  包内 data
-// 探测到桌宠版 userData 时，pet_sessions.db 就落在桌宠版目录里 —— 两个版本共用一份记录。
-const { dataDir: DB_DIR } = require('../dataDir');
-const DB_PATH = path.join(DB_DIR, 'pet_sessions.db');
+// 数据库位置：统一走 src/dataDir.js → kirariHome.js 的数据根（~/.kirari）。
+// 解析优先级：env KIRARI_HOME > env PET_API_DATA_DIR > env KIRARI_DESKTOP_DATA_DIR > ~/.kirari
+// 两端读写同一个 database/pet_sessions.db —— 桌宠里聊的、控制台里聊的是同一份记录。
+// 数据库位置由 kirariHome 的 LAYOUT 决定（~/.kirari/database/pet_sessions.db）；
+// 不再往数据根上拼文件名 —— 布局改动只改 kirariHome.js 一处，两端自动跟上。
+const { paths } = require('../dataDir');
+const DB_PATH = paths.database;
+const DB_DIR = path.dirname(DB_PATH);
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 const db = new Database(DB_PATH);
 // 并发写保护：桌宠版的进程内引擎与核心版（本地模式是它拉起的子进程）会开**同一个**

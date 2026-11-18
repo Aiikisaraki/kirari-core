@@ -3,17 +3,16 @@
 // knowledge.json、同一种检索语义**。
 //
 // 为什么核心版也要自己存一份：用户拍板「核心版自动接管桌宠版数据」。
-// 桌宠版把私人库存在 userData/knowledge.json，核心版读同一个文件，
+// 私人库落在数据根的 knowledge/knowledge.json（逻辑名 knowledge），桌宠版读同一个文件，
 // 于是桌宠里加的知识，核心版控制台直接能搜到，反之亦然。
 //
 // 检索策略与桌宠版一致（保持行为可预期）：
 //   本地条目 = 同步关键词匹配（所有词都要命中 title/content/tags 之一）；
 //   远程源   = 检索时实时抓取（不落本地副本），每源最多 2 条。
 const fs = require('fs');
-const path = require('path');
 const { readJson, writeJsonMerged } = require('../settings/localSettings');
 
-const KB_FILE = 'knowledge.json';
+const KB_FILE = 'knowledge';
 const KNOWN_KEYS = ['entries', 'nextId'];
 
 function load() {
@@ -205,5 +204,5 @@ module.exports = {
     searchLocal,
     searchRemote,
     search,
-    filePath: () => path.join(require('../dataDir').dataDir, KB_FILE),
+    filePath: () => require('../dataDir').paths.knowledge,
 };

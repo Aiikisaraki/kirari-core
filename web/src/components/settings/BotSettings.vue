@@ -1,5 +1,5 @@
 <script setup>
-// 机器人设置：接入 OneBot（NapCat / LLOneBot），让助手能当 QQ 机器人用。
+// 机器人设置：默认接入 QQ 官方机器人（官方 WebSocket 反向连接）；OneBot 作为通用协议端保留。
 // 与桌宠版「机器人」页等价 —— 同一份 pet-client.config.json 的 adapters[]，连接状态实时显示。
 //
 // 两层安全闸门（默认全关，绝不无差别骚扰群聊）：
@@ -42,25 +42,27 @@ async function load() {
     }
 }
 
-function defaultConfig() {
-    return {
-        wsUrl: "",
-        token: "",
-        protocol: "onebot11",
+function defaultConfig(type) {
+    const base = {
         groupReplyMode: "off",
         groupFilter: "whitelist",
         groupAllowlist: [],
         groupBlocklist: [],
     };
+    if (type === "qqofficial") {
+        return { ...base, appId: "", clientSecret: "" };
+    }
+    return { ...base, wsUrl: "", token: "", protocol: "onebot11" };
 }
 
 function startAdd() {
-    editing.value = { id: "new", type: "onebot", name: "", enabled: true, config: defaultConfig() };
+    // 默认 QQ 官方机器人（合规，无需第三方 QQ 客户端 / 公网回调）
+    editing.value = { id: "new", type: "qqofficial", name: "", enabled: true, config: defaultConfig("qqofficial") };
     notice.value = "";
 }
 
 function startEdit(a) {
-    editing.value = JSON.parse(JSON.stringify({ ...a, config: { ...defaultConfig(), ...(a.config || {}) } }));
+    editing.value = JSON.parse(JSON.stringify({ ...a, config: { ...defaultConfig(a.type), ...(a.config || {}) } }));
     notice.value = "";
 }
 
@@ -84,6 +86,10 @@ async function saveEdit() {
     }
     if (f.type === "onebot" && !f.config.wsUrl.trim()) {
         errorMsg.value = "OneBot 要填 WS 地址";
+        return;
+    }
+    if (f.type === "qqofficial" && (!f.config.appId.trim() || !f.config.clientSecret.trim())) {
+        errorMsg.value = "QQ 官方机器人要填 AppID 和 Client Secret";
         return;
     }
     errorMsg.value = "";
@@ -163,8 +169,8 @@ onUnmounted(() => {
   <section class="card wide">
     <h2>机器人</h2>
     <p class="card-desc">
-      接入 OneBot 协议的 QQ 机器人框架（NapCat / LLOneBot 等），助手就能在 QQ 里聊天。
-      填上框架提供的 WS 地址即可，和桌宠版共用同一份配置。
+      默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定，无需公网回调与第三方 QQ 客户端）。
+      OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。与桌宠版共用同一份配置。
     </p>
 
     <div v-if="loading && adapters.length === 0" class="dim">读取中…</div>
@@ -185,7 +191,10 @@ onUnmounted(() => {
           </span>
           <span v-if="a.selfQQ" class="pill dim">QQ {{ a.selfQQ }}</span>
         </div>
-        <div class="list-desc dim">{{ a.config?.wsUrl || "（没填地址）" }}</div>
+        <div class="list-desc dim">
+          <span class="pill dim">{{ a.type === "qqofficial" ? "QQ官方" : "OneBot" }}</span>
+          {{ a.type === "qqofficial" ? `AppID ${a.config?.appId || "（未填）"}` : a.config?.wsUrl || "（没填地址）" }}
+        </div>
         <div v-if="a.lastError" class="list-desc error">{{ a.lastError }}</div>
 
         <!-- 主人绑定：被设为 owner 的账号，消息并进主对话（与桌宠版同一功能） -->
@@ -218,17 +227,33 @@ onUnmounted(() => {
     <div v-if="editing" class="edit-box">
       <h3>{{ editing.id === "new" ? "添加机器人" : "编辑机器人" }}</h3>
 
+      <label class="field-label">协议类型</label>
+      <select v-model="editing.type" @change="editing.config = defaultConfig(editing.type)">
+        <option value="qqofficial">QQ 官方机器人（默认推荐）</option>
+        <option value="onebot">OneBot（通用协议端，非 QQ 默认）</option>
+      </select>
+
       <label class="field-label">名称</label>
-      <input v-model="editing.name" maxlength="60" placeholder="如：NapCat 主号" />
+      <input v-model="editing.name" maxlength="60" placeholder="如：我的 QQ 机器人" />
 
-      <label class="field-label">WS 地址</label>
-      <input v-model="editing.config.wsUrl" placeholder="ws://127.0.0.1:3001" />
+      <template v-if="editing.type === 'onebot'">
+        <label class="field-label">WS 地址</label>
+        <input v-model="editing.config.wsUrl" placeholder="ws://127.0.0.1:3001" />
 
-      <label class="field-label">访问令牌（可选）</label>
-      <input v-model="editing.config.token" type="password" placeholder="对应 OneBot 的 access_token" />
+        <label class="field-label">访问令牌（可选）</label>
+        <input v-model="editing.config.token" type="password" placeholder="对应 OneBot 的 access_token" />
+      </template>
+      <template v-else>
+        <label class="field-label">AppID</label>
+        <input v-model="editing.config.appId" placeholder="QQ 开放平台 AppID" />
+
+        <label class="field-label">Client Secret</label>
+        <input v-model="editing.config.clientSecret" type="password" placeholder="QQ 开放平台 Client Secret" />
+        <p class="dim">在 QQ 开放平台创建机器人后填写；程序主动连官方 WSS，无需公网回调。</p>
+      </template>
 
       <div class="divider"></div>
-      <h4>群消息怎么回复</h4>
+      <h4>群消息怎么回复（OneBot 通用协议端适用）</h4>
 
       <label class="field-label">回复触发方式</label>
       <select v-model="editing.config.groupReplyMode">

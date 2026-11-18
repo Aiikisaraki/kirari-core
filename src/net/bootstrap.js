@@ -10,10 +10,9 @@
 //
 // ── 与桌面端的关系：配置文件和功能都完全对等（用户拍板）──
 //   配置文件：**同一个目录、同一份文件、同一种格式**。
-//     NetManager 的 userDataDir 直接传 dataDir（src/dataDir.js 解析出来的那个）：
-//       · 本机装过桌宠版 → dataDir 就是桌宠版的 userData → 两端读写同一个
-//         net-state.json / net-identity.json，桌宠里配的组网核心版原样接管；
-//       · 服务器全新部署 → dataDir 是包内 data/，格式与桌宠版一字不差。
+//     NetManager 的 userDataDir 传数据根下的 network/ 目录（kirariHome 的 LAYOUT：
+//     network/net-state.json、network/net-identity.json），桌宠版写的是同一对文件，
+//     桌宠里配的组网核心版原样接管。
 //     早期版本核心版把状态放 data/net/、角色放 .env 的 NET_ROLE，那套已废弃：
 //     启动时若发现 net-state.json 不存在而 .env 有 NET_ROLE/NET_PAIRING_CODE，
 //     会做一次性迁移（只搬角色，之后一律以文件为准）。
@@ -38,7 +37,9 @@ const sessionManager = require("../session/sessionManager");
 const aiReplyService = require("../services/aiReplyService");
 const fallbackService = require("../services/fallbackService");
 const modelConfigFile = require("../services/modelConfigFile");
-const { dataDir } = require("../dataDir");
+const { paths: HOME_PATHS } = require("../dataDir");
+// 组网状态/身份所在目录（NetManager 会创建 net-state.json / net-identity.json）。
+const NET_DIR = require("path").dirname(HOME_PATHS.netState);
 
 /** 允许的角色。off = 不参与组网 */
 const ROLES = ["off", "host", "leaf"];
@@ -230,7 +231,7 @@ function migrateLegacyEnvRole() {
 async function start() {
   const modelUid = Number(process.env.BOT_MODEL_UID || 1);
 
-  manager = new NetManager(dataDir, {
+  manager = new NetManager(NET_DIR, {
     // 组网包自己的日志已经带 [net] 前缀了，这里不要再加一层（否则出现 "[net] [net] ..."）
     onLog: (message) => console.log(message),
     onFallbackNotice: (message) => console.warn(`⚠️ [net] ${message}`),
@@ -264,7 +265,7 @@ async function start() {
 
   const role = manager.snapshot().role;
   if (role === "off") {
-    log(`组网未开启（net-state.json 里 role=off）。配置文件：${dataDir}`);
+    log(`组网未开启（net-state.json 里 role=off）。配置文件：${HOME_PATHS.netState}`);
     return { started: false, reason: "role-off" };
   }
 
@@ -506,6 +507,6 @@ module.exports = {
   setSyncWhitelist,
   relayStats,
   // 配置文件位置（设置页展示 + 排错）
-  stateFilePath: () => require("path").join(dataDir, "net-state.json"),
-  identityFilePath: () => require("path").join(dataDir, "net-identity.json"),
+  stateFilePath: () => HOME_PATHS.netState,
+  identityFilePath: () => HOME_PATHS.netIdentity,
 };
