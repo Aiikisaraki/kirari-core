@@ -153,9 +153,42 @@ async function main() {
     !leaked,
     leaked ? '泄露了具体内容' : '未泄露');
 
+  // ── 4.5 ★ VAGUE 档必须是「话题方向」，不是原文 ──────────────────
+  //
+  // 这是「既不是完全隔离，也不是完全泄露」里最容易做错的一半：
+  // 旧实现对 VAGUE 注原文 + 附一句「别讲出去」，等于先把秘密交出去再嘱咐保密。
+  section('4.5 ★ VAGUE 档只给话题方向，原文不进 prompt');
+
+  const gistCases = [
+    ['她妈妈下周要做手术，费用还差三万', ['手术', '妈妈', '三万'], '身体状况'],
+    ['小美跟张三在偷偷交往', ['交往', '张三'], '感情'],
+    ['老板上个月把我辞退了，房贷还不上了', ['辞退', '房贷'], null],
+  ];
+  for (const [src, secrets, wantLabel] of gistCases) {
+    const g = memory.vagueGist(src);
+    const leakedFrag = secrets.filter((s) => g.includes(s));
+    check(`★ 「${src.slice(0, 10)}…」压缩后不泄原词`,
+      leakedFrag.length === 0,
+      leakedFrag.length ? `泄露了：${leakedFrag.join('/')}` : `→ ${g}`);
+    if (wantLabel) {
+      check(`  └ 认得出是「${wantLabel}」这一类`, g.includes(wantLabel), g);
+    }
+  }
+
+  // 通用断言：输出里不许出现原文的任意连续 4 字片段
+  const anyFragment = memory.vagueGist('她老公欠了赌债，孩子还不知道');
+  let fragmentLeaked = '';
+  const raw = '她老公欠了赌债';
+  for (let i = 0; i + 4 <= raw.length; i++) {
+    const frag = raw.slice(i, i + 4);
+    if (anyFragment.includes(frag)) { fragmentLeaked = frag; break; }
+  }
+  check('★ 输出不含原文任何连续 4 字片段',
+    !fragmentLeaked,
+    fragmentLeaked ? `泄露片段：${fragmentLeaked}` : `→ ${anyFragment}`);
+
   // ── 5. 注入块必须带判断口径 ──────────────────────────────────────
   section('5. 注入块带「判断口径」，让她自己权衡');
-
   const ctxUser = { sessionId: `bot-a-private:${owner2}`, counterpartId: owner2, role: 'user', uid: 1 };
   const blk = await memory.buildMemoryBlock(ctxUser, '小张');
   if (blk.block) {
@@ -345,8 +378,14 @@ async function main() {
   };
   const askerCtx = { sessionId: 'bot-a-private:1980308740', counterpartId: '1980308740', role: 'owner', uid: 1, store: fakeStore };
   const askedBlk = await memory.buildMemoryBlock(askerCtx, '小美最近怎么样');
-  check('★ 问起别人时跨池转述能被检索到（原死代码已通）',
-    String(askedBlk.block).includes('交往'), '');
+  // ⚠️ 这两条以前写的是「注入块里能看到『交往』」—— 那正是要修的旧行为。
+  //    「能检索到」≠「能看到原文」：她要能想起"关于这个人有件感情上的事"
+  //    （否则就是完全隔离），但不能拿到可以复述的细节（否则就是完全泄露）。
+  check('★ 问起别人时跨池转述能被检索到（不是完全隔离）',
+    askedBlk.items.length > 0, `items=${askedBlk.items.length}`);
+  check('★ 但注入的是话题方向，不是原文（不是完全泄露）',
+    String(askedBlk.block).includes('感情') && !String(askedBlk.block).includes('交往'),
+    `block=${String(askedBlk.block).replace(/\s+/g, ' ').slice(0, 120)}`);
   check('★ 且被标成「别人的事／别讲细节」的模糊档',
     String(askedBlk.block).includes('别人的事') || String(askedBlk.block).includes('别把细节讲出去'), '');
 
