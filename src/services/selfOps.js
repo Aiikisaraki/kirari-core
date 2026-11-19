@@ -13,6 +13,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { parseReminder, createJob, cancelJob, cancelTask } = require('kirari-agent');
 const capabilities = require('../capabilities/registry');
 const modelConfigFile = require('./modelConfigFile');
 const policy = require('./selfOpsPolicy');
@@ -47,7 +49,7 @@ function buildManifest(ctx = {}) {
     const names = profile.map((t) => t.function && t.function.name).filter(Boolean);
 
     lines.push('\n\n【自我认知 · 你自己的状况】');
-    lines.push('- 你是 Kirari（きらり），主人的虚拟桌宠。下面是一个通用读接口 self_read 与受控写接口 self_update。');
+    lines.push('- 你是 Kirari（きらり），主人的虚拟桌宠。你有通用读接口 self_read、受控写接口 self_update，以及管理自己任务/提醒的 self_manage（增删改）。');
     lines.push(`- 你当前可用的工具（${names.length}）：${names.join('、') || '（无）'}。`);
     lines.push(`- 你当前运行的模型：${snap.model || '（未配置）'}${snap.hasKey ? '（已配置密钥）' : '（未配置密钥）'}；搜索：${snap.searchProvider || 'uapis'}。`);
     lines.push(`- 你的思考模式：${modelConfigFile.getThinking()}（off=直接答 / on=先列简要思路 / auto=复杂问题才深入）。`);
@@ -75,6 +77,7 @@ function buildManifest(ctx = {}) {
     }
 
     lines.push('- 自我排查：遇到问题先用 self_read(diagnose) 体检，再决定要不要 self_update 修；改完可用 self_read 复核。');
+    lines.push('- 发现自己设错/设重复的提醒或任务：self_read(reminders/tasks) 查到 id，再用 self_manage 改时间、取消重复、补设正确的。别把没能力当借口。');
     return lines.join('\n');
 }
 
@@ -88,7 +91,7 @@ function read(topic, ctx = {}) {
             return [
                 '# Kirari 自我说明',
                 '- 我是 Kirari，主人的虚拟桌宠少女。',
-                '- 我有这些通用能力工具：self_read（查询自己）、self_update（受控修改）、load_skill（按需加载技能）、subagent（委派子任务），以及时间/天气/搜索/生图/plan/schedule_reminder。',
+                '- 我有这些通用能力工具：self_read（查询自己）、self_update（受控修改设置）、self_manage（增删改自己的任务与提醒）、load_skill（按需加载技能）、subagent（委派子任务），以及时间/天气/搜索/生图/plan/schedule_reminder。',
                 '- 完整工具清单在我的自我认知清单里；要查细节用 self_read(topic)。',
                 `- 可读 topic：${TOPICS.join(' / ')}。`,
                 '- 可写字段与校验规则见 self_update 的说明；凭证（key/apiKey/endpoint/token）只读，绝不读出明文也不给改。',
@@ -272,4 +275,116 @@ function applyField(key, value) {
     throw new Error(`不支持的字段 ${key}`);
 }
 
-module.exports = { TOPICS, buildManifest, read, update };
+// ── 任务 / 提醒的增删改（自我修补：能修自己设错的东西）──────────────────
+//
+// 「删」用取消（status=cancelled）而不是物理删除：保留事件历史，且 daily_brief
+// 这类系统任务由 briefSchedule.ensureJobs 自行复活，但提醒(once)取消后永不触发。
+// 严格按 sessionId 归属隔离，只能操作本会话的 job/task；系统任务(kind!=='reminder')只读。
+
+function newId(prefix) {
+    return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+const MANAGE_ACTIONS = ['create_reminder', 'update_reminder', 'cancel_reminder', 'cancel_task'];
+
+/** 取本会话拥有的 job；系统任务（daily_brief 等）拒绝操作。 */
+function ownedJob(jobId, ctx) {
+    const job = jobStore().get(jobId);
+    if (!job) return { error: `找不到提醒「${jobId}」` };
+    if (ctx.sessionId && job.sessionId !== ctx.sessionId) return { error: '该提醒不属于当前会话，不能操作' };
+    if (job.kind !== 'reminder') return { error: `「${job.title}」是系统任务（${job.kind}），不允许通过自我修补修改` };
+    return { job };
+}
+
+/**
+ * 统一的任务/提醒管理入口。
+ * action: create_reminder / update_reminder / cancel_reminder / cancel_task
+ */
+function manage(action, args = {}, ctx = {}) {
+    const a = String(action || '');
+    if (!MANAGE_ACTIONS.includes(a)) {
+        return `error: 未知 action「${a}」。可用：${MANAGE_ACTIONS.join(' / ')}`;
+    }
+    const now = Date.now();
+
+    try {
+        if (a === 'create_reminder') {
+            // 复用 schedule_reminder 的严格解析：title/text 必填，dueAt 或 delayMs 二选一
+            const spec = parseReminder(args, now, 'self_manage.create_reminder');
+            const job = createJob({
+                jobId: newId('job'),
+                sessionId: ctx.sessionId,
+                origin: ctx.origin || 'self_ops',
+                uid: ctx.uid ?? 1,
+                kind: 'reminder',
+                title: spec.title,
+                payload: spec.payload,
+                dueAt: spec.dueAt,
+                recurrence: 'once',
+                now,
+            });
+            jobStore().save(job, 'job_created');
+            policy.audit({ action: 'create_reminder', key: job.jobId, after: `${job.title}@${job.dueAt}`, ok: true, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+            return `已补设提醒「${job.title}」，将在 ${friendlyTime(job.dueAt)} 提醒主人：${job.payload}（id=${job.jobId}）`;
+        }
+
+        if (a === 'cancel_reminder') {
+            const { job, error } = ownedJob(args.jobId, ctx);
+            if (error) {
+                policy.audit({ action: 'cancel_reminder', key: args.jobId, ok: false, detail: error, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+                return `error: ${error}`;
+            }
+            if (job.status === 'cancelled') return `提醒「${job.title}」已经是取消状态，无需重复操作。`;
+            const cancelled = cancelJob(job, now);
+            jobStore().save(cancelled, 'job_cancelled');
+            policy.audit({ action: 'cancel_reminder', key: job.jobId, before: `${job.title}@${friendlyTime(job.dueAt)}/${job.status}`, after: 'cancelled', ok: true, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+            return `已取消提醒「${job.title}」（原定 ${friendlyTime(job.dueAt)}）。它不会再触发了。`;
+        }
+
+        if (a === 'update_reminder') {
+            const { job, error } = ownedJob(args.jobId, ctx);
+            if (error) {
+                policy.audit({ action: 'update_reminder', key: args.jobId, ok: false, detail: error, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+                return `error: ${error}`;
+            }
+            const patch = {};
+            if (args.title !== undefined) {
+                if (typeof args.title !== 'string' || !args.title.trim()) throw new Error('title 必须是非空字符串');
+                patch.title = args.title.trim().slice(0, 80);
+            }
+            if (args.text !== undefined) {
+                if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('text 必须是非空字符串');
+                patch.payload = args.text.slice(0, 2000);
+            }
+            if (args.dueAt !== undefined) {
+                if (typeof args.dueAt !== 'number' || !Number.isFinite(args.dueAt) || args.dueAt <= 0) {
+                    throw new Error('dueAt 必须是合法的毫秒时间戳');
+                }
+                patch.dueAt = args.dueAt;
+            }
+            if (!Object.keys(patch).length) return 'error: 没有要修改的字段（title / text / dueAt 至少给一个）';
+            const next = { ...job, ...patch, status: 'pending', updatedAt: now };
+            jobStore().save(next, 'job_created');
+            policy.audit({ action: 'update_reminder', key: job.jobId, before: `${job.title}@${friendlyTime(job.dueAt)}`, after: `${next.title}@${friendlyTime(next.dueAt)}`, ok: true, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+            return `已更新提醒「${next.title}」，现在设定为 ${friendlyTime(next.dueAt)}：${next.payload}`;
+        }
+
+        if (a === 'cancel_task') {
+            const task = taskStore().get(args.taskId);
+            if (!task) {
+                policy.audit({ action: 'cancel_task', key: args.taskId, ok: false, detail: '任务不存在', sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+                return `error: 找不到任务「${args.taskId}」`;
+            }
+            if (ctx.sessionId && task.sessionId !== ctx.sessionId) return 'error: 该任务不属于当前会话，不能操作';
+            const cancelled = cancelTask(task, now);
+            taskStore().save(cancelled, 'task_cancelled');
+            policy.audit({ action: 'cancel_task', key: task.taskId, before: `${task.title}/${task.status}`, after: 'cancelled', ok: true, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+            return `已取消任务「${task.title}」。`;
+        }
+    } catch (e) {
+        policy.audit({ action, ok: false, detail: e.message, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
+        return `error: ${e.message}`;
+    }
+}
+
+module.exports = { TOPICS, MANAGE_ACTIONS, buildManifest, read, update, manage };
