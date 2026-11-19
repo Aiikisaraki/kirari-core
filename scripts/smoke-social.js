@@ -211,6 +211,24 @@ const { OneBotAdapter } = require(path.join(ROOT, 'src/bot/onebotAdapter'));
     const noGid = await call({ action: 'members' });
     check('缺 groupId 时提示怎么补', noGid.includes('groupId') || noGid.includes('群号'));
 
+    // 回归：适配器 id 自带连字符（线上真实形态是 bot-mvwi1tw3-x1b5）。
+    // 早期用 /^bot-([^-]+)-/ 切 sessionId，只抓到第一段，社交查询全被
+    // 错误的 adapterId 过滤成空 —— 她就又"答不上来"了。
+    console.log('\n[4b] 带连字符的适配器 id（线上真实形态）');
+    const hyphenId = 'adp-abc-123';
+    await db.upsertSocialGroups(hyphenId, [{ groupId: '900', groupName: '连字符群', memberCount: 5 }]);
+    const hyOverview = await dispatch({ action: 'overview' }, { sessionId: `bot-${hyphenId}-private:1001` });
+    check(
+        '带连字符的 adapterId 能被正确切出来',
+        hyOverview.includes('1 个') && !hyOverview.includes('还没同步'),
+        hyOverview.replace(/\n/g, ' | '),
+    );
+    // 三种会话键前缀都要能切（group:/private:/channel:/dm:）
+    for (const key of ['group:900:1001', 'private:1001', 'channel:chan1', 'dm:u1']) {
+        const o = await dispatch({ action: 'overview' }, { sessionId: `bot-${hyphenId}-${key}` });
+        check(`会话键 ${key} 也能切出 adapterId`, o.includes('1 个'), o.replace(/\n/g, ' | '));
+    }
+
     console.log('\n[5] 环境摘要块（注入提示词用）');
     const block = await social.buildEnvironmentBlock({ adapterId: 'qq' });
     check('摘要非空', block.length > 0);
