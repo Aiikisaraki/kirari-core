@@ -49,12 +49,14 @@ function main() {
     const args = parseArgs(process.argv);
     const coreLayout = require('../src/kirariHome').LAYOUT;
 
-    // 桌宠仓库默认与本仓库同级（D:\personal-proj\{pet-api,akisaki-kirari}）。
+    // 桌宠仓库默认与本仓库同级，但目录名在不同机器上不同：
+    // 新版按 GitHub 仓库名叫 kirari-desktop，老机器上叫 akisaki-kirari。
     // 历史上有过 pet-proj 中间层，那个结构已经废弃；这里保留旧路径作为候选，
     // 只是为了让还没改工作区的人跑得动，不是让它悄悄兜底 —— 全都找不到就明确报错。
     const candidates = args.desktop
         ? [args.desktop]
         : [
+              path.resolve(__dirname, '..', '..', 'kirari-desktop'),
               path.resolve(__dirname, '..', '..', 'akisaki-kirari'),
               path.resolve(__dirname, '..', '..', 'pet-proj', 'akisaki-kirari'),
           ];
