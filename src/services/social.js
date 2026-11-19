@@ -137,7 +137,9 @@ async function buildEnvironmentBlock(opts = {}) {
     if (!overview.groups && !overview.contacts) return '';
 
     lines.push('\n\n【你周围的环境 · 这些是事实，不用猜】');
-    if (opts.adapterId) lines.push(`- 接入方式：${opts.adapterId}（OneBot 协议端）。`);
+    // 别把内部适配器 id（bot-mvwi1tw3-x1b5 这种）念给她听——那是实现细节，
+    // 她看到只会在回答里复读一串乱码。按协议类型说人话即可。
+    if (opts.adapterId) lines.push(`- 你现在是通过 QQ（OneBot 协议端）跟人联系的。`);
     lines.push(`- 你在 ${overview.groups} 个群里，通讯录里有 ${overview.contacts} 个好友；这些群里一共有 ${overview.members} 个不同的人。`);
     if (overview.people) lines.push(`- 到目前为止真正跟你说过话的有 ${overview.people} 个人。`);
 
