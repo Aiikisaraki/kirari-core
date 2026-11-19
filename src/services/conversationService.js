@@ -14,6 +14,9 @@ const {
 } = require('./reply/promptBuilder');
 const { preflightTools, detectCorrectionIntent } = require('./reply/intent');
 const { buildTimeContext } = require('./reply/timeContext');
+const { buildSceneContext } = require('./reply/sceneContext');
+const { buildCharter } = require('./reply/charter');
+const memory = require('./memory');
 const selfOps = require('./selfOps');
 const locationSvc = require('./locationService');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
@@ -52,7 +55,7 @@ async function salvageAsText(aiContext, messages, onDelta = null, profile = null
       (m, i) =>
         !(i === messages.length - 1 && m.role === 'assistant' && (!m.content || !m.content.trim()) && (!m.tool_calls || m.tool_calls.length === 0)),
     );
-    const FORCE = '\n\n[系统] 你必须现在直接给出最终回复，不要再调用任何工具。用你平时和主人说话的口吻回答即可。';
+    const FORCE = '\n\n[系统] 你必须现在直接给出最终回复，不要再调用任何工具。用你平时说话的口吻回答即可。';
     const patched = cleaned.map((m) =>
       m.role === 'system' ? { ...m, content: (m.content || '') + FORCE } : m,
     );
@@ -71,7 +74,7 @@ async function salvageAsText(aiContext, messages, onDelta = null, profile = null
   }
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, scopeId = null, onDelta = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, scopeId = null, scene = null, onDelta = null } = {}) {
   // 阶段 D：能力作用域。优先用调用方显式传入；否则从 ws 派生（WS 链路）；再否则回退到 uid。
   // 这是 frontend 工具与技能执行器的隔离维度——A 连接注册的工具不会出现在 B 连接。
   const capScope = scopeId || (ws ? capabilities.scopeKey('ws', ws.__capScopeId || String(ws.authUid || 'anon')) : capabilities.scopeKey('local', String(aiContext.userid ?? 'anon')));
@@ -288,6 +291,48 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 成立——进程重启后任务在库里，下一条消息自然恢复。注入段数不变（仍 4 段）。
     const taskResume = taskRuntime.resumeBlock(sessionId);
     if (taskResume) systemPrompt += taskResume;
+
+    // 场合感知：告诉模型此刻在群聊还是私聊、对谁说话、该收着还是放松，
+    // 并给出群聊隐私红线（不复述私聊内容/设置/内部排查）与「别像模板」的语气要求。
+    // 解决「共享身份后各窗口决策僵化」和「私聊内容被搬进群聊」。
+    systemPrompt += buildSceneContext(scene);
+
+    // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
+    systemPrompt += buildCharter();
+
+    // 长期记忆：按当前场合可见的记忆池做联想检索，注入少量高相关条目。
+    // 这是「换个对话也认得你」的落点——记忆不挂在 sessionId 上，而是挂
+    // self/person/scene/global 分层的 subject 上；可见性由 memory.js 强制过滤。
+    try {
+      const memCtx = {
+        sessionId,
+        uid: aiContext.userid,
+        isOwner: scene && typeof scene.isOwner === 'boolean' ? scene.isOwner : null,
+        isGroup: scene ? 'group' === String(scene.chatType || '') : undefined,
+        counterpartId: scene && scene.senderId ? String(scene.senderId) : undefined,
+        // 管理权限角色（owner/admin/user）。只影响"能改什么设置"，
+        // 不影响她记得谁——记忆按人分池，与权限无关。
+        role: scene && scene.role ? String(scene.role) : null,
+        displayName: scene && scene.senderName ? String(scene.senderName) : null,
+        platform: scene && scene.platform ? String(scene.platform) : null,
+      };
+      const mem = await memory.buildMemoryBlock(memCtx, text || '');
+      if (mem.block) systemPrompt += mem.block;
+    } catch (e) {
+      console.warn('[aiReply] 记忆注入失败（已忽略）:', e?.message || e);
+    }
+
+    // 记忆机制的使用指引：告诉她什么时候该记、什么不该记。
+    // 只给判断标准，不逼她每轮都调工具——"经过一些考量会自动记入"靠这个。
+    systemPrompt +=
+      '\n\n【关于记忆 · 什么时候该动用 remember】' +
+      '\n你有跨对话的长期记忆（工具名 memory）。它不依赖当前这场对话，所以她/他下次换个窗口找你，你依然认得。' +
+      '\n值得记：对方明确说「记住这个」、透露长期偏好与习惯（忌口、作息、称呼偏好）、重要个人信息、' +
+      '你们约定以后要怎么做、发生了一件以后可能还会提起的事。' +
+      '\n不值得记：寒暄、一次性问答、闲聊里随口提的细节、你自己刚说过的话。' +
+      '\n记的时候 scope 想清楚：关于主人本人的长期事实 → self；关于此刻这个人 → person；' +
+      '关于这个群/这个场合大家的事 → scene；通用约定与常识 → global。' +
+      '\n不确定要不要记就先别记；记错了比没记更麻烦。对方说「忘了这件事」时用 action=forget。';
 
     // 阶段 D：SKILL.md 渐进披露——system 里只放「name: description」目录摘要，
     // 模型需要时用 load_skill(name) 才加载正文（装十个技能也不再全量吃 token）。
@@ -630,6 +675,12 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             turnId,
             uid: aiContext.userid,
             origin: 'core',
+            // 记忆/自我运维要判断「是不是主人在说话」「这是不是群聊」——
+            // 从本轮 scene 透传，避免工具里再猜一遍。
+            isOwner: scene && typeof scene.isOwner === 'boolean' ? scene.isOwner : null,
+            isGroup: scene ? String(scene.chatType || '') === 'group' : undefined,
+            role: scene && scene.role ? String(scene.role) : null,
+            counterpartId: scene && scene.senderId ? String(scene.senderId) : undefined,
             // 前端工具执行器：若本 scope 注册了 connection 能力，registry 会用它；
             // 这里兜底挂上（兼容尚未按新接口注册的旧调用方）。
             invokeFrontendTool: aiContext.invokeFrontendTool,

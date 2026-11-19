@@ -378,7 +378,12 @@ class QQOfficialAdapter {
       text,
       images,
       isGroup,
-      // 本适配器回发用；handleIncoming 不读这两个字段，互不干扰
+      // 场合细节：官方事件里作者只有 openid，没有昵称——留空即可，
+      // 至少让模型知道"这是群聊/频道，还有别人在看"（隐私边界靠这个判断）。
+      senderName: '',
+      senderRole: '',
+      groupName: '',
+      // 本适配器回发用；handleIncoming 不读这几个字段，互不干扰
       scene,
       msgId: id,
     };

@@ -292,7 +292,7 @@ function setupWebSocket(server, options = {}) {
                 ws.send(
                     JSON.stringify({
                         type: "pet_response",
-                        speech: "主人好呀~ (ฅ´ω`ฅ)",
+                        speech: "在的。",
                         action: "wave",
                         mood: "curious",
                         emotion: "wave",

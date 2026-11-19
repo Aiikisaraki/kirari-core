@@ -208,6 +208,11 @@ class OneBotAdapter {
         if (!finalText && images.length === 0) return;
 
         const conversationKey = msgType === 'group' && groupId ? `group:${groupId}:${userId}` : `private:${userId}`;
+        // 场合细节：sender 里的昵称/群名片、role（owner/admin/member）、群名（部分实现会带）。
+        // 这些原本被整包丢弃，导致模型不知道在跟谁说话、也不知道在群里——
+        // 是"共享身份下决策僵化"的直接原因之一（2026-11-19 用户反馈）。
+        const senderName = String(frame.sender?.card || frame.sender?.nickname || '').trim();
+        const senderRole = String(frame.sender?.role || '').trim();
         this.onMessage({
             adapterId: this.id,
             senderId: userId,
@@ -216,6 +221,9 @@ class OneBotAdapter {
             text: finalText,
             images,
             isGroup: msgType === 'group',
+            senderName,
+            senderRole,
+            groupName: String(frame.group_name || '').trim(),
         });
     }
 

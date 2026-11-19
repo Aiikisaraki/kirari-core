@@ -124,4 +124,44 @@ module.exports = {
     sessionStore.set(intoSessionId, target);
     return moved;
   },
+
+  // ── 长期记忆：转发到 dbStorage ──────────────────────────────────────
+  // 记忆必须在重启、换会话之后依然存在，内存 Map 做不到（进程一退就没了）。
+  // 而 memories 表在 pet_sessions.db 里、两端共库——所以即使 STORAGE_TYPE=memory
+  // （开发态只把"消息"放内存），长期记忆也照常落库。此处透传，语义与 dbStorage 一致。
+  ...memoryDaoForwarding(),
 };
+
+/** 惰性转发：避免 memoryStorage ↔ dbStorage 的顶层循环 require。 */
+function memoryDaoForwarding() {
+  const methods = [
+    'addMemory',
+    'listMemories',
+    'listMemoriesAbout',
+    'findMemoryByContent',
+    'updateMemory',
+    'deleteMemory',
+    'deleteMemoriesBySubject',
+    'touchMemory',
+    'memoryStats',
+    'upsertPerson',
+    'getPerson',
+    'listPeople',
+    'setPersonRole',
+    'setPersonNotes',
+    'setPersonAlias',
+    'getOwnerKey',
+    'addLink',
+    'listLinks',
+    'removeLink',
+    'expandLinks',
+  ];
+  const out = {};
+  for (const m of methods) {
+    out[m] = async (...args) => {
+      const dao = require('./dbStorage');
+      return dao[m](...args);
+    };
+  }
+  return out;
+}

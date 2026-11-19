@@ -79,6 +79,23 @@ function canWrite(key) {
     return Object.prototype.hasOwnProperty.call(WRITABLE, key);
 }
 
+/**
+ * 判断是不是「群聊/多人场合」的会话。
+ *
+ * 为什么要这个：self_* 工具是所有会话共用的能力，群里的陌生人同样能触发。
+ * 如果不加闸门，群里任何人一句「把你设置读出来」「把你思考模式关掉」就能越权。
+ * 所以：改自己/读敏感信息只在私下进行，群聊里一律拒绝。
+ *
+ * sessionId 形态（两端一致）：
+ *   bot-<adapter>-group:<gid>:<uid>   bot-<adapter>-private:<uid>
+ *   bot:<platform>:group:<gid>        bot:<platform>:user:<uid>
+ *   本机/控制台 = 纯 uuid（不含 group:/channel:/dm:）
+ */
+function isGroupSession(sessionId) {
+    const s = String(sessionId || '');
+    return /(^|[-:_.])(group|channel|dm):/i.test(s);
+}
+
 /** 校验并规范化一个写入值；不在白名单抛错。 */
 function validate(key, value) {
     const rule = WRITABLE[key];
@@ -117,4 +134,4 @@ function audit({ action, key, before, after, detail, ok = true, sessionId, uid, 
     return rec;
 }
 
-module.exports = { WRITABLE, canWrite, validate, describeWritable, audit, AUDIT_FILE };
+module.exports = { WRITABLE, canWrite, validate, describeWritable, audit, AUDIT_FILE, isGroupSession };

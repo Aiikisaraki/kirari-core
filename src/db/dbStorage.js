@@ -143,6 +143,92 @@ db.exec(`
     UNIQUE(userid, date)
   );
   CREATE INDEX IF NOT EXISTS idx_daily_memory_user_date ON daily_memory(userid, date);
+  -- ── 长期记忆（2026-11-19 用户拍板：记忆不能随会话撕裂）────────────────
+  -- 旧模型只有「按 session_id 存的消息」，于是新开一个对话她就像不认识你。
+  -- 现在引入 subject 分层：一层记忆挂在谁身上、在哪个场合可见，两个维度都存字段里。
+  --
+  -- subject 分层（决定「谁会记得这件事」）：
+  --   person::{key}        某个具体的对话者（平台账号）→ 只在这个人相关的场合可见
+  --   self::{uid}          关于她自己 / 拥有者本人的长期事实 → 一对一时可见
+  --   scene::{scope}       某个场合（某群）的公共记忆 → 只在这个场合可见
+  --   global               世界知识、约定、不需要归属的事实 → 所有场合可见
+  --
+  -- visibility 是**相对对话者**的，不是相对「是不是主人」的：
+  --   public   任何场合都能提（如"她喜欢猫"这类无害事实）
+  --   private  只在私下/一对一能提，群聊里绝不外泄
+  --   secret   只有当这段记忆本来就是「关于此刻这个人」时才可读
+  --            （关于 B 的私事，A 在一对一里也读不到 —— 这才是"每人一套独立记忆"）
+  CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'fact',
+    content TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'private',
+    -- 这条记忆是在哪个会话产生的（用于溯源与"别在来源场合之外复述"判断）
+    origin_session TEXT,
+    -- 这条记忆说的是「谁的事」（平台账号）。与 subject 不同：
+    --   subject 决定存进谁的池子，about_person 决定内容是关于谁的。
+    -- 例：A 跟我说「B 最近失恋了」→ subject=person:A（A 转述的，存在 A 的池），
+    --     about_person=B（内容关于 B）。这样 B 问起时她知道，也能判断对 A 该不该讲。
+    about_person TEXT,
+    -- 谁说的：owner / guest / self（她自己观察得出）。仅溯源，不参与可见性判断。
+    source TEXT NOT NULL DEFAULT 'owner',
+    -- 重要度 1-5：检索排序用，也是"要不要主动想起"的门槛
+    importance INTEGER NOT NULL DEFAULT 3,
+    -- 命中次数与最近命中时间：让"反复用到"的记忆自然浮上来
+    hits INTEGER NOT NULL DEFAULT 0,
+    last_hit_at DATETIME,
+    -- 软删除：用户说"忘掉"时置位，保留审计痕迹而不是物理抹除
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject, deleted);
+  CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind, deleted);
+
+  -- ── 人（每个对话者一份稳定档案）────────────────────────────────────
+  -- 身份不是「主人 / 客人」二元。每个跟她说过话的人都在这里有自己的一条记录，
+  -- 各自有独立的记忆池。role 只表达**管理权限**（谁能改她的设置、看她的内部状态），
+  -- 不决定她记得谁、也不决定记忆给谁看。
+  --
+  -- key：平台内稳定的对话者标识（如 onebot 的 QQ 号）。跨平台同名不加协商，
+  --      因为不同平台的同一个人无法自动确认（宁可不合并，也不要张冠李戴）。
+  CREATE TABLE IF NOT EXISTS people (
+    person_key TEXT PRIMARY KEY,
+    -- owner: 拥有者（最高管理权，可改设置/查内部状态）
+    -- admin: 被信任的人（可用自我运维只读）
+    -- user : 普通对话者（默认）
+    role TEXT NOT NULL DEFAULT 'user',
+    -- 显示用昵称/群名片，随每次对话更新（不覆盖成空）
+    display_name TEXT,
+    -- 平台来源（onebot / qqofficial / desktop ...），仅用于溯源
+    platform TEXT,
+    -- 她对这个人的称呼偏好（对方让我怎么叫他），空则用 display_name
+    alias TEXT,
+    -- 她对这个人的整体印象/说话方式备注（自由文本，她自己维护）
+    notes TEXT,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- ── 记忆关联（联想网络）────────────────────────────────────────────
+  -- 「这些记忆可以随着人际关系的拓展而产生互相关联」：
+  --   a 通常是 memories.id 或 person key，b 同理，relation 描述怎么关联。
+  -- 例：(person:1001) --knows--> (person:2002)  A 和 B 认识
+  --     (memories:12)  --about--> (person:1001)  这条记忆是关于 A 的
+  --     (memories:12)  --related--> (memories:33) 两件事相关
+  CREATE TABLE IF NOT EXISTS memory_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT 'related',
+    -- 关联强度 1-5：影响联想扩散的深度
+    weight INTEGER NOT NULL DEFAULT 3,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(a, b, relation)
+  );
+  CREATE INDEX IF NOT EXISTS idx_memory_links_a ON memory_links(a, relation);
+  CREATE INDEX IF NOT EXISTS idx_memory_links_b ON memory_links(b, relation);
   -- 多模型：用户自己配的多套「服务地址 + 型号 + 密钥」，任选一套当前使用。
   -- 旧的 api_tokens 单套配置保留不动（搜索配置仍存在那里）；模型套只在聊天取配置时覆盖那三个字段。
   -- 字段约定与桌面端 config.json 完全一致：endpoint / key（2026-10-11 统一，旧列名 api_endpoint/token 由下方迁移）。
@@ -248,6 +334,17 @@ db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_userid_unique ON api_t
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
 if (!messageColumns.includes('emotion')) db.exec('ALTER TABLE messages ADD COLUMN emotion TEXT');
 if (!messageColumns.includes('images_json')) db.exec('ALTER TABLE messages ADD COLUMN images_json TEXT');
+
+// memories 表的老库补列：about_person 是「这条记忆关于谁」，与 subject 正交。
+// 幂等：先查再加（SQLite 的 ADD COLUMN 没有 IF NOT EXISTS）。
+const memoryColumns = db.prepare('PRAGMA table_info(memories)').all().map((c) => c.name);
+if (memoryColumns.length && !memoryColumns.includes('about_person')) {
+  db.exec('ALTER TABLE memories ADD COLUMN about_person TEXT');
+}
+// 索引放在补列之后建，新旧两种表结构都能成功。
+// （不能在 DDL 模板里建：老库的 memories 表没有该列，
+//   CREATE TABLE IF NOT EXISTS 对它是空操作，紧接着建索引会报 no such column 并中断初始化。）
+if (memoryColumns.length) db.exec('CREATE INDEX IF NOT EXISTS idx_memories_about ON memories(about_person, deleted)');
 
 module.exports = {
   /** 事件流适配器复用同一个连接，不在外部另开 DB。 */
@@ -581,7 +678,263 @@ module.exports = {
     return rows.map((r) => r.userid);
   },
 
-  // ---- 阶段 E：settings_kv 抢占式锁（两端共库，保证同档简报只跑一次）----
+  // ---- 长期记忆 DAO（memories 表）----
+  // 只做存取，不做「该不该记」的判断——判断在 services/memory.js。
+  // 两端共库，桌宠版用同一张表（列名与语义必须保持一致）。
+  addMemory: async (row = {}) => {
+    const content = String(row.content || '').trim();
+    if (!content) return null;
+    const info = db
+      .prepare(
+        `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        String(row.subject || 'global'),
+        String(row.kind || 'fact'),
+        content.slice(0, 2000),
+        ['public', 'private', 'secret'].includes(row.visibility) ? row.visibility : 'private',
+        row.originSession || null,
+        row.aboutPerson || null,
+        String(row.source || 'owner'),
+        Math.min(5, Math.max(1, Number(row.importance) || 3)),
+      );
+    return Number(info.lastInsertRowid);
+  },
+
+  /** 按 subject 列表取记忆。includeDeleted 仅内部排查用。 */
+  listMemories: async (subjects = [], opts = {}) => {
+    const subs = (Array.isArray(subjects) ? subjects : [subjects]).filter(Boolean).map(String);
+    if (!subs.length) return [];
+    const ph = subs.map(() => '?').join(', ');
+    const rows = db
+      .prepare(
+        `SELECT * FROM memories WHERE subject IN (${ph}) ${opts.includeDeleted ? '' : 'AND deleted = 0'}
+         ORDER BY importance DESC, id DESC LIMIT ?`,
+      )
+      .all(...subs, Math.min(500, Math.max(1, Number(opts.limit) || 120)));
+    return rows.map(mapMemoryRow);
+  },
+
+  /** 按「这条记忆关于谁」取（跨 subject 池）。用于想起某个人相关的事。 */
+  listMemoriesAbout: async (personKey, opts = {}) => {
+    const k = String(personKey || '').trim();
+    if (!k) return [];
+    const rows = db
+      .prepare(
+        `SELECT * FROM memories WHERE about_person = ? AND deleted = 0
+         ORDER BY importance DESC, id DESC LIMIT ?`,
+      )
+      .all(k, Math.min(500, Math.max(1, Number(opts.limit) || 120)));
+    return rows.map(mapMemoryRow);
+  },
+
+  /** 去重判断：同一 subject 下是否已有等价内容（避免反复记同一件事）。 */
+  findMemoryByContent: async (subject, content) => {
+    const row = db
+      .prepare('SELECT * FROM memories WHERE subject = ? AND deleted = 0 AND content = ? LIMIT 1')
+      .get(String(subject), String(content || '').trim().slice(0, 2000));
+    return row ? mapMemoryRow(row) : null;
+  },
+
+  updateMemory: async (id, patch = {}) => {
+    const sets = [];
+    const vals = [];
+    if (patch.content !== undefined) {
+      const c = String(patch.content || '').trim();
+      if (!c) return false;
+      sets.push('content = ?');
+      vals.push(c.slice(0, 2000));
+    }
+    if (patch.visibility !== undefined && ['public', 'private', 'secret'].includes(patch.visibility)) {
+      sets.push('visibility = ?');
+      vals.push(patch.visibility);
+    }
+    if (patch.importance !== undefined) {
+      sets.push('importance = ?');
+      vals.push(Math.min(5, Math.max(1, Number(patch.importance) || 3)));
+    }
+    if (!sets.length) return false;
+    sets.push('updated_at = CURRENT_TIMESTAMP');
+    vals.push(Number(id));
+    const info = db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return info.changes > 0;
+  },
+
+  /** 软删除（用户说「忘掉」）。保留行以便审计与误删恢复。 */
+  deleteMemory: async (id) => {
+    const info = db.prepare('UPDATE memories SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(Number(id));
+    return info.changes > 0;
+  },
+
+  /** 批量软删除某 subject 下的记忆（清空一段关系/一个场合的记忆）。 */
+  deleteMemoriesBySubject: async (subject) => {
+    const info = db.prepare('UPDATE memories SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE subject = ? AND deleted = 0').run(String(subject));
+    return info.changes;
+  },
+
+  /** 命中计数：检索命中后调用，让常用记忆权重上升、久不用的自然下沉。 */
+  touchMemory: async (ids = []) => {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    if (!list.length) return 0;
+    const stmt = db.prepare('UPDATE memories SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP WHERE id = ?');
+    let n = 0;
+    for (const id of list) n += stmt.run(id).changes;
+    return n;
+  },
+
+  /** 记忆统计（自我认知 / 控制台展示用）。 */
+  memoryStats: async () => {
+    const rows = db
+      .prepare('SELECT subject, COUNT(*) AS n FROM memories WHERE deleted = 0 GROUP BY subject ORDER BY n DESC LIMIT 200')
+      .all();
+    const total = db.prepare('SELECT COUNT(*) AS n FROM memories WHERE deleted = 0').get();
+    return { total: total ? total.n : 0, bySubject: rows.map((r) => ({ subject: r.subject, count: r.n })) };
+  },
+
+  // ---- 人物档案（people 表）----
+  // 每个跟她说过话的人一条记录。role 只表达管理权限，不影响记忆归属。
+  upsertPerson: async (row = {}) => {
+    const key = String(row.personKey || '').trim();
+    if (!key) return false;
+    // COALESCE 保护：新消息里没带昵称时不要把已有昵称覆盖成空
+    db.prepare(
+      `INSERT INTO people (person_key, role, display_name, platform, alias)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(person_key) DO UPDATE SET
+         display_name = COALESCE(excluded.display_name, people.display_name),
+         platform     = COALESCE(excluded.platform, people.platform),
+         role         = CASE WHEN excluded.role = 'owner' THEN 'owner' ELSE people.role END,
+         last_seen_at = CURRENT_TIMESTAMP`,
+    ).run(
+      key,
+      ['owner', 'admin', 'user'].includes(row.role) ? row.role : 'user',
+      row.displayName || null,
+      row.platform || null,
+      row.alias || null,
+    );
+    return true;
+  },
+
+  getPerson: async (personKey) => {
+    const r = db.prepare('SELECT * FROM people WHERE person_key = ?').get(String(personKey || ''));
+    if (!r) return null;
+    return {
+      personKey: r.person_key,
+      role: r.role,
+      displayName: r.display_name,
+      platform: r.platform,
+      alias: r.alias,
+      notes: r.notes,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at,
+    };
+  },
+
+  listPeople: async (limit = 200) =>
+    db.prepare('SELECT * FROM people ORDER BY last_seen_at DESC LIMIT ?').all(Math.min(500, Math.max(1, Number(limit) || 200))).map((r) => ({
+      personKey: r.person_key,
+      role: r.role,
+      displayName: r.display_name,
+      platform: r.platform,
+      alias: r.alias,
+      notes: r.notes,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at,
+    })),
+
+  setPersonRole: async (personKey, role) => {
+    if (!['owner', 'admin', 'user'].includes(role)) return false;
+    const info = db.prepare('UPDATE people SET role = ? WHERE person_key = ?').run(role, String(personKey || ''));
+    return info.changes > 0;
+  },
+
+  setPersonNotes: async (personKey, notes) => {
+    const info = db.prepare('UPDATE people SET notes = ? WHERE person_key = ?').run(String(notes || '').slice(0, 2000), String(personKey || ''));
+    return info.changes > 0;
+  },
+
+  setPersonAlias: async (personKey, alias) => {
+    const info = db.prepare('UPDATE people SET alias = ? WHERE person_key = ?').run(String(alias || '').slice(0, 100), String(personKey || ''));
+    return info.changes > 0;
+  },
+
+  /** 谁是拥有者（用于「管理权」判定）。可能有多个，取最早看到的那个。 */
+  getOwnerKey: async () => {
+    const r = db.prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1").get();
+    return r ? r.person_key : null;
+  },
+
+  // ---- 记忆关联（memory_links 表）----
+  // 「人际关系的拓展会产生互相关联」：人—人、人—事、事—事。
+  addLink: async (a, b, relation = 'related', weight = 3) => {
+    const A = String(a || '').trim();
+    const B = String(b || '').trim();
+    if (!A || !B || A === B) return false;
+    const info = db
+      .prepare(
+        `INSERT INTO memory_links (a, b, relation, weight) VALUES (?, ?, ?, ?)
+         ON CONFLICT(a, b, relation) DO UPDATE SET weight = excluded.weight`,
+      )
+      .run(A, B, String(relation || 'related'), Math.min(5, Math.max(1, Number(weight) || 3)));
+    return info.changes > 0;
+  },
+
+  /** 取某个节点（person::x / memory::12 等）的所有关联。双向都查。 */
+  listLinks: async (node, relation = null) => {
+    const n = String(node || '').trim();
+    if (!n) return [];
+    const sql = relation
+      ? 'SELECT * FROM memory_links WHERE (a = ? OR b = ?) AND relation = ? ORDER BY weight DESC LIMIT 200'
+      : 'SELECT * FROM memory_links WHERE a = ? OR b = ? ORDER BY weight DESC LIMIT 200';
+    const args = relation ? [n, n, String(relation)] : [n, n];
+    return db.prepare(sql).all(...args).map((r) => ({
+      id: r.id,
+      a: r.a,
+      b: r.b,
+      relation: r.relation,
+      weight: r.weight,
+      /** 相对于查询节点的另一端 */
+      other: r.a === n ? r.b : r.a,
+    }));
+  },
+
+  removeLink: async (a, b, relation = 'related') => {
+    const info = db
+      .prepare('DELETE FROM memory_links WHERE a = ? AND b = ? AND relation = ?')
+      .run(String(a || ''), String(b || ''), String(relation || 'related'));
+    return info.changes > 0;
+  },
+
+  /**
+   * 联想扩散：从一组起点节点出发，沿 memory_links 走 1-2 跳，收集相关节点。
+   * 用于「A 和 B 是朋友，所以 B 的事在 A 面前也可以自然想起」这类关联记忆。
+   */
+  expandLinks: async (nodes = [], opts = {}) => {
+    const seen = new Set((Array.isArray(nodes) ? nodes : []).map(String).filter(Boolean));
+    if (!seen.size) return [];
+    const depth = Math.min(2, Math.max(1, Number(opts.depth) || 1));
+    const maxWeight = opts.minWeight != null ? Number(opts.minWeight) : 1;
+    let frontier = [...seen];
+    const found = [];
+    for (let d = 0; d < depth; d += 1) {
+      const next = [];
+      for (const node of frontier) {
+        const links = await module.exports.listLinks(node);
+        for (const l of links) {
+          if (l.weight < maxWeight) continue;
+          if (seen.has(l.other)) continue;
+          seen.add(l.other);
+          next.push(l.other);
+          found.push(l);
+        }
+      }
+      if (!next.length) break;
+      frontier = next;
+    }
+    return found;
+  },
+
   /** 尝试写入一个键；返回 true=抢到（此前不存在），false=已被占用。 */
   claimSetting: (key, value = '1') => {
     const info = db.prepare('INSERT OR IGNORE INTO settings_kv (key, value) VALUES (?, ?)').run(key, value);
@@ -856,6 +1209,25 @@ function safeJsonArray(s) {
   } catch {
     return [];
   }
+}
+
+// memories 行 → 驼峰对象（与两端调用方的字段名保持一致）
+function mapMemoryRow(r) {
+  return {
+    id: r.id,
+    subject: r.subject,
+    kind: r.kind,
+    content: r.content,
+    visibility: r.visibility,
+    originSession: r.origin_session,
+    aboutPerson: r.about_person || null,
+    source: r.source,
+    importance: r.importance,
+    hits: r.hits,
+    lastHitAt: r.last_hit_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 module.exports.maskToken = maskToken;

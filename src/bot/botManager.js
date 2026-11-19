@@ -21,6 +21,7 @@ const mcpManager = require('../mcp/mcpManager');
 const contextPool = require('../ai/contextPool');
 const sessionManager = require('../session/sessionManager');
 const localSession = require('../session/localSession');
+const memory = require('../services/memory');
 
 /** 内置账号 uid：机器人消息与桌宠/控制台共用同一份模型配置（BOT_MODEL_UID，默认 1）。 */
 function botUid() {
@@ -81,14 +82,48 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
     // 客人 → 独立 bot- 会话（前缀被 localSession 排除，永不并进主对话）。
     // 与桌宠版 adapter-manager.ts 的 isOwner 路由同语义，配置键同名（ownerAccount）。
     // ownerAccount 由适配器实例实时提供（setOwner 同步），不用启动时的 cfg 快照。
+    //
+    // ⚠️ 必须同时要求「不是群聊」：群里的发言是多人上下文，即使发言人是主人，
+    //    也不能写进只有两个人的本机会话——否则主人在群里 @ 她一句，
+    //    这条群聊消息就混进了私聊历史，之后她在私聊里"记得"群里的内容，
+    //    反向也会把私聊里商量过的事在群里说出来（2026-11-19 用户报的隐私问题）。
     const owner = String(ownerAccount || '');
-    const isOwner = !!owner && incoming.senderId === owner;
-    const sessionId = isOwner
+    const isOwnerAccount = !!owner && incoming.senderId === owner && !incoming.isGroup;
+
+    // 身份不是「主人 / 客人」二元：每个说话的人都有自己的档案与记忆池，
+    // role 只表达管理权限（owner 最高），不决定她记得谁。
+    // 首次见到的人自动建档；configuredOwner 只用来给"配置里指定的那个账号"兜底授予 owner。
+    const personKey = String(incoming.senderId || '');
+    let role = 'user';
+    try {
+        const person = await memory.touchPerson(
+            {
+                personKey,
+                displayName: incoming.senderName || null,
+                platform: incoming.adapterId,
+                // 配置里的 owner 账号首次出现时授予 owner；其余保持原角色
+                role: isOwnerAccount ? 'owner' : undefined,
+            },
+            { sessionId: incoming.conversationKey },
+        );
+        role = person?.role || (isOwnerAccount ? 'owner' : 'user');
+    } catch (e) {
+        console.warn('[bot] 人物档案更新失败（已忽略）:', e?.message || e);
+        role = isOwnerAccount ? 'owner' : 'user';
+    }
+    const isOwner = role === 'owner';
+
+    const sessionId = isOwnerAccount
         ? await localSession.ensureLocalSessionId()
         : `bot-${incoming.adapterId}-${incoming.conversationKey}`;
     console.log(
-        `[bot] 入站 ${incoming.adapterId} ${incoming.conversationKey}${isOwner ? '（主人，并入主对话）' : ''}: "${incoming.text.slice(0, 40)}"`,
+        `[bot] 入站 ${incoming.adapterId} ${incoming.conversationKey}${isOwnerAccount ? '（主人，并入主对话）' : ''}: "${incoming.text.slice(0, 40)}"`,
     );
+
+    // 场合：群聊仅在有 groupId 时按群隔离位置，私聊按人；避免群聊与私聊共享"主人位置"。
+    const locationScope = incoming.isGroup
+        ? `group:${incoming.replyGroupId || incoming.conversationKey}`
+        : `user:${incoming.senderId}`;
 
     // 私人知识库：先本地检索，把片段随请求带上（与桌宠版 chat-session-service 同做法）
     let kbContext = null;
@@ -111,9 +146,25 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
             content: incoming.text,
             images: incoming.images || [],
             sessionId,
+            locationScope,
             persona: getBasePersona() || null,
             skillPrompts: collectSkillPrompts(),
             kbContext,
+            // 场合信息：让她知道自己在群聊/私聊、对方是谁，从而决定语气与隐私边界
+            scene: {
+                chatType: incoming.isGroup ? 'group' : 'private',
+                groupId: incoming.replyGroupId || '',
+                groupName: incoming.groupName || '',
+                senderName: incoming.senderName || '',
+                senderRole: incoming.senderRole || '',
+                // senderId 决定「记住谁」：记忆池按这个人分，群聊私聊都认得他
+                senderId: incoming.senderId || '',
+                isOwner,
+                // 管理权限角色（owner/admin/user），与"记得谁"无关
+                role,
+                memberCount: incoming.memberCount,
+                platform: incoming.adapterId,
+            },
             ws: null,
         });
         await sessionManager.saveMessage(sessionId, 'assistant', reply.speech, {

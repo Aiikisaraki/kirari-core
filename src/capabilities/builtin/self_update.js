@@ -43,6 +43,8 @@ async function dispatch(args, ctx = {}) {
         sessionId: ctx.sessionId,
         uid: ctx.uid,
         origin: ctx.origin,
+        role: ctx.role,
+        isOwner: ctx.isOwner,
     });
 }
 
