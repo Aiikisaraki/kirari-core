@@ -222,9 +222,18 @@ async function main() {
     if (!DRY) {
       try {
         const db = dbStorage.getDb();
-        const info = db.prepare(
-          'UPDATE scheduled_jobs SET session_id = ?, payload = ?, updated_at = ? WHERE job_id = ?',
-        ).run(newSessionId, newPayload, Date.now(), job.jobId);
+        // 顺手回填 owner_key：这是 A2 新加的列，到点触发时它比 payload 更直接。
+        // payload 也能解析出 owner，但那是"老格式约定"，新代码只保证 owner_key；
+        // 两条路都留一份，将来 payload 结构再变也不会退回猜 sessionId。
+        const hasOwnerCol = db.prepare('PRAGMA table_info(scheduled_jobs)').all()
+          .some((c) => c.name === 'owner_key');
+        const info = hasOwnerCol
+          ? db.prepare(
+            'UPDATE scheduled_jobs SET session_id = ?, payload = ?, owner_key = ?, updated_at = ? WHERE job_id = ?',
+          ).run(newSessionId, newPayload, String(owner), Date.now(), job.jobId)
+          : db.prepare(
+            'UPDATE scheduled_jobs SET session_id = ?, payload = ?, updated_at = ? WHERE job_id = ?',
+          ).run(newSessionId, newPayload, Date.now(), job.jobId);
         if (!info.changes) {
           log('         ⚠️ UPDATE 影响 0 行，job 可能已不存在');
         }
