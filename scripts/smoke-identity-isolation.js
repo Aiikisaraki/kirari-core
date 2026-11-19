@@ -200,16 +200,19 @@ async function main() {
   section('8. ★ 定向推送过滤：别人的提醒绝不进主人桌面');
 
   const { shouldDeliverToConn } = require(path.join(ROOT, 'src/websocket/socketServer'));
+  // ⚠️ 这里防的**不是"别人的桌面"**（桌宠只有主人这一台，别人连不到她的脑子）。
+  //    防的是：她在 QQ 上同时跟很多人说话，朋友的提醒到点时不该在**主人自己的
+  //    桌面**上弹出来。所以判据是「这条消息归谁」对不对得上「这台桌面归谁」。
   const pushCases = [
     // [want, cp, trustedLocal, ownerOfSystem, expect, 说明]
-    ['_local', '', true, OWNER_QQ, true, '本机提醒 → 未联动的桌面'],
-    ['_local', FRIEND_QQ, true, OWNER_QQ, false, '本机提醒 → 正替朋友联动的桌面'],
-    [OWNER_QQ, '', true, OWNER_QQ, true, '主人的提醒 → 本机可信桌面（未上报联动）'],
-    [OWNER_QQ, '', false, OWNER_QQ, false, '主人的提醒 → 非本机连接'],
-    [OWNER_QQ, FRIEND_QQ, true, OWNER_QQ, false, '主人的提醒 → 正替朋友联动的桌面'],
+    ['_local', '', true, OWNER_QQ, true, '本机提醒 → 本机桌面'],
+    ['_local', FRIEND_QQ, true, OWNER_QQ, false, '本机提醒 → 正替朋友说话的连接'],
+    [OWNER_QQ, '', true, OWNER_QQ, true, '主人的提醒 → 本机桌面'],
+    [OWNER_QQ, '', false, OWNER_QQ, false, '主人的提醒 → 非本机连接（握手没过）'],
+    [OWNER_QQ, FRIEND_QQ, true, OWNER_QQ, false, '主人的提醒 → 正替朋友说话的连接'],
     [FRIEND_QQ, '', true, OWNER_QQ, false, '★ 朋友的提醒 → 主人桌面（原报障！必须挡住）'],
-    [FRIEND_QQ, FRIEND_QQ, false, OWNER_QQ, true, '朋友的提醒 → 朋友的桌面'],
-    [FRIEND_QQ, OWNER_QQ, true, OWNER_QQ, false, '朋友的提醒 → 主人联动的桌面'],
+    [FRIEND_QQ, FRIEND_QQ, true, OWNER_QQ, true, '朋友的提醒 → 正替这个朋友说话的连接'],
+    [FRIEND_QQ, OWNER_QQ, true, OWNER_QQ, false, '朋友的提醒 → 主人的连接'],
     [FRIEND_QQ, '', true, null, false, '没有 owner 记录 → fail-closed'],
     [OWNER_QQ, '', true, null, false, '没有 owner 记录 → 主人也不推（fail-closed）'],
   ];

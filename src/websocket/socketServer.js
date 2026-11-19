@@ -83,7 +83,10 @@ function setupWebSocket(server, options = {}) {
         //
         // ⚠️ 老实现里这个字段**从来没有被赋过值**（全项目零个赋值点），
         //    于是下面推送过滤永远走 `cp` 为空那条分支 → 等于「谁是主人就推给谁」
-        //    → 语义上退化成广播。现在由客户端显式上报（只在 trustedLocal 连接上采信）。
+        //    → 语义上退化成广播。
+        //
+        // 这个值只反映**本体状态**（本机自用 = 空），不接受客户端上报：
+        // 桌面的身份由握手（内置令牌 + 内网来源）决定，不由连接自己说。
         ws.counterpartId = '';
         // 阶段 D：每条连接一个唯一能力作用域，frontend 工具按此隔离，互不覆盖。
         ws.__capScopeId = `ws-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -149,34 +152,6 @@ function setupWebSocket(server, options = {}) {
             // 前端工具执行结果回传：交给工具桥配对并 resolve 对应 Promise。
             if (message.type === 'tool_result') {
                 toolBridge.handleToolResult(message);
-                return;
-            }
-            // ── 2026-11-20 身份排查（A1）：桌宠上报「我此刻在跟谁联动」──────
-            //
-            // 桌面 WS 连接没有用户维度（都是同一个内置账号 uid=1），唯一能区分
-            // 「这台机器正在替谁说话」的就是它自己上报的对话者。定向推送靠这个值
-            // 过滤，否则别人的提醒会落到主人的桌面上（用户报障）。
-            //
-            // 安全约束：**只有握手通过本机校验的连接才能上报**。
-            // 非本机连接若能自报 counterpartId，就等于让远端的客户端把别人的
-            // 提醒领走 —— 那比不设过滤更糟。
-            if (message.type === 'register_counterpart') {
-                if (!ws.trustedLocal) {
-                    console.warn(
-                        `[ws] 拒绝非本机连接上报 counterpartId（uid=${authUid}，来源不可信）`,
-                    );
-                    return;
-                }
-                const cp = String(message.counterpartId || '').trim();
-                // 只允许账号号/openid 这类朴素标识，拒绝任意串（防止注入奇怪的东西）
-                if (cp && !/^[\w.@:-]{1,64}$/.test(cp)) {
-                    console.warn(`[ws] counterpartId 格式不合法，已忽略：${cp.slice(0, 40)}`);
-                    return;
-                }
-                ws.counterpartId = cp;
-                console.log(
-                    `[ws] 桌面联动上报：counterpartId=${cp || '(本机自用)'}`,
-                );
                 return;
             }
 
@@ -289,14 +264,21 @@ function setupWebSocket(server, options = {}) {
                     //   · selfOps.roleOf 走 sessionId 前缀兜底 → 误判 owner
                     //   · memory.resolveIdentity 把 session_<ts> 当成"一个新的人"
                     //   · 本机自己的桌面被当成"没有身份的陌生人"
-                    // 这里显式补上。本机连接 → 主人本人；非本机 → 普通用户。
+                    // 这里显式补上。
+                    //
+                    // ⚠️ 桌面连接的身份**只由握手决定**（内置令牌 + 内网来源），
+                    //    不由连接自己上报。桌宠只有这一台，连上它的就是主人本人；
+                    //    别人的话是通过 QQ 那些人際渠道进来的，走的是别的入口。
+                    //    所以这里不需要"替别人说话"的分支 —— 曾经设想过，但那会造出
+                    //    「senderId 是别人、role 却是 owner」的组合，正是用户最担心的
+                    //    「她以为自己是主人，任务真的向我执行」。
                     scene: ws.trustedLocal
                         ? {
                               chatType: 'local',
                               isGroup: false,
                               isOwner: true,
                               role: 'owner',
-                              senderId: String(ws.counterpartId || '_local'),
+                              senderId: '_local',
                               senderName: '主人',
                               platform: 'desktop',
                           }
@@ -305,7 +287,7 @@ function setupWebSocket(server, options = {}) {
                               isGroup: false,
                               isOwner: false,
                               role: 'user',
-                              senderId: String(ws.counterpartId || `ws-${ws.authUid || 'anon'}`),
+                              senderId: `ws-${ws.authUid || 'anon'}`,
                               senderName: '',
                               platform: 'desktop',
                           },
@@ -484,12 +466,20 @@ function pushProactiveMessage(uid, message) {
 /**
  * 只推给「主人这个人的桌宠」，不推给别人的。
  *
- * 桌面 WS 连接本身没有用户维度（都是同一个内置账号 uid=1），所以这里靠
- * **连接自己上报的对话者**来认人：桌宠在 WS 上有 `ws.counterpartId`（当前正在
- * 跟谁联动）。只有 counterpartId 为空（纯本机使用）或等于主人的，才算主人的桌面。
+ * ── 这里到底在防什么（2026-11-20 用户澄清后重写）────────────────────
+ *   「桌面端本就只有主人能连，这是我自己的桌宠，机器人是它的智能核心，
+ *     别人怎么可能连接我的机器人的大脑呢」
  *
- * 这条是「别人的任务不能混到我的桌面上」的最后一道闸：即便上游算错了 owner，
- * 只要桌面连接上报的对话者不是主人，就收不到。
+ * 说得对，所以这道闸要防的**不是"别人的桌面"**（那东西不存在），而是：
+ *
+ *   桌宠只有一台，但她在 QQ 上跟很多人说话。朋友的提醒到点时，
+ *   如果直接推给"所有桌面连接"，那条本该送去 QQ 的提醒就会**在她自己的
+ *   桌面上弹出来** —— 用户看到的是「她的任务怎么跑到我这儿来了」。
+ *
+ * 所以判据是「这条消息归谁」对不对得上「这台桌面归谁」，而不是「连接属于谁」：
+ *   · 本机自用的推送（_local）  → 桌面收
+ *   · 主人自己的提醒            → 桌面收
+ *   · 朋友的提醒                → 桌面**不收**，走平台那条腿回给朋友
  *
  * @param {string} ownerKey 这条消息的归属人（QQ 号/openid）
  * @param {Object} message { speech/text, sessionId, ... }
@@ -504,20 +494,20 @@ function pushProactiveMessage(uid, message) {
  *
  * @param {Object} p
  *   want           这条消息的归属人（'_local' 表示本机/控制台）
- *   cp             这条连接上报的对话者（空串 = 没上报）
+ *   cp             这条连接当前的联动对象（本体状态；不会是别人手动上报的）
  *   trustedLocal   这条连接是不是本机可信连接（握手通过内置令牌 + 内网来源）
  *   ownerOfSystem  系统里谁是主人（people 表里 role='owner' 的那位）
  * @returns {boolean}
  */
 function shouldDeliverToConn({ want, cp, trustedLocal, ownerOfSystem }) {
-    // 本机/控制台自己的消息：只落在「没联动任何人」的桌面上
+    // 本机/控制台的推送：落在「没联动任何人」的桌面上
     if (want === '_local') return !cp;
 
-    // 上报了具体的人：必须完全对上才收
+    // 这条连接正在替某个具体的人说话：只有对得上才收
     if (cp) return cp === want;
 
-    // 没上报联动：不能默认算主人（那正是把所有人的提醒送进主人桌面的错逻辑）。
-    // 只有当这条消息属于**主人本人**、且这条连接是本机可信连接时才收。
+    // 没在替谁说话（= 纯本机使用）：只有**主人自己的**消息才上桌面。
+    // 不能反过来"没联动就都收" —— 那正是把朋友的提醒送进主人桌面的错逻辑。
     const isOwnerMessage = !!ownerOfSystem && want === ownerOfSystem;
     return isOwnerMessage && !!trustedLocal;
 }
