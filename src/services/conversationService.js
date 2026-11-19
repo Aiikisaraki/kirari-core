@@ -16,6 +16,7 @@ const { preflightTools, detectCorrectionIntent } = require('./reply/intent');
 const { buildTimeContext } = require('./reply/timeContext');
 const { buildSceneContext } = require('./reply/sceneContext');
 const { buildCharter } = require('./reply/charter');
+const { buildWorkspaceBlock } = require('./reply/workspaceBlock');
 const memory = require('./memory');
 const social = require('./social');
 const selfOps = require('./selfOps');
@@ -312,6 +313,18 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       if (envBlock) systemPrompt += envBlock;
     } catch (e) {
       console.warn('[aiReply] 环境摘要注入失败（已忽略）:', e?.message || e);
+    }
+
+    // 工作空间：她有一个真实的文件夹可以落盘，还有一个「定期任务」的机制。
+    // 不注入的话，她不知道自己能保存东西，每次被问「记下来」都只会说「我记在
+    // 心里的记忆里」——而用户要的是能在文件管理器里翻到的产出。
+    // 只报事实（在哪、有几个任务），不列举全部文件（那会挤爆上下文），
+    // 要看细节让她自己调 workspace 能力。
+    try {
+      const wsBlock = buildWorkspaceBlock();
+      if (wsBlock) systemPrompt += wsBlock;
+    } catch (e) {
+      console.warn('[aiReply] 工作空间摘要注入失败（已忽略）:', e?.message || e);
     }
 
     // 长期记忆：按当前场合可见的记忆池做联想检索，注入少量高相关条目。

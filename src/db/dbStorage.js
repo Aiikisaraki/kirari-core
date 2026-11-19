@@ -1223,6 +1223,16 @@ module.exports = {
   listJobRows: (sessionId, limit) => db.prepare(
     'SELECT * FROM scheduled_jobs WHERE session_id = ? ORDER BY due_at DESC LIMIT ?',
   ).all(sessionId, limit),
+  /** 某 uid 某 kind 的未结束任务数（用于「一个人最多挂几个定期任务」的配额判断）。 */
+  countJobRowsByKind: (kind, uid) => db.prepare(
+    "SELECT COUNT(*) AS n FROM scheduled_jobs WHERE kind = ? AND uid = ? AND status = 'pending'",
+  ).get(kind, uid).n,
+  /** 某 uid 某 kind 的全部任务（含已取消，供列表展示时自行过滤）。 */
+  listJobRowsByKind: (kind, uid, limit = 100) => db.prepare(
+    'SELECT * FROM scheduled_jobs WHERE kind = ? AND uid = ? ORDER BY due_at ASC LIMIT ?',
+  ).all(kind, uid, limit),
+  /** 取消即删除：定期任务没有「历史」价值，留着只会让配额越算越大。 */
+  deleteJobRow: (jobId) => db.prepare('DELETE FROM scheduled_jobs WHERE job_id = ?').run(jobId),
 
   // ---- 配置档案（复用 api_tokens 表，按 uid 存取）----
   // ⚠️ 字段约定：对外的形状与桌面端 config.json 一致（endpoint / key / keyMasked / hasKey /

@@ -38,9 +38,31 @@ async function scanOnce() {
           // 失败时 briefSchedule 内部已回滚档位锁并 warn，不会形成 15s 热循环。
           const briefSchedule = require('./briefSchedule');
           await briefSchedule.fireDailyBrief(job, now);
+        } else if (job.kind === 'workspace_task') {
+          // 工作空间定期任务：到点让它自己去执行并把产出写进任务文件夹。
+          // 叶子节点在这里会**转发给主机**执行（见 services/workspaceTask.js），
+          // 产出落在主机，叶子只拿结果——用户 2026-11-19 明确要求的行为。
+          const workspaceTask = require('./workspaceTask');
+          await workspaceTask.fire(job, now);
         }
         // 没有在线连接也算触发过：once 任务不能因为「没连上」而永远 pending 反复推。
         const next = fireJob(job, now);
+
+        // weekly / monthly 的间隔不是 24h，共享包的 computeNextRun 只会 +24h。
+        // 这里按 payload 里存的周期字段把 dueAt 覆盖成正确的下一次。
+        // once / daily 走共享包的原有语义，不碰。
+        if (job.kind === 'workspace_task' && next.status === 'pending') {
+          try {
+            const workspaceTask = require('./workspaceTask');
+            const payload = workspaceTask.parsePayload(next.payload) || {};
+            const scheduleTask = require('../capabilities/builtin/schedule_task');
+            const overridden = scheduleTask.nextDueAtAfterFire(payload, next.dueAt);
+            if (overridden != null) next.dueAt = overridden;
+          } catch (e) {
+            console.warn(`[sched] 重算 job=${job.jobId} 下次时间失败（沿用共享包结果）:`, e?.message || e);
+          }
+        }
+
         jobStore.save(next, 'job_fired');
         fired++;
       } catch (e) {

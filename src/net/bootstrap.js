@@ -72,6 +72,41 @@ function buildHostExecutor(modelUid) {
   return async ({ sessionId, content, images, deviceId, kbContext, onDelta }) => {
     const scopedSession = `net:${deviceId}:${sessionId}`;
 
+    // ── 工作空间定期任务：叶子到点后转发上来的 ──
+    // 叶子没有模型凭证，任务照旧由主机执行（用户 2026-11-19：「从机（叶子节点）的
+    // 任务依旧转发给主机完成」）。产出同样写在**主机**的 ~/KirariWorkspace 里，
+    // 叶子只拿回结果 —— 这就是「写主机、叶子只拿结果」。
+    //
+    // 走 runLocally 而不是普通 getReply，是因为它还要记运行次数、按保留策略清旧文件；
+    // 当成闲聊处理的话，主机这边的 meta 永远停在「没跑过」，两端的账对不上。
+    const wsTask = (() => {
+      try {
+        return require("../services/workspaceTask");
+      } catch (e) {
+        console.warn("[net] 加载工作空间任务服务失败（按普通对话处理）:", e?.message || e);
+        return null;
+      }
+    })();
+    if (wsTask && wsTask.isWorkspaceSession(sessionId)) {
+      const taskId = wsTask.taskIdFromSession(sessionId);
+      const payload = wsTask.parsePayload(content);
+      const result = await wsTask.runLocally({
+        taskId,
+        title: (payload && payload.title) || taskId,
+        instruction: (payload && payload.instruction) || "",
+        modelUid,
+        // 关键词：设备命名空间要保留，否则主机自己跑同名任务时两边共用一个会话。
+        sessionId: scopedSession,
+      });
+      if (!result.ok) {
+        const reason = result.error || "未知原因";
+        // 配置类错误必须显式抛出去（叶子要看到「去设置里配」而不是一句兜底闲聊）
+        if (/未配置|尚未配置|还没连接|还没填写|还没选择/.test(reason)) throw new Error(reason);
+        return { speech: `任务没跑成：${reason}`, emotion: null };
+      }
+      return { speech: result.speech || "", emotion: null };
+    }
+
     const aiContext = await contextPool.getContext(modelUid);
     await sessionManager.initSession(scopedSession);
 
