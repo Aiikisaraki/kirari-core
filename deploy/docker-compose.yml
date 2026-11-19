@@ -37,6 +37,9 @@ services:
 
     environment:
       NODE_ENV: production
+      # 容器时区对齐主人所在时区：否则 Node 默认 UTC，getCurrentTime 无显式
+      # timezone 时会把 UTC 当本地时间（13:54 → 凌晨 05:54），简报/提醒同样错位。
+      TZ: "Asia/Shanghai"
       PORT: "9089"
       HOST: "0.0.0.0" # 容器内必须听 0.0.0.0，否则映射进来的端口连不上
       STORAGE_TYPE: db

@@ -17,6 +17,9 @@ services:
       - HOST=0.0.0.0
       - PORT=9089
       - PET_API_DATA_DIR=/data
+      # 容器时区对齐主人所在时区：否则 Node 默认 UTC，getCurrentTime 无显式
+      # timezone 时会把 UTC 当成本地时间（13:54 → 凌晨 05:54），简报/提醒同样错位。
+      - TZ=Asia/Shanghai
       # 会话令牌签名密钥：容器化后务必固定，否则重启服务会让已下发的登录凭证全部失效。
       - SESSION_SECRET=${SESSION_SECRET:-kirari-dev-session-secret}
       # 内置本地账户令牌（local 模式免登录用）。

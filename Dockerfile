@@ -16,7 +16,8 @@ WORKDIR /app
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=9089 \
-    PET_API_DATA_DIR=/data
+    PET_API_DATA_DIR=/data \
+    TZ=Asia/Shanghai
 COPY --from=build /app /app
 EXPOSE 9089
 # 数据库落在 /data 卷，容器重建不丢数据。

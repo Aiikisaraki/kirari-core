@@ -330,7 +330,15 @@ async function resolveForQuery(userid, clientIp, explicitLocation, signal, scope
     // IP 定位也失败：不卡死、不反复追问，用服务器本地时区作为临时兜底回答时间；
     // 天气需要坐标，这里无法兜底，返回 needAsk 让用户补充城市。
     console.warn('[location] IP lookup failed, returning fallback local timezone (no coordinates)');
-    const fallbackTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    // 绝不退回裸 UTC：容器/服务器多跑在 UTC，那会把 13:54 读成凌晨 05:54。
+    // 取不到 IANA 时区时退到东八区（主人大多在国内）。
+    let fallbackTz = 'Asia/Shanghai';
+    try {
+      const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (detected && detected !== 'UTC') fallbackTz = detected;
+    } catch {
+      /* ignore */
+    }
     return {
       location: '本地',
       latitude: null,

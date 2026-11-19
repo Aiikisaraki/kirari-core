@@ -13,6 +13,8 @@ const {
   stripNonConversational,
 } = require('./reply/promptBuilder');
 const { preflightTools, detectCorrectionIntent } = require('./reply/intent');
+const { buildTimeContext } = require('./reply/timeContext');
+const locationSvc = require('./locationService');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
 const dailyBriefing = require('./dailyBriefingService');
 const knowledgeRetrieval = require('../knowledge/retrievalService');
@@ -243,6 +245,23 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     let systemPrompt = preflight.injected
       ? sys.withTools.replace('{{TOOL_RESULTS}}', preflight.injected.join('\n'))
       : sys.normal;
+
+    // 时间基准：查主人已存时区，生成带标签、唯一可信的「当前时间」注入段。
+    // 目的：让模型对「现在几点 / 早上晚上 / 设提醒」有统一依据，不再把 UTC 裸时钟、
+    // 工具时间、语境时间混为一谈（见 reply/timeContext.js 的背景说明）。
+    let timeContext = '';
+    try {
+      const locRec = await locationSvc.getUserLocation(aiContext.userid, locationScope || undefined);
+      timeContext = buildTimeContext({
+        timezone: locRec && locRec.timezone,
+        locationLabel: locRec && (locRec.name || locRec.location),
+      });
+    } catch (e) {
+      // 查库失败也必须有时间基准：用默认时区兜底，绝不留空让模型自己猜。
+      timeContext = buildTimeContext({});
+    }
+    systemPrompt += timeContext;
+
     // 阶段 C：把该会话尚未完成的任务拼进 system.base，让「新消息进来先恢复未完成任务」
     // 成立——进程重启后任务在库里，下一条消息自然恢复。注入段数不变（仍 4 段）。
     const taskResume = taskRuntime.resumeBlock(sessionId);

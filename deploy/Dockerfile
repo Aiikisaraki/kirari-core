@@ -55,7 +55,8 @@ WORKDIR /app
 
 # 建议用非 root 运行；但 node 镜像内的 node 用户 uid 1000，
 # 需要能写 /app/data（挂载卷）——docker-compose 里已配好。
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    TZ=Asia/Shanghai
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json server.js ./
