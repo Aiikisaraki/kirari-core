@@ -46,6 +46,7 @@ const KNOWN_TOP_KEYS = [
     'activeModelId',
     'seeded',
     'agentProfile',
+    'thinking',
 ];
 
 let initialized = false;
@@ -413,6 +414,34 @@ function setBasePersona(value) {
     return v.slice(0, 4000);
 }
 
+// ── 思考模式（self_ops 可改；存 config.json 的 thinking.mode）──────────
+
+/** 读思考模式：off=直接答 / on=每次先列思路 / auto=仅复杂问题深入。缺省 off。 */
+function getThinking() {
+    ensureInitialized();
+    const mode = config.thinking && config.thinking.mode;
+    return ['off', 'on', 'auto'].includes(mode) ? mode : 'off';
+}
+
+/**
+ * 整体写 agentProfile（自我修补用）。复用已有 parseAgentProfile 做严格校验：
+ * 坏值抛错、不落盘。只碰 agentProfile 键，不动模型/密钥。
+ */
+function setAgentProfilePatch(profile) {
+    ensureInitialized();
+    const parsed = parseAgentProfile(profile, 'self_ops.agentProfile');
+    writeRaw({ ...config, agentProfile: parsed });
+    return parsed;
+}
+
+/** 写思考模式。只碰 thinking 键，不动模型/密钥字段。 */
+function setThinking(mode) {
+    ensureInitialized();
+    const m = ['off', 'on', 'auto'].includes(mode) ? mode : 'off';
+    writeRaw({ ...config, thinking: { ...(config.thinking || {}), mode: m } });
+    return m;
+}
+
 /** 搜索配置明文（聊天内核用）。 */
 function getSearch() {
     ensureInitialized();
@@ -463,6 +492,9 @@ module.exports = {
     setProfilePatch,
     getBasePersona,
     setBasePersona,
+    setAgentProfilePatch,
+    getThinking,
+    setThinking,
     getSearch,
     onConfigChanged,
     startWatch,

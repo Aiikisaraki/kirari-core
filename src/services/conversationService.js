@@ -14,6 +14,7 @@ const {
 } = require('./reply/promptBuilder');
 const { preflightTools, detectCorrectionIntent } = require('./reply/intent');
 const { buildTimeContext } = require('./reply/timeContext');
+const selfOps = require('./selfOps');
 const locationSvc = require('./locationService');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
 const dailyBriefing = require('./dailyBriefingService');
@@ -261,6 +262,27 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       timeContext = buildTimeContext({});
     }
     systemPrompt += timeContext;
+
+    // 自我认知清单：像 lead 上下文里自带的工具清单那样，每轮注入「我是谁 / 我有什么能力 /
+    // 当前模型 / 未完成任务与提醒 / 如何自我排查」。让模型天生就知道自己，不必先查一轮。
+    try {
+      systemPrompt += selfOps.buildManifest({ sessionId, capScope, uid: aiContext.userid, origin: 'core' });
+    } catch (e) {
+      console.warn('[aiReply] 自我认知清单注入失败（已忽略）:', e?.message || e);
+    }
+
+    // 思考模式：on/auto 时在 system 里加一段「先想再答」的行为指引。
+    // 这是 prompt 策略（不调用推理模型的隐藏能力），对任何模型都生效、可随时 self_update 关闭。
+    try {
+      const thinking = modelConfigFile.getThinking();
+      if (thinking !== 'off') {
+        systemPrompt += thinking === 'on'
+          ? '\n\n【思考模式：开启】回答前先在心里列 2-4 条简要思路（可一句话带过），再给出结论；思路不要冗长，最终仍只输出约定的 JSON。'
+          : '\n\n【思考模式：自动】简单问题直接答；多步、有争议或需要权衡的问题，先列 2-4 条简要思路再深入。最终只输出约定的 JSON。';
+      }
+    } catch {
+      /* 思考模式读取失败不影响正常回答 */
+    }
 
     // 阶段 C：把该会话尚未完成的任务拼进 system.base，让「新消息进来先恢复未完成任务」
     // 成立——进程重启后任务在库里，下一条消息自然恢复。注入段数不变（仍 4 段）。
