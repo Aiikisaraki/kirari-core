@@ -229,6 +229,69 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_memory_links_a ON memory_links(a, relation);
   CREATE INDEX IF NOT EXISTS idx_memory_links_b ON memory_links(b, relation);
+
+  -- ── 社交环境快照（她所处的真实世界）────────────────────────────────
+  -- 用户 2026-11-19：「我希望她能完整意识到自己的人际关系和周围的环境」——
+  -- 「我在几个群」「有几个好友」「群里有多少人」这些是**协议端就知道**的事实，
+  -- 不该靠猜。这些表缓存 get_group_list / get_friend_list / get_group_member_list
+  -- 的结果，以及 notice 事件（谁加群/退群/戳一戳），让她随时能查到自己的处境。
+  --
+  -- adapter_id + external_id 是协议端的原生标识（群号/QQ号/群成员 QQ）。
+  CREATE TABLE IF NOT EXISTS social_groups (
+    adapter_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    group_name TEXT,
+    member_count INTEGER,
+    max_member_count INTEGER,
+    -- 她对这群的观感/氛围备注（自由文本，她自己维护）
+    notes TEXT,
+    -- 是否在群回复白名单里（与适配器配置同步，方便她判断"我在这群能不能说话"）
+    reply_enabled INTEGER NOT NULL DEFAULT 0,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, group_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS social_contacts (
+    adapter_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    nickname TEXT,
+    remark TEXT,
+    -- 与 people.person_key 对齐：QQ 号即 person_key，方便两表互查
+    person_key TEXT,
+    first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_contacts_person ON social_contacts(person_key);
+
+  CREATE TABLE IF NOT EXISTS social_group_members (
+    adapter_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    nickname TEXT,
+    card TEXT,
+    role TEXT,
+    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (adapter_id, group_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_members_group ON social_group_members(adapter_id, group_id);
+  CREATE INDEX IF NOT EXISTS idx_social_members_user ON social_group_members(adapter_id, user_id);
+
+  -- 环境事件流：notice 帧（进群/退群/戳一戳/名片变更…）。
+  -- 让她知道"身边发生了什么"，而不只是"谁说了什么"。
+  CREATE TABLE IF NOT EXISTS social_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    group_id TEXT,
+    actor_id TEXT,
+    target_id TEXT,
+    detail TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_social_events_time ON social_events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_social_events_group ON social_events(adapter_id, group_id, created_at);
   -- 多模型：用户自己配的多套「服务地址 + 型号 + 密钥」，任选一套当前使用。
   -- 旧的 api_tokens 单套配置保留不动（搜索配置仍存在那里）；模型套只在聊天取配置时覆盖那三个字段。
   -- 字段约定与桌面端 config.json 完全一致：endpoint / key（2026-10-11 统一，旧列名 api_endpoint/token 由下方迁移）。
@@ -935,6 +998,189 @@ module.exports = {
     return found;
   },
 
+  // ---- 社交环境（social_* 表）----
+  // 用户要求：「能看到几个好友，几个群，谁加群了，谁戳一下了，群里有几个人」。
+  // 这些全是协议端就知道的事实，缓存下来让她随时能查，而不是靠猜或说不知道。
+
+  /** 整表替换某适配器的群列表（sync 时调用；不删已有 notes/reply_enabled）。 */
+  upsertSocialGroups: async (adapterId, groups = []) => {
+    const ad = String(adapterId || '');
+    if (!ad) return 0;
+    let n = 0;
+    const stmt = db.prepare(
+      `INSERT INTO social_groups (adapter_id, group_id, group_name, member_count, max_member_count)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(adapter_id, group_id) DO UPDATE SET
+         group_name = COALESCE(excluded.group_name, social_groups.group_name),
+         member_count = COALESCE(excluded.member_count, social_groups.member_count),
+         max_member_count = COALESCE(excluded.max_member_count, social_groups.max_member_count),
+         last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    for (const g of groups) {
+      const gid = String(g.groupId || g.group_id || '').trim();
+      if (!gid) continue;
+      n += stmt.run(ad, gid, g.groupName || g.group_name || null, toInt(g.memberCount ?? g.member_count), toInt(g.maxMemberCount ?? g.max_member_count)).changes;
+    }
+    return n;
+  },
+
+  listSocialGroups: async (adapterId = null) => {
+    const sql = adapterId
+      ? 'SELECT * FROM social_groups WHERE adapter_id = ? ORDER BY member_count DESC, group_id ASC'
+      : 'SELECT * FROM social_groups ORDER BY adapter_id ASC, member_count DESC';
+    const rows = adapterId ? db.prepare(sql).all(String(adapterId)) : db.prepare(sql).all();
+    return rows.map(mapSocialGroupRow);
+  },
+
+  getSocialGroup: async (adapterId, groupId) => {
+    const r = db.prepare('SELECT * FROM social_groups WHERE adapter_id = ? AND group_id = ?').get(String(adapterId || ''), String(groupId || ''));
+    return r ? mapSocialGroupRow(r) : null;
+  },
+
+  setSocialGroupNotes: async (adapterId, groupId, notes) => {
+    const info = db
+      .prepare('UPDATE social_groups SET notes = ? WHERE adapter_id = ? AND group_id = ?')
+      .run(String(notes || '').slice(0, 2000), String(adapterId || ''), String(groupId || ''));
+    return info.changes > 0;
+  },
+
+  /** 同步适配器配置里"哪些群允许回复"，让她知道自己在这群能不能开口。 */
+  syncGroupReplyFlags: async (adapterId, cfg = {}) => {
+    const ad = String(adapterId || '');
+    if (!ad) return 0;
+    db.prepare('UPDATE social_groups SET reply_enabled = 0 WHERE adapter_id = ?').run(ad);
+    const mode = String(cfg.groupReplyMode || 'off');
+    if (mode === 'off') return 0;
+    const filter = String(cfg.groupFilter || 'whitelist');
+    let allow = [];
+    if (filter === 'whitelist') allow = (cfg.groupAllowlist || []).map(String).filter(Boolean);
+    else {
+      const block = new Set((cfg.groupBlocklist || []).map(String).filter(Boolean));
+      allow = db.prepare('SELECT group_id FROM social_groups WHERE adapter_id = ?').all(ad).map((r) => r.group_id).filter((g) => !block.has(g));
+    }
+    const stmt = db.prepare('UPDATE social_groups SET reply_enabled = 1 WHERE adapter_id = ? AND group_id = ?');
+    let n = 0;
+    for (const g of allow) n += stmt.run(ad, g).changes;
+    return n;
+  },
+
+  upsertSocialContacts: async (adapterId, contacts = []) => {
+    const ad = String(adapterId || '');
+    if (!ad) return 0;
+    let n = 0;
+    const stmt = db.prepare(
+      `INSERT INTO social_contacts (adapter_id, user_id, nickname, remark, person_key)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(adapter_id, user_id) DO UPDATE SET
+         nickname = COALESCE(excluded.nickname, social_contacts.nickname),
+         remark = COALESCE(excluded.remark, social_contacts.remark),
+         person_key = COALESCE(excluded.person_key, social_contacts.person_key),
+         last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    for (const c of contacts) {
+      const uid = String(c.userId || c.user_id || '').trim();
+      if (!uid) continue;
+      n += stmt.run(ad, uid, c.nickname || null, c.remark || null, uid).changes;
+    }
+    return n;
+  },
+
+  listSocialContacts: async (adapterId = null) => {
+    const sql = adapterId
+      ? 'SELECT * FROM social_contacts WHERE adapter_id = ? ORDER BY user_id ASC'
+      : 'SELECT * FROM social_contacts ORDER BY adapter_id ASC, user_id ASC';
+    const rows = adapterId ? db.prepare(sql).all(String(adapterId)) : db.prepare(sql).all();
+    return rows.map(mapSocialContactRow);
+  },
+
+  /** 整组替换某群的成员表（成员变动后重新拉一遍最省事）。 */
+  replaceGroupMembers: async (adapterId, groupId, members = []) => {
+    const ad = String(adapterId || '');
+    const gid = String(groupId || '');
+    if (!ad || !gid) return 0;
+    db.prepare('DELETE FROM social_group_members WHERE adapter_id = ? AND group_id = ?').run(ad, gid);
+    const stmt = db.prepare(
+      `INSERT INTO social_group_members (adapter_id, group_id, user_id, nickname, card, role)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(adapter_id, group_id, user_id) DO UPDATE SET
+         nickname = excluded.nickname, card = excluded.card, role = excluded.role,
+         last_synced_at = CURRENT_TIMESTAMP`,
+    );
+    let n = 0;
+    for (const m of members) {
+      const uid = String(m.userId || m.user_id || '').trim();
+      if (!uid) continue;
+      n += stmt.run(ad, gid, uid, m.nickname || null, m.card || null, m.role || null).changes;
+    }
+    return n;
+  },
+
+  listGroupMembers: async (adapterId, groupId, limit = 500) => {
+    // 排序：群主 → 管理员 → 普通成员，同级按账号。role 是文本，
+    // 直接 ORDER BY role ASC 会得到 admin/member/owner 的字母序（群主垫底），
+    // 所以显式给出权重。
+    const rows = db
+      .prepare(
+        `SELECT * FROM social_group_members WHERE adapter_id = ? AND group_id = ?
+         ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END ASC, user_id ASC
+         LIMIT ?`,
+      )
+      .all(String(adapterId || ''), String(groupId || ''), Math.min(2000, Math.max(1, Number(limit) || 500)));
+    return rows.map(mapSocialMemberRow);
+  },
+
+  /** 某人在哪些群里（反查「他和我共同在哪个群」）。 */
+  groupsOfMember: async (adapterId, userId) =>
+    db
+      .prepare(
+        `SELECT g.* FROM social_groups g
+         JOIN social_group_members m ON m.adapter_id = g.adapter_id AND m.group_id = g.group_id
+         WHERE m.adapter_id = ? AND m.user_id = ?
+         ORDER BY g.member_count DESC`,
+      )
+      .all(String(adapterId || ''), String(userId || ''))
+      .map(mapSocialGroupRow),
+
+  addSocialEvent: async (row = {}) => {
+    const ad = String(row.adapterId || row.adapter_id || '');
+    const type = String(row.eventType || row.event_type || '').trim();
+    if (!ad || !type) return false;
+    db.prepare(
+      `INSERT INTO social_events (adapter_id, event_type, group_id, actor_id, target_id, detail)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ad,
+      type,
+      strOrNull(row.groupId ?? row.group_id),
+      strOrNull(row.actorId ?? row.actor_id),
+      strOrNull(row.targetId ?? row.target_id),
+      strOrNull(row.detail),
+    );
+    return true;
+  },
+
+  listSocialEvents: async ({ adapterId = null, groupId = null, limit = 50 } = {}) => {
+    const where = [];
+    const args = [];
+    if (adapterId) { where.push('adapter_id = ?'); args.push(String(adapterId)); }
+    if (groupId) { where.push('group_id = ?'); args.push(String(groupId)); }
+    const sql = `SELECT * FROM social_events${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
+    args.push(Math.min(500, Math.max(1, Number(limit) || 50)));
+    return db.prepare(sql).all(...args).map(mapSocialEventRow);
+  },
+
+  /** 整体社交概况：几个群、几个好友、多少成员、最近事件。 */
+  socialOverview: async (adapterId = null) => {
+    const whereAd = adapterId ? ' WHERE adapter_id = ?' : '';
+    const args = adapterId ? [String(adapterId)] : [];
+    const groups = db.prepare(`SELECT COUNT(*) AS n FROM social_groups${whereAd}`).get(...args).n;
+    const contacts = db.prepare(`SELECT COUNT(*) AS n FROM social_contacts${whereAd}`).get(...args).n;
+    const members = db.prepare(`SELECT COUNT(DISTINCT user_id) AS n FROM social_group_members${whereAd}`).get(...args).n;
+    const people = db.prepare('SELECT COUNT(*) AS n FROM people').get().n;
+    const events = db.prepare(`SELECT COUNT(*) AS n FROM social_events${whereAd}`).get(...args).n;
+    return { groups, contacts, members, people, events };
+  },
+
   /** 尝试写入一个键；返回 true=抢到（此前不存在），false=已被占用。 */
   claimSetting: (key, value = '1') => {
     const info = db.prepare('INSERT OR IGNORE INTO settings_kv (key, value) VALUES (?, ?)').run(key, value);
@@ -1227,6 +1473,70 @@ function mapMemoryRow(r) {
     lastHitAt: r.last_hit_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+  };
+}
+
+// ── 社交环境行映射 ────────────────────────────────────────────────────
+/** 安全转整数：NaN/空值一律给 null，避免把 undefined 写进 SQLite。 */
+function toInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function strOrNull(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s ? s.slice(0, 2000) : null;
+}
+
+function mapSocialGroupRow(r) {
+  return {
+    adapterId: r.adapter_id,
+    groupId: r.group_id,
+    groupName: r.group_name || null,
+    memberCount: r.member_count,
+    maxMemberCount: r.max_member_count,
+    notes: r.notes || null,
+    replyEnabled: !!r.reply_enabled,
+    firstSeenAt: r.first_seen_at,
+    lastSyncedAt: r.last_synced_at,
+  };
+}
+
+function mapSocialContactRow(r) {
+  return {
+    adapterId: r.adapter_id,
+    userId: r.user_id,
+    nickname: r.nickname || null,
+    remark: r.remark || null,
+    personKey: r.person_key || null,
+    firstSeenAt: r.first_seen_at,
+    lastSyncedAt: r.last_synced_at,
+  };
+}
+
+function mapSocialMemberRow(r) {
+  return {
+    adapterId: r.adapter_id,
+    groupId: r.group_id,
+    userId: r.user_id,
+    nickname: r.nickname || null,
+    card: r.card || null,
+    role: r.role || null,
+    lastSyncedAt: r.last_synced_at,
+  };
+}
+
+function mapSocialEventRow(r) {
+  return {
+    id: r.id,
+    adapterId: r.adapter_id,
+    eventType: r.event_type,
+    groupId: r.group_id || null,
+    actorId: r.actor_id || null,
+    targetId: r.target_id || null,
+    detail: r.detail || null,
+    createdAt: r.created_at,
   };
 }
 

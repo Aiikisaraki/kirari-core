@@ -17,6 +17,7 @@ const { buildTimeContext } = require('./reply/timeContext');
 const { buildSceneContext } = require('./reply/sceneContext');
 const { buildCharter } = require('./reply/charter');
 const memory = require('./memory');
+const social = require('./social');
 const selfOps = require('./selfOps');
 const locationSvc = require('./locationService');
 const { streamChatCompletion, polishToolResult } = require('./reply/streaming');
@@ -299,6 +300,19 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
 
     // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
     systemPrompt += buildCharter();
+
+    // 人际环境：她在几个群、几个好友、谁刚进群、谁戳了她。
+    // 这些是协议端就知道的事实，注入进来她才"天生知道自己周围有什么"，
+    // 不必每轮先查一次工具（用户 2026-11-19：「我希望她能完整意识到自己的
+    // 人际关系和周围的环境」）。查得更细时用 social 能力。
+    try {
+      const envBlock = await social.buildEnvironmentBlock({
+        adapterId: scene && scene.platform ? String(scene.platform) : null,
+      });
+      if (envBlock) systemPrompt += envBlock;
+    } catch (e) {
+      console.warn('[aiReply] 环境摘要注入失败（已忽略）:', e?.message || e);
+    }
 
     // 长期记忆：按当前场合可见的记忆池做联想检索，注入少量高相关条目。
     // 这是「换个对话也认得你」的落点——记忆不挂在 sessionId 上，而是挂

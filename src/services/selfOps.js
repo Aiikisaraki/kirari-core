@@ -78,6 +78,11 @@ function buildManifest(ctx = {}) {
 
     lines.push('- 自我排查：遇到问题先用 self_read(diagnose) 体检，再决定要不要 self_update 修；改完可用 self_read 复核。');
     lines.push('- 发现自己设错/设重复的提醒或任务：self_read(reminders/tasks) 查到 id，再用 self_manage 改时间、取消重复、补设正确的。别把没能力当借口。');
+    // 人际环境：她有真实的社交事实来源（协议端），不该再说"我没有接口"
+    if (names.includes('social')) {
+        lines.push('- 你在哪些群、有几个好友、群里有多少人、谁刚进群、谁戳了你——这些用 social 工具查（overview/groups/members/events/who）。');
+        lines.push('- 这些是协议端给你的真实数据，不是猜的。被问到时直接查再答，不要说"我答不上来"或"我没有这个接口"。');
+    }
     return lines.join('\n');
 }
 

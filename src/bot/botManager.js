@@ -22,6 +22,8 @@ const contextPool = require('../ai/contextPool');
 const sessionManager = require('../session/sessionManager');
 const localSession = require('../session/localSession');
 const memory = require('../services/memory');
+const social = require('../services/social');
+const db = require('../db/dbStorage');
 
 /** 内置账号 uid：机器人消息与桌宠/控制台共用同一份模型配置（BOT_MODEL_UID，默认 1）。 */
 function botUid() {
@@ -134,6 +136,22 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
         /* 检索失败不该挡住回复 */
     }
 
+    // 群名 / 群人数：协议端的消息帧多数不带 group_name，从社交缓存里补齐。
+    // 有了它，她才真的知道"我现在在哪个群、这群多大"，而不是只知道一串群号。
+    let groupName = incoming.groupName || '';
+    let memberCount = incoming.memberCount;
+    if (incoming.isGroup && incoming.replyGroupId) {
+        try {
+            const g = await db.getSocialGroup(incoming.adapterId, incoming.replyGroupId);
+            if (g) {
+                if (!groupName && g.groupName) groupName = g.groupName;
+                if (memberCount == null && typeof g.memberCount === 'number') memberCount = g.memberCount;
+            }
+        } catch {
+            /* 缓存没读到就用帧里的原值 */
+        }
+    }
+
     try {
         const aiContext = await contextPool.getContext(uid);
         await sessionManager.initSession(sessionId);
@@ -154,7 +172,7 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
             scene: {
                 chatType: incoming.isGroup ? 'group' : 'private',
                 groupId: incoming.replyGroupId || '',
-                groupName: incoming.groupName || '',
+                groupName,
                 senderName: incoming.senderName || '',
                 senderRole: incoming.senderRole || '',
                 // senderId 决定「记住谁」：记忆池按这个人分，群聊私聊都认得他
@@ -162,7 +180,7 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
                 isOwner,
                 // 管理权限角色（owner/admin/user），与"记得谁"无关
                 role,
-                memberCount: incoming.memberCount,
+                memberCount,
                 platform: incoming.adapterId,
             },
             ws: null,
@@ -196,6 +214,42 @@ function startAdapter(cfg) {
         }
     });
     adapter.setOwner(cfg.ownerAccount || null);
+
+    // 环境事件（谁进群/退群、谁戳一戳）落库 + 成员表按需刷新。
+    // 这些帧之前被 post_type !== 'message' 整包丢弃，所以她完全不知道身边发生了什么。
+    adapter.onNotice = async (evt) => {
+        try {
+            await social.recordEvent(evt);
+            // 进群/退群 → 成员表过期了，拉一次这个群（不拉全量，省流量）
+            if (social.affectsMembership(evt.eventType) && evt.groupId) {
+                setTimeout(async () => {
+                    try {
+                        const r = await social.refreshGroup(adapter, evt.groupId);
+                        if (r.ok) console.log(`[social] 群 ${evt.groupId} 成员已刷新（${r.members} 人）`);
+                    } catch (e) {
+                        console.warn('[social] 刷新群成员失败（已忽略）:', e?.message || e);
+                    }
+                }, 3000);
+            }
+        } catch (e) {
+            console.warn('[bot] 记录环境事件失败（已忽略）:', e?.message || e);
+        }
+    };
+
+    // 连上后全量同步一次「我周围有什么」：群列表、好友、群成员。
+    adapter.onReady = async () => {
+        try {
+            const r = await social.syncAdapter(adapter, cfg.config || {});
+            if (r.ok) {
+                console.log(`[social] ${cfg.id} 社交环境已同步：${r.groups} 群 / ${r.friends} 好友 / ${r.members} 群成员`);
+            } else {
+                console.warn(`[social] ${cfg.id} 社交环境同步跳过：${r.reason}`);
+            }
+        } catch (e) {
+            console.warn('[social] 社交环境同步失败（已忽略）:', e?.message || e);
+        }
+    };
+
     adapter.connect();
     running.set(cfg.id, adapter);
     return adapter;
@@ -321,6 +375,16 @@ function stopAll() {
     running.clear();
 }
 
+/**
+ * 取运行中的适配器实例（社交环境刷新用）。
+ * adapterId 缺省时返回第一个在跑的 —— 单适配器是常态，避免她必须知道 id。
+ */
+function getAdapter(adapterId) {
+    if (adapterId) return running.get(String(adapterId)) || null;
+    const first = running.values().next();
+    return first.done ? null : first.value;
+}
+
 module.exports = {
     readAdapters,
     writeAdapters,
@@ -330,6 +394,7 @@ module.exports = {
     stopAll,
     setOwner,
     botUid,
+    getAdapter,
     collectSkillPrompts,
     adapterFilePath: () => clientConfig.clientConfigPath(),
 };
