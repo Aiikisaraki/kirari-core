@@ -115,7 +115,9 @@ function todayStr(d = new Date()) {
  */
 async function runLocally({ taskId, title, instruction, modelUid = 1, deliver = true, sessionId = '' } = {}) {
     const id = workspace.safeSegment(taskId, 'taskId');
-    workspace.ensureTask(id, { title });
+    // title 为空时不要覆盖已有 meta —— ensureTask 的 patch.title 是「给了就改」，
+    // 主机替叶子执行时拿不到标题（上行 payload 里不带），传空串会把用户设的名字清掉。
+    workspace.ensureTask(id, title ? { title } : {});
 
     // 注入到提示词里的「这个任务是什么」：从 meta 取最新标题/描述，避免 job 里存的旧标题
     const meta = workspace.readTaskMeta(id) || {};

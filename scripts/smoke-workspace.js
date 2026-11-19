@@ -353,6 +353,20 @@ async function main() {
         const firedFail = await workspaceTask.fire(leafJob, Date.now());
         check('主机不可达时返回 true（避免 15s 热重试）', firedFail === true);
         check('主机不可达时也不本地跑', localRuns === 0, `本地跑了 ${localRuns} 次`);
+
+        // 主机替叶子执行时拿不到标题（上行 payload 里不带 title），传空 title
+        // 不能把用户在主机上设的名字清掉 —— 否则每次叶子任务跑完，主机那边的
+        // meta.json 标题都会被抹成一个 taskId。
+        workspace.ensureTask('host-side-task', { title: '用户设的标题' });
+        await workspaceTask.runLocally({
+            taskId: 'host-side-task',
+            title: '',
+            instruction: '主机代跑',
+            deliver: false,
+        });
+        check('空 title 不会清空已有 meta 标题',
+            workspace.readTaskMeta('host-side-task').title === '用户设的标题',
+            `实际=${JSON.stringify(workspace.readTaskMeta('host-side-task').title)}`);
     } finally {
         // 还原模块缓存，避免影响后面的用例
         if (savedBoot) require.cache[bootPath] = savedBoot; else delete require.cache[bootPath];
