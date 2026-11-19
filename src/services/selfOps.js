@@ -115,17 +115,44 @@ function readTier(role) {
 /**
  * 从 ctx 解析角色。
  *
- * 缺省规则很重要：**本机会话就是拥有者本人在操作**——控制台、桌宠聊天框
- * 这些入口不经过任何 bot 适配器，只可能是设备主人自己。默认降级成普通用户
- * 会让她连自己的设置都改不了，把最高权限入口锁死。
- * 只有 bot- 前缀的远程会话（QQ 等平台进来的人）才按 people 档案判角色。
+ * ── 2026-11-20 身份隔离大排查：这里原来是全系统最大的一个洞 ──────────
+ * 原实现是：`if (!sessionId || !/^bot[-:]/.test(sessionId)) return 'owner'`，
+ * 即「只要 sessionId 不以 bot 开头就当主人」。问题是**不以 bot 开头的路径有四条**：
+ *
+ *   · 桌面 WS 聊天框   session_<ts>
+ *   · 子代理           sub::<uid>::<taskId>
+ *   · 工作空间任务执行  workspace:<owner>:<taskId>
+ *   · 组网入站         net:<device>:<sessionId>
+ *
+ * 这四条全部被判成 owner，于是任何一条路径上的调用都能改人格、读密钥掩码、
+ * 建「提醒主人」的提醒 —— 而用户报的正是「她以为自己是主人」。
+ *
+ * 现在的原则：**权限只认显式声明，不猜**。
+ *   · ctx.role / ctx.isOwner 由入口（botManager 的 scene、本机入口）显式给出
+ *   · 没有显式声明 → 一律按最低权限 user 处理
+ *   · 本机入口（控制台/桌宠聊天框）由调用方显式标 isOwner: true，见 localEntryRole()
+ *
+ * fail-closed：猜错的代价是主人多按一次，猜反的代价是外人拿到最高权限。
  */
 function roleOf(ctx = {}) {
     if (ctx.role) return String(ctx.role);
     if (ctx.isOwner === true) return 'owner';
     if (ctx.isOwner === false) return 'user';
-    if (!ctx.sessionId || !/^bot[-:]/.test(String(ctx.sessionId))) return 'owner';
+    // 只有**明确标记为本机可信入口**的才默认 owner。
+    // 注意：不能用 sessionId 前缀推，那正是原来的 bug。
+    if (ctx.trustedLocal === true) return 'owner';
     return 'user';
+}
+
+/**
+ * 本机入口（控制台 / 桌宠聊天框）的 ctx 标记。
+ *
+ * 这两处不经过任何 bot 适配器，只可能是设备主人本人在操作，
+ * 所以显式打上 trustedLocal，而不是让 roleOf 去猜 sessionId 形状。
+ * 桌面 WS 侧必须在握手鉴权通过后调用，不能由消息体自报。
+ */
+function trustedLocalCtx(ctx = {}) {
+    return { ...ctx, trustedLocal: true, isOwner: true, role: 'owner' };
 }
 
 /**
@@ -412,6 +439,17 @@ function manage(action, args = {}, ctx = {}) {
                 recurrence: 'once',
                 now,
             });
+            // 归属人必须落库。self_manage 是 owner-only（上方已挡），所以这里必然是主人；
+            // 但仍要显式写上 ownerKey —— 否则到点解析不出来会退化成 '_local'，
+            // 而 '_local' 和「任何远程客户端建的提醒」在推送时不可区分（审计 A2）。
+            let ownerKey = '';
+            try {
+                ownerKey = String(require('./workspace').resolveOwnerFromCtx(ctx) || '').trim();
+            } catch { ownerKey = ''; }
+            if (!ownerKey) {
+                return 'error: 无法确定这条提醒属于谁，为避免推错人，先不建了。';
+            }
+            job.ownerKey = ownerKey;
             jobStore().save(job, 'job_created');
             policy.audit({ action: 'create_reminder', key: job.jobId, after: `${job.title}@${job.dueAt}`, ok: true, sessionId: ctx.sessionId, uid: ctx.uid, origin: ctx.origin });
             return `已补设提醒「${job.title}」，将在 ${friendlyTime(job.dueAt)} 提醒主人：${job.payload}（id=${job.jobId}）`;
@@ -476,4 +514,4 @@ function manage(action, args = {}, ctx = {}) {
     }
 }
 
-module.exports = { TOPICS, MANAGE_ACTIONS, buildManifest, read, update, manage };
+module.exports = { TOPICS, MANAGE_ACTIONS, buildManifest, read, update, manage, roleOf, trustedLocalCtx };

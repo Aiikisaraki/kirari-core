@@ -336,6 +336,26 @@ for (const col of SCHEDULED_JOBS_COLUMNS) {
   if (!jobColumns.includes(col.name)) db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN ${col.ddl}`);
 }
 
+// ── 2026-11-20 身份排查（A2）：给定时任务补 owner_key 列 ──────────────
+//
+// 为什么必须落到列上，而不是塞进 payload：
+//   · 到点触发时，调度器手上只有任务行（jobStore.due 返回的 rowToJob），
+//     没有会话上下文、没有 ctx.counterpartId。
+//   · 唯一能从行里反推归属的是 session_id，但 workspace_task 的 session_id
+//     形如 `workspace:<taskId>`，里面**根本没有用户标识** ——
+//     resolveOwnerFromCtx 只能返回 '_local'，于是别人的提醒推到了主人桌面。
+//     这正是用户报障的路径：「朋友的任务结果跑到了我这儿」。
+//
+// 之前 taskRuntime / selfOps 确实往 job 对象上写了 `job.ownerKey`，
+// 但 jobToRow 的白名单把它丢掉了，写进库的是「没有归属」的一条任务。
+// 现在两侧都补齐：列存在 + 白名单保留。
+const JOB_OWNER_DDL = "owner_key TEXT NOT NULL DEFAULT ''";
+if (!jobColumns.includes('owner_key')) {
+  db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN ${JOB_OWNER_DDL}`);
+}
+// 索引：推送与按人查任务都要按 owner 过滤
+db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_owner ON scheduled_jobs(owner_key, status)');
+
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
 // 单独部署服务端时，真实用户注册从 100000 起，绝不占用保留区间。
 const BUILTIN_UID = 1;
@@ -403,6 +423,30 @@ if (!messageColumns.includes('images_json')) db.exec('ALTER TABLE messages ADD C
 const memoryColumns = db.prepare('PRAGMA table_info(memories)').all().map((c) => c.name);
 if (memoryColumns.length && !memoryColumns.includes('about_person')) {
   db.exec('ALTER TABLE memories ADD COLUMN about_person TEXT');
+}
+// ── 可信度轴（2026-11-20）─────────────────────────────────────────────
+// 用户提出的关键一问：「谁在说话也是一个很重要的考量，要是我随便说一个
+// 别人的信息怎么办，这万一不是事实呢」。
+//
+// 于是「谁在说话」不再决定**能不能存**，而是决定**存成什么可信度**：
+//   fact        —— 当事人自述，或拥有者亲自确认过
+//   observed    —— 她自己亲眼所见（不是听说的）
+//   hearsay     —— 从别人口中听来的第三方信息（「小张出轨了」）
+//   rumor       —— 明确是传闻/转述别人的转述/匿名来源
+//
+// 这决定了她在回答时该怎么说：「小张最近不太好」vs「听说小张出轨了」——
+// 后者必须带「听说」，绝不能当已知事实讲。
+//
+// 默认 'fact' 只为兼容老数据（老数据没有这个信息，标成已知最安全地保留原行为）。
+// 新写入一律由 epistemicFor() 显式判定。
+if (memoryColumns.length && !memoryColumns.includes('epistemic')) {
+  db.exec("ALTER TABLE memories ADD COLUMN epistemic TEXT NOT NULL DEFAULT 'fact'");
+}
+// 这条信息是谁提供的（平台账号）。用于回答「你听谁说的」，也用于
+// 判断两个互相矛盾的传闻谁更可信。与 source（owner/guest）不同：那是类别，
+// 这是具体的人。
+if (memoryColumns.length && !memoryColumns.includes('claimed_by')) {
+  db.exec('ALTER TABLE memories ADD COLUMN claimed_by TEXT');
 }
 // 索引放在补列之后建，新旧两种表结构都能成功。
 // （不能在 DDL 模板里建：老库的 memories 表没有该列，
@@ -747,10 +791,16 @@ module.exports = {
   addMemory: async (row = {}) => {
     const content = String(row.content || '').trim();
     if (!content) return null;
+    // epistemic：这条信息有多可信（fact / observed / hearsay / rumor）。
+    // 与 visibility 正交：visibility 管"能不能说出去"，epistemic 管"说的时候
+    // 该不该带『听说』"。老调用点不传时落 'fact'，保持既有行为。
+    const epistemic = ['fact', 'observed', 'hearsay', 'rumor'].includes(row.epistemic)
+      ? row.epistemic
+      : 'fact';
     const info = db
       .prepare(
-        `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO memories (subject, kind, content, visibility, origin_session, about_person, source, importance, epistemic, claimed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         String(row.subject || 'global'),
@@ -761,6 +811,8 @@ module.exports = {
         row.aboutPerson || null,
         String(row.source || 'owner'),
         Math.min(5, Math.max(1, Number(row.importance) || 3)),
+        epistemic,
+        row.claimedBy || null,
       );
     return Number(info.lastInsertRowid);
   },
@@ -926,6 +978,22 @@ module.exports = {
   getOwnerKey: async () => {
     const r = db.prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1").get();
     return r ? r.person_key : null;
+  },
+  /**
+   * 同步版（推送路径专用）。
+   *
+   * pushProactiveMessageToOwner 是同步函数，要被调度器在触发瞬间直接调用，
+   * 而它需要知道「这台没上报联动的桌面到底是不是主人自己的」——不查这个就只能
+   * 把「没上报 = 主人」当成默认，那正是所有人的提醒都进主人桌面的原因。
+   * 返回 null 表示还没有 owner 记录（全新装机），调用方按 fail-closed 处理。
+   */
+  getOwnerKeySync: () => {
+    try {
+      const r = db.prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1").get();
+      return r ? String(r.person_key) : null;
+    } catch {
+      return null;
+    }
   },
 
   // ---- 记忆关联（memory_links 表）----
@@ -1211,12 +1279,13 @@ module.exports = {
   ).all(sessionId, limit),
   getJobRow: (jobId) => db.prepare('SELECT * FROM scheduled_jobs WHERE job_id = ?').get(jobId) || null,
   saveJobRow: (row) => db.prepare(`
-    INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at)
-    VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at)
+    INSERT INTO scheduled_jobs (job_id, session_id, origin, uid, kind, title, payload, due_at, recurrence, status, created_at, updated_at, last_fired_at, owner_key)
+    VALUES (@job_id, @session_id, @origin, @uid, @kind, @title, @payload, @due_at, @recurrence, @status, @created_at, @updated_at, @last_fired_at, @owner_key)
     ON CONFLICT(job_id) DO UPDATE SET
       title=excluded.title, payload=excluded.payload, due_at=excluded.due_at,
-      status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at
-  `).run(row),
+      status=excluded.status, updated_at=excluded.updated_at, last_fired_at=excluded.last_fired_at,
+      owner_key=excluded.owner_key
+  `).run({ owner_key: '', ...row }),
   dueJobRows: (now, limit) => db.prepare(
     "SELECT * FROM scheduled_jobs WHERE status = 'pending' AND due_at <= ? ORDER BY due_at ASC LIMIT ?",
   ).all(now, limit),
@@ -1478,6 +1547,12 @@ function mapMemoryRow(r) {
     originSession: r.origin_session,
     aboutPerson: r.about_person || null,
     source: r.source,
+    // 可信度轴：fact / observed / hearsay / rumor。
+    // 老数据没有这一列的值（DDL 默认 'fact'），保持已知事实的旧行为。
+    epistemic: r.epistemic || 'fact',
+    // 这条信息是谁提供的（平台账号）。用来回答「你听谁说的」，
+    // 也用来在两条矛盾传闻之间判断谁更可信。
+    claimedBy: r.claimed_by || null,
     importance: r.importance,
     hits: r.hits,
     lastHitAt: r.last_hit_at,

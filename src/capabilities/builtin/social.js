@@ -23,6 +23,20 @@ const social = require('../../services/social');
 // 枚举内联：registry 是 eager glob 加载，外部数组可能还没初始化（桌宠版踩过坑）
 const ACTION_ENUM = ['overview', 'groups', 'friends', 'members', 'events', 'who', 'group', 'refresh'];
 
+/**
+ * 这个调用方是不是拥有者本人。
+ *
+ * 统一走 selfOps.roleOf（全仓唯一的角色判定入口），不要在这里直接读 ctx.role，
+ * 否则会重演「各处判据不一致」的老问题。
+ */
+function isOwnerCtx(ctx = {}) {
+    try {
+        return require('../../services/selfOps').roleOf(ctx) === 'owner';
+    } catch {
+        return false;
+    }
+}
+
 const capability = defineCapability({
     id: 'social',
     name: 'social',
@@ -125,6 +139,13 @@ async function dispatch(args = {}, ctx = {}) {
         }
 
         if (action === 'friends') {
+            // ── 2026-11-20 身份排查（C2）：好友名单是设备主人的私人信息 ──────
+            // 原来这里零闸门：任何人（含群里任何人）都能让她把机器人的好友清单
+            // 连 QQ 号一起念出来。讽刺的是 workspace.others 连「有几个别人的任务」
+            // 都严格拒绝，而这里对全量好友敞开。
+            if (!isOwnerCtx(ctx)) {
+                return '好友名单是主人自己的通讯录，我不方便念给别人听。';
+            }
             let contacts = await db.listSocialContacts(adapterId || null);
             if (!contacts.length) return '好友列表是空的（可能还没同步，或协议端不支持查好友）。';
             if (limit) contacts = contacts.slice(0, limit);
@@ -180,7 +201,12 @@ async function dispatch(args = {}, ctx = {}) {
                 lines.push(`和你在同一个群：${p.groups.map((g) => g.groupName || `群 ${g.groupId}`).join('、')}`);
             }
             if (p.person) {
-                const roleText = p.person.role === 'owner' ? '拥有者（最高管理权）' : p.person.role === 'admin' ? '可信任的人' : '普通对话者';
+                // 非拥有者只能知道「这是不是熟人」，不能知道谁有最高管理权 ——
+                // 那等于对外公开"谁是主人"，正好给冒充者递靶子。
+                const owner = isOwnerCtx(ctx);
+                const roleText = p.person.role === 'owner'
+                    ? (owner ? '拥有者（最高管理权）' : '这台设备的拥有者')
+                    : p.person.role === 'admin' ? '可信任的人' : '普通对话者';
                 lines.push(`你对他的档案：${p.person.displayName || p.person.personKey}，${roleText}`);
                 if (p.person.alias) lines.push(`你平时叫他：${p.person.alias}`);
                 if (p.person.notes) lines.push(`你对他的备注：${p.person.notes}`);

@@ -20,6 +20,10 @@ async function dispatch(args, ctx) {
     turnId: ctx.turnId,
     uid: ctx.uid,
     origin: ctx.origin || 'core',
+    // 身份一并带进去：提醒内容是模型生成的，它在不知道对方是谁的时候会默认
+    // 写成「提醒主人」。非主人设的提醒也喊「主人」就等于让别人的话冒充主人。
+    role: ctx.role,
+    displayName: ctx.displayName || ctx.senderName,
   });
 }
 

@@ -90,7 +90,14 @@ function buildHostExecutor(modelUid) {
     if (wsTask && wsTask.isWorkspaceSession(sessionId)) {
       const taskId = wsTask.taskIdFromSession(sessionId);
       const payload = wsTask.parsePayload(content);
+      // owner 优先取 payload（叶子建任务时存下的，最准）；老格式的叶子没有这个字段，
+      // 就从 sessionId 里拆。两者都没有才落到 _legacy —— 不回退成公共目录。
+      const owner =
+        (payload && payload.owner)
+        || wsTask.ownerFromSession(sessionId)
+        || wsTask.LEGACY_OWNER;
       const result = await wsTask.runLocally({
+        owner,
         taskId,
         title: (payload && payload.title) || taskId,
         instruction: (payload && payload.instruction) || "",

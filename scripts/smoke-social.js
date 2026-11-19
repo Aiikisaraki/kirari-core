@@ -173,7 +173,7 @@ const { OneBotAdapter } = require(path.join(ROOT, 'src/bot/onebotAdapter'));
 
     console.log('\n[4] social 能力各 action');
     const { dispatch } = require(path.join(ROOT, 'src/capabilities/builtin/social'));
-    const ctx = { sessionId: 'bot-qq-group:111:1001', adapterId: 'qq' };
+    const ctx = { sessionId: 'bot-qq-group:111:1001', adapterId: 'qq', role: 'owner', isOwner: true };
     const call = (args) => dispatch(args, ctx);
 
     const overview = await call({ action: 'overview' });
@@ -184,6 +184,27 @@ const { OneBotAdapter } = require(path.join(ROOT, 'src/bot/onebotAdapter'));
 
     const friendsOut = await call({ action: 'friends' });
     check('friends 列出两个好友', friendsOut.includes('白尔') && friendsOut.includes('小明'));
+
+    // ── 2026-11-20 身份排查（C2）：好友名单是主人的私人通讯录 ──────────
+    // 修复前这里零闸门：任何人（含群里任何人）都能让她把好友连 QQ 号念出来。
+    const asStranger = (args) =>
+      dispatch(args, { sessionId: 'bot-qq-group:111:1002', adapterId: 'qq', role: 'user', isOwner: false });
+    const strangerFriends = await asStranger({ action: 'friends' });
+    check(
+      '★ 非主人拿不到好友名单',
+      !strangerFriends.includes('1002') && !strangerFriends.includes('老同学'),
+      strangerFriends.slice(0, 60),
+    );
+    // 「谁是拥有者」也不能随便告诉外人 —— 那是冒充者的靶点
+    const strangerWho = await asStranger({ action: 'who', userId: '1001' });
+    check(
+      '★ 非主人问「谁是主人」不给精确权限标签',
+      !strangerWho.includes('最高管理权'),
+      strangerWho.replace(/\n/g, ' | ').slice(0, 80),
+    );
+    // 但基本的群信息（人数、群名）对普通用户仍然开放，不能一刀切封死
+    const strangerOverview = await asStranger({ action: 'overview' });
+    check('非主人仍能看到环境概况（不是全封）', /[1-9]/.test(strangerOverview), strangerOverview.replace(/\n/g, ' | ').slice(0, 60));
 
     const membersOut = await call({ action: 'members', groupId: '111' });
     check('members 报出成员与群主标记', membersOut.includes('1001') && membersOut.includes('群主'), membersOut.replace(/\n/g, ' | '));

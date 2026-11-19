@@ -23,6 +23,11 @@ function rowToJob(row) {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // ── 2026-11-20 身份排查（A2）：任务归属必须跟着任务走 ────────────────
+    // 到点触发时调度器只有这一行数据。没有 ownerKey 就只能在推送时
+    // 从 sessionId 猜归属，而 workspace:<taskId> 猜不出来 → 退化成 _local
+    // → 推到主人桌面。这是「别人的任务跑到我这儿」的根因。
+    ownerKey: String(row.owner_key || ''),
   };
   if (row.last_fired_at != null) job.lastFiredAt = row.last_fired_at;
   return job;
@@ -43,6 +48,10 @@ function jobToRow(job) {
     created_at: job.createdAt,
     updated_at: job.updatedAt,
     last_fired_at: job.lastFiredAt ?? null,
+    // ⚠️ 这个字段以前就在白名单外 —— 上游 taskRuntime/selfOps 明明写了
+    //    `job.ownerKey`，到了这里被静默丢掉，存进库的是一条无主任务。
+    //    上游写、下游读，中间这一层必须透传，否则修了上游也白修。
+    owner_key: String(job.ownerKey || ''),
   };
 }
 

@@ -196,6 +196,77 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
     }
 }
 
+/**
+ * 按 sessionId 主动往平台回发一条消息（定时任务到点用）。
+ *
+ * 为什么需要：定时任务多半是用户在 QQ/群里建的，到点时桌面端未必开着。
+ * 原先只有 pushProactiveMessage（桌面 WebSocket），桌面没开消息就静默丢了，
+ * job 却已经标成 fired —— 用户看到的是「说好 7 点提醒，什么都没来」。
+ *
+ * sessionId 形如 `bot-<adapterId>-<conversationKey>`，其中 conversationKey 是
+ * `private:<userId>` / `group:<groupId>:<userId>` / `channel:...` / `dm:...`。
+ *
+ * @returns {boolean} 是否真的发出去了
+ */
+function pushToUserSession(sessionId, text) {
+    const sid = String(sessionId || '');
+    const body = String(text || '').trim();
+    if (!sid || !body) return false;
+
+    // 本地/控制台会话（纯 uuid）没有平台通道，只能靠桌面 WS，这里直接不处理。
+    if (!sid.startsWith('bot-')) return false;
+
+    const rest = sid.slice('bot-'.length);
+    // adapterId 自身可能带连字符（bot-mvwi1tw3-x1b5），所以按已知 id 前缀匹配，
+    // 不能简单 split('-') —— 那正是之前社交查询全被过滤成空的同一个坑。
+    let adapterId = '';
+    for (const id of running.keys()) {
+        if (rest === id || rest.startsWith(`${id}-`)) {
+            adapterId = id;
+            break;
+        }
+    }
+    if (!adapterId) {
+        console.warn(`[bot] 主动回发找不到适配器（sessionId=${sid}）`);
+        return false;
+    }
+    const adapter = running.get(adapterId);
+    if (!adapter) return false;
+
+    const conversationKey = rest.slice(adapterId.length + 1);
+    if (!conversationKey) return false;
+
+    // 还原成 adapter.sendMessage 需要的 target 形状
+    const privateM = /^private:(.+)$/.exec(conversationKey);
+    const groupM = /^group:([^:]+):(.*)$/.exec(conversationKey);
+    const channelM = /^channel:(.+)$/.exec(conversationKey);
+    const dmM = /^dm:(.+)$/.exec(conversationKey);
+
+    let target = null;
+    if (groupM) {
+        target = { isGroup: true, replyGroupId: groupM[1], senderId: groupM[2] || '' };
+    } else if (privateM) {
+        target = { isGroup: false, senderId: privateM[1] };
+    } else if (channelM) {
+        target = { isGroup: true, replyGroupId: channelM[1], senderId: '' };
+    } else if (dmM) {
+        target = { isGroup: false, senderId: dmM[1] };
+    }
+    if (!target || !target.senderId && !target.replyGroupId) return false;
+
+    // sendMessage 是 async，但调用方（调度器）不 await —— 这里自己兜住异常，
+    // 免得变成 unhandled rejection 把进程告警刷屏。
+    Promise.resolve()
+        .then(() => adapter.sendMessage(target, { text: body, images: [] }))
+        .then(() => {
+            console.log(`[bot] 已主动回发到 ${conversationKey}`);
+        })
+        .catch((e) => {
+            console.warn(`[bot] 主动回发失败（${conversationKey}）:`, e?.message || e);
+        });
+    return true;
+}
+
 /** 起一个适配器（内部）：连接 + 绑定消息处理 + 回发。 */
 function startAdapter(cfg) {
     if (running.has(cfg.id)) return running.get(cfg.id);
@@ -396,5 +467,6 @@ module.exports = {
     botUid,
     getAdapter,
     collectSkillPrompts,
+    pushToUserSession,
     adapterFilePath: () => clientConfig.clientConfigPath(),
 };

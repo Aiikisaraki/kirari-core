@@ -13,6 +13,19 @@
 //
 // 目录形态见 services/workspace.js 头部注释。
 //
+// ── 按人隔离（2026-11-20 用户原话）──────────────────────────────
+//   「我今天把机器人转发给了我一个朋友，她是私聊我的机器人，建立了几个每日任务，
+//     但是我怎么可以直接看到她的任务呢，就算是主人权限，也是优先说我有几个，
+//     然后再说可能还有别人的，我确认了才能看别人的啊！！」
+//
+// 所以这个能力里 owner **不是模型能传的参数**：它只从 ctx（此刻在跟谁说话）解析。
+// 模型无法通过编造 owner 去读别人的目录 —— 参数里根本没有这个入口。
+//
+// 主人要看别人的，必须两步：
+//   ① 调 action=others（不带 confirm）→ 只回「还有 N 个人的任务，要不要看」
+//   ② 用户明确说要 → 再调 action=others + confirm=true → 才真的列出
+// 第 ② 步的 confirm 是模型照着用户的话填的，不是它自己决定的。
+//
 // ── 叶子节点（从机）────────────────────────────────────────────────
 // 从机上这个能力的**文件操作直接在本机执行**，因为工作空间是本机用户的目录；
 // 但「定期任务的模型执行」照旧转发给主机（见 services/workspaceTask.js）。
@@ -23,10 +36,25 @@
 // 所以 action 枚举写死在这里，服务实例在 dispatch 里惰性 require。
 const { defineCapability } = require('kirari-agent');
 
-const ACTION_ENUM = ['overview', 'tasks', 'ls', 'read', 'write', 'append', 'mkdir', 'rm', 'rm_task', 'prune'];
+const ACTION_ENUM = [
+    'overview',
+    'tasks',
+    'ls',
+    'read',
+    'write',
+    'append',
+    'mkdir',
+    'rm',
+    'rm_task',
+    'prune',
+    'others',
+];
 
 // 这些名字是任务文件夹里的保留文件，她不该随手删掉（会让元信息丢）
 const RESERVED_FILES = ['meta.json'];
+
+/** 本机/控制台这类没有对话者的会话，工作空间归属到这个名下。 */
+const LOCAL_OWNER = '_local';
 
 const capability = defineCapability({
     id: 'workspace',
@@ -35,9 +63,10 @@ const capability = defineCapability({
     scope: 'builtin',
     description:
         '你的工作空间：一个真实的文件夹（在用户目录下的 KirariWorkspace），每个定期任务一个子文件夹，用来保存产出、跨天积累数据。'
+        + '⚠️ 工作空间按人分开：你只能看到并操作**此刻正在跟你说话的那个人**的任务，看不到别人的。'
         + 'action：'
         + 'overview（空间总览：在哪、几个任务、占多少）、'
-        + 'tasks（列出所有任务文件夹及其最近运行）、'
+        + 'tasks（列出当前这个人的任务文件夹及其最近运行）、'
         + 'ls（看某个任务文件夹里有什么，需 taskId，可给 path 看子目录）、'
         + 'read（读一个文件，需 taskId + path）、'
         + 'write（写文件，需 taskId + path + content，父目录自动建）、'
@@ -45,7 +74,9 @@ const capability = defineCapability({
         + 'mkdir（建目录）、'
         + 'rm（删文件或子目录）、'
         + 'rm_task（删整个任务文件夹，需 taskId）、'
-        + 'prune（按保留策略清理旧文件，需 taskId）。'
+        + 'prune（按保留策略清理旧文件，需 taskId）、'
+        + 'others（只看别人有没有任务。不带 confirm 时只回答「有几个人的、要不要看」；'
+        + '必须等用户明确说要之后，才能带 confirm=true 再调一次去看内容）。'
         + 'path 一律是相对任务文件夹的路径，不能越出工作空间。',
     parameters: {
         type: 'object',
@@ -57,7 +88,7 @@ const capability = defineCapability({
             },
             taskId: {
                 type: 'string',
-                description: '任务文件夹名（任务的 id）。overview / tasks 不需要。',
+                description: '任务文件夹名（任务的 id）。overview / tasks / others 不需要。',
             },
             path: {
                 type: 'string',
@@ -71,6 +102,12 @@ const capability = defineCapability({
                 type: 'string',
                 description: '建任务文件夹时的人类可读标题（存进 meta.json，文件夹名仍用 taskId）。',
             },
+            confirm: {
+                type: 'boolean',
+                description:
+                    '只有 action=others 用。仅当用户已经明确表示「要看别人的任务」之后，才设为 true；'
+                    + '用户没说就不要带这个参数。',
+            },
         },
         required: ['action'],
     },
@@ -82,7 +119,27 @@ function fail(e) {
     return `error: ${e instanceof Error ? e.message : String(e)}`;
 }
 
-async function dispatch(args, ctx) {
+/**
+ * 解析「这个工作空间属于谁」。
+ *
+ * 只认 ctx，绝不看模型传的参数 —— 这是隔离的根，参数化就等于把钥匙给了模型。
+ * 具体规则收敛在 services/workspace.resolveOwnerFromCtx 里，这里只是转发；
+ * 建任务、提示词注入块都用同一份，避免三处判断漂移。
+ */
+function resolveOwner(ctx = {}) {
+    const ws = require('../../services/workspace');
+    return ws.resolveOwnerFromCtx(ctx);
+}
+
+/** 摘要一行：给 tasks / others 共用。 */
+function taskLine(t) {
+    return (
+        `- ${t.taskId}「${t.title}」：${t.files} 个文件 / ${(t.bytes / 1024).toFixed(1)}KB，` +
+        `运行 ${t.runCount || 0} 次${t.lastRunAt ? `，最近 ${t.lastRunAt}` : ''}`
+    );
+}
+
+async function dispatch(args, ctx = {}) {
     // 惰性 require：见文件头「枚举内联」的说明
     const ws = require('../../services/workspace');
     const a = args || {};
@@ -91,10 +148,57 @@ async function dispatch(args, ctx) {
         return `error: 未知 action「${a.action}」，可用：${ACTION_ENUM.join(' / ')}`;
     }
 
+    let owner;
+    try {
+        owner = resolveOwner(ctx);
+    } catch (e) {
+        return fail(e);
+    }
+
+    // ── others：看别人的任务，必须两步 ──
+    if (action === 'others') {
+        try {
+            // 统一走 selfOps.roleOf —— 全仓只留一个角色判定入口。
+            // 原来这里直接读 ctx.role，而 self_read/self_manage 走 roleOf 兜底，
+            // 造成「安全侧误伤主人（others 拒绝）、危险侧放行外人（settings 可读）」
+            // 的判据分裂。身份判定必须只有一个真相源。
+            const selfOps = require('../../services/selfOps');
+            const isOwner = selfOps.roleOf(ctx) === 'owner';
+            if (!isOwner) {
+                // 连「有两三个别人」都不该泄露给普通用户 —— 那本身就是别人的信息。
+                return '你的工作空间里只有你自己的任务，没有别的可看。';
+            }
+            const others = ws.listOwners().filter((o) => o.owner !== owner);
+            if (!others.length) return '除了你自己，没有别人在这里建过任务。';
+
+            const brief = others
+                .map((o) => `- ${o.owner}：${o.tasks} 个任务`)
+                .join('\n');
+
+            if (a.confirm !== true) {
+                // 第一次只报「有几个人的」，不给内容。等用户点头再调一次带 confirm。
+                return (
+                    `你自己有 ${ws.listTasks(owner).length} 个任务。`
+                    + `\n另外还有 ${others.length} 个用户的 ${others.reduce((n, o) => n + o.tasks, 0)} 个任务：\n${brief}`
+                    + '\n\n要看他们的具体内容吗？你说要，我再看。'
+                );
+            }
+
+            // 第二次（用户已确认）：真的列出来
+            const blocks = others.map((o) => {
+                const lines = ws.listTasks(o.owner).map(taskLine);
+                return `【${o.owner}】${o.tasks} 个任务：\n${lines.join('\n')}`;
+            });
+            return `你自己有 ${ws.listTasks(owner).length} 个任务。\n\n${blocks.join('\n\n')}`;
+        } catch (e) {
+            return fail(e);
+        }
+    }
+
     // 空间概览：不需要 taskId
     if (action === 'overview') {
         try {
-            const o = ws.overview();
+            const o = ws.overview(owner);
             const lines = [
                 `工作空间位置：${o.root}`,
                 `已存在：${o.exists ? '是' : '否（首次写入时会自动创建）'}`,
@@ -102,12 +206,7 @@ async function dispatch(args, ctx) {
             ];
             if (o.list.length) {
                 lines.push('', '任务列表：');
-                for (const t of o.list.slice(0, 20)) {
-                    lines.push(
-                        `- ${t.taskId}「${t.title}」：${t.files} 个文件，${t.runCount || 0} 次运行` +
-                            (t.lastRunAt ? `，最近 ${t.lastRunAt}` : ''),
-                    );
-                }
+                for (const t of o.list.slice(0, 20)) lines.push(taskLine(t));
                 if (o.list.length > 20) lines.push(`（还有 ${o.list.length - 20} 个未列出，用 tasks 看全部）`);
             }
             return lines.join('\n');
@@ -118,15 +217,9 @@ async function dispatch(args, ctx) {
 
     if (action === 'tasks') {
         try {
-            const list = ws.listTasks();
-            if (!list.length) return `工作空间（${ws.rootDir()}）里还没有任务文件夹。`;
-            return list
-                .map(
-                    (t) =>
-                        `- ${t.taskId}「${t.title}」：${t.files} 个文件 / ${(t.bytes / 1024).toFixed(1)}KB，` +
-                        `运行 ${t.runCount || 0} 次${t.lastRunAt ? `，最近 ${t.lastRunAt}` : ''}`,
-                )
-                .join('\n');
+            const list = ws.listTasks(owner);
+            if (!list.length) return '你的工作空间里还没有任务文件夹。';
+            return list.map(taskLine).join('\n');
         } catch (e) {
             return fail(e);
         }
@@ -140,7 +233,7 @@ async function dispatch(args, ctx) {
     try {
         switch (action) {
             case 'ls': {
-                const entries = ws.listFiles(taskId, relPath);
+                const entries = ws.listFiles(owner, taskId, relPath);
                 const where = relPath || `${taskId} 根目录`;
                 if (!entries.length) return `${where}：空`;
                 const lines = entries.map(
@@ -151,15 +244,15 @@ async function dispatch(args, ctx) {
 
             case 'read': {
                 if (!relPath) return 'error: read 需要 path（要读哪个文件）。';
-                const text = ws.readFile(taskId, relPath);
+                const text = ws.readFile(owner, taskId, relPath);
                 return `=== ${taskId}/${relPath} ===\n${text}`;
             }
 
             case 'write': {
                 if (!relPath) return 'error: write 需要 path（写到哪个文件）。';
-                const bytes = ws.writeFile(taskId, relPath, a.content ?? '');
+                const bytes = ws.writeFile(owner, taskId, relPath, a.content ?? '');
                 // 写文件视为「这个任务今天动过」，顺便把 meta 建起来
-                ws.ensureTask(taskId, { title: a.title });
+                ws.ensureTask(owner, taskId, { title: a.title });
                 return `已写入 ${taskId}/${relPath}（${bytes} 字节）。`;
             }
 
@@ -169,20 +262,20 @@ async function dispatch(args, ctx) {
                 // 父目录创建全部复用同一套逻辑，不会出现「append 绕过大小限制」。
                 let old = '';
                 try {
-                    old = ws.readFile(taskId, relPath);
+                    old = ws.readFile(owner, taskId, relPath);
                 } catch {
                     old = ''; // 文件不存在就当新建
                 }
                 const next = old ? `${old.replace(/\s*$/, '')}\n\n${a.content ?? ''}` : String(a.content ?? '');
-                const bytes = ws.writeFile(taskId, relPath, next);
-                ws.ensureTask(taskId, { title: a.title });
+                const bytes = ws.writeFile(owner, taskId, relPath, next);
+                ws.ensureTask(owner, taskId, { title: a.title });
                 return `已追加到 ${taskId}/${relPath}（现在 ${bytes} 字节）。`;
             }
 
             case 'mkdir': {
                 if (!relPath) return 'error: mkdir 需要 path。';
-                const made = ws.mkdir(taskId, relPath);
-                ws.ensureTask(taskId, { title: a.title });
+                const made = ws.mkdir(owner, taskId, relPath);
+                ws.ensureTask(owner, taskId, { title: a.title });
                 return `已建目录 ${taskId}/${made}。`;
             }
 
@@ -191,19 +284,19 @@ async function dispatch(args, ctx) {
                 if (RESERVED_FILES.includes(relPath.split(/[\\/]/).pop())) {
                     return `error: ${relPath} 是任务元信息，不能删（要删整个任务用 rm_task）。`;
                 }
-                const r = ws.remove(taskId, relPath);
+                const r = ws.remove(owner, taskId, relPath);
                 return r.removed ? `已删除 ${taskId}/${relPath}。` : `${taskId}/${relPath} 本来就不存在。`;
             }
 
             case 'rm_task': {
-                const r = ws.removeTask(taskId);
+                const r = ws.removeTask(owner, taskId);
                 return r.removed ? `已删除任务文件夹 ${taskId}（连同里面的所有产出）。` : `任务文件夹 ${taskId} 不存在。`;
             }
 
             case 'prune': {
-                const meta = ws.readTaskMeta(taskId) || {};
+                const meta = ws.readTaskMeta(owner, taskId) || {};
                 const policy = meta.retention || ws.DEFAULT_RETENTION;
-                const r = ws.pruneTask(taskId);
+                const r = ws.pruneTask(owner, taskId);
                 return `已按保留策略清理 ${taskId}：删掉 ${r.deleted} 个文件，释放 ${(r.freedBytes / 1024).toFixed(1)}KB。`
                     + `（策略：保留 ${policy.keepFiles} 个 / ${policy.keepDays} 天 / ${(policy.keepBytes / 1024 / 1024).toFixed(0)}MB）`;
             }
@@ -216,4 +309,11 @@ async function dispatch(args, ctx) {
     }
 }
 
-module.exports = { capability, dispatch, ACTION_ENUM, RESERVED_FILES };
+module.exports = {
+    capability,
+    dispatch,
+    ACTION_ENUM,
+    RESERVED_FILES,
+    LOCAL_OWNER,
+    resolveOwner,
+};

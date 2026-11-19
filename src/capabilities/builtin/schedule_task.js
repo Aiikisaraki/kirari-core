@@ -180,13 +180,41 @@ function newTaskId(title) {
     return `${slug}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
-async function dispatch(args, ctx) {
+/**
+ * 这个任务属于谁。规则收敛在 services/workspace.resolveOwnerFromCtx，
+ * 与 workspace 能力、提示词注入块共用一份 —— 三处各写就会漏。
+ */
+function workspaceOwner(ctx = {}) {
+    const workspace = require('../../services/workspace');
+    return workspace.resolveOwnerFromCtx(ctx);
+}
+
+/** 数某人现在有几个定期任务（扫工作空间目录，顺手也能发现 meta 丢了但 job 还在的）。 */
+function countTasksOfOwner(owner) {
+    const workspace = require('../../services/workspace');
+    return workspace.listTasks(owner).length;
+}
+
+/** 同一 owner 下是否已有「标题 + 内容」都相同的任务。 */
+function findDuplicate(owner, title, instruction) {
+    const workspace = require('../../services/workspace');
+    const normalize = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const t = normalize(title);
+    const i = normalize(instruction);
+    for (const task of workspace.listTasks(owner)) {
+        if (normalize(task.title) !== t) continue;
+        const meta = workspace.readTaskMeta(owner, task.taskId) || {};
+        if (normalize(meta.description) === i) return task;
+    }
+    return null;
+}
+
+async function dispatch(args, ctx = {}) {
     // 惰性 require：见文件头「枚举内联」的说明
     const { createJob } = require('kirari-agent');
     const { jobStore } = require('../../session/jobStore');
     const workspace = require('../../services/workspace');
     const workspaceTask = require('../../services/workspaceTask');
-    const dbStorage = require('../../db/dbStorage');
 
     const a = args || {};
     const title = String(a.title || '').trim();
@@ -199,15 +227,41 @@ async function dispatch(args, ctx) {
         : 'daily';
     const uid = ctx.uid ?? 1;
 
-    // 配额：定期任务每次都要真实调模型，不设上限会悄悄烧凭证。
-    // 超了如实说，让她转告用户，而不是偷偷建成或静默失败。
+    // 任务属于**此刻说话的人**，不属于账号。这是隔离的根：
+    // 用 ctx 解析而不是让模型传参，模型就没法给别人建任务、也没法冒充别人。
+    let owner;
     try {
-        const used = dbStorage.countJobRowsByKind('workspace_task', uid);
+        owner = workspaceOwner(ctx);
+    } catch (e) {
+        return `error: 认不出这是谁的任务——${e instanceof Error ? e.message : String(e)}`;
+    }
+
+    // 「谁都能建，但只能建给自己」在这里就是**结构性保证**：
+    // owner 只从 ctx 来，模型连传都传不进来，所以不存在「给主人下个任务」这条路。
+    // 身份（名字/是不是主人）另存一份，到点执行时模型靠它决定怎么称呼产出对象 ——
+    // 不存的话它只能按模板默认喊「主人」，别人建的任务就会冒充主人。
+    const ownerName = String(ctx.displayName || ctx.senderName || '').trim();
+    const ownerRole = String(ctx.role || '').trim();
+
+    // 配额：按 owner 分别算，不能用 uid —— uid 对 QQ 上所有人都是同一个账号 id(1)，
+    // 按 uid 算等于「所有用户共享 24 个名额」，朋友建满主人就建不了了。
+    try {
+        const used = countTasksOfOwner(owner);
         if (used >= MAX_TASKS_PER_UID) {
-            return `error: 已有 ${used} 个定期任务，达到上限 ${MAX_TASKS_PER_UID} 个。要新建的话，先跟主人确认删掉哪个旧的。`;
+            return `error: 已经有 ${used} 个定期任务了，达到上限 ${MAX_TASKS_PER_UID} 个。要新建的话，先删掉一个旧的。`;
         }
     } catch (e) {
         console.warn('[schedule_task] 统计任务数失败（跳过配额检查）:', e?.message || e);
+    }
+
+    // 去重：同一个 owner 下，标题 + 执行内容都一样的，直接复用旧任务而不是再建一个。
+    // 加这个是因为之前出现过一次对话里连建 5 个「说话分寸」几乎相同的任务。
+    const dup = findDuplicate(owner, title, instruction);
+    if (dup) {
+        return (
+            `已经有一个一样的任务了：「${dup.title}」（${dup.taskId}，${dup.runCount || 0} 次运行记录）。`
+            + `如果你想改时间或内容，告诉我改哪个；想再建一个独立的就换个说法或换标题。`
+        );
     }
 
     try {
@@ -223,12 +277,12 @@ async function dispatch(args, ctx) {
         const retention = {};
         if (Number.isFinite(a.retentionDays)) retention.keepDays = Math.max(1, Math.floor(a.retentionDays));
         if (Number.isFinite(a.retentionFiles)) retention.keepFiles = Math.max(1, Math.floor(a.retentionFiles));
-        workspace.ensureTask(taskId, { title, description: instruction, retention });
+        workspace.ensureTask(owner, taskId, { title, description: instruction, retention, ownerName, ownerRole });
 
         const job = createJob({
-            jobId: `wstask:${taskId}`,
-            // 会话 ID 带 workspace: 前缀，主机侧据此认出是任务而不是闲聊
-            sessionId: workspaceTask.sessionIdFor(taskId),
+            jobId: `wstask:${owner}:${taskId}`,
+            // 会话 ID 带 owner 和 workspace: 前缀，主机侧据此认出「这是谁的任务」
+            sessionId: workspaceTask.sessionIdFor(owner, taskId),
             origin: ctx.origin || 'core',
             uid,
             kind: 'workspace_task',
@@ -237,6 +291,9 @@ async function dispatch(args, ctx) {
             // computeNextRun 只会 +24h，触发后由调度器按这里的字段重算 dueAt。
             payload: workspaceTask.buildPayload({
                 taskId,
+                owner,
+                ownerName,
+                ownerRole,
                 instruction,
                 repeat,
                 hour: a.hour,
@@ -259,8 +316,8 @@ async function dispatch(args, ctx) {
         }[repeat];
         return (
             `已建好定期任务「${title}」（${repeatText}），第一次在 ${when} 执行。`
-            + `执行结果会存进你的工作空间 ${workspace.rootDir()}\\${taskId} 里，按保留策略自动清理旧文件。`
-            + `到点我会自动去做，做完告诉主人写了什么。`
+            + `执行结果会存进工作空间里你自己的文件夹（${workspace.taskDir(owner, taskId)}），按保留策略自动清理旧文件。`
+            + `到点我会自动去做，做完告诉你写了什么。`
         );
     } catch (e) {
         return `error: 建定期任务失败——${e instanceof Error ? e.message : String(e)}`;

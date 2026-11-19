@@ -24,6 +24,15 @@ const {
 const { taskStore } = require('../session/taskStore');
 const { jobStore } = require('../session/jobStore');
 
+/**
+ * 单个会话里允许同时挂着的待触发提醒上限。
+ *
+ * 为什么要有：schedule_reminder 原来是零闸门的——任何人、任意次数都能建，
+ * 到点都会推送到归属人桌面。不给上限就等于给了一个无限闹钟/骚扰通道。
+ * 数值取得比较宽松（正常使用远用不到），只挡滥用。
+ */
+const MAX_REMINDERS_PER_SESSION = 30;
+
 function newId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 }
@@ -130,6 +139,50 @@ function handleScheduleReminder(args, ctx) {
   try {
     const now = Date.now();
     const spec = parseReminder(args, now);
+    // 这条提醒是谁设的、那人是不是主人。到点时只剩这条 job，
+    // 不存下来就分不清「该对谁说话」—— 以前所有人都被当成主人。
+    const isOwnerPerson = String(ctx.role || '') === 'owner';
+    const whoName = String(ctx.displayName || '').trim();
+    const target = isOwnerPerson ? '主人' : (whoName || '你');
+
+    // ── 2026-11-20 身份排查（B1）：提醒原来**完全没有闸门** ─────────────
+    // 任何人（含群里任何人）都能建提醒，无角色、无配额；而同一件事走
+    // self_manage.create_reminder 那条路却是 owner-only。两条路两套权限，
+    // 模型必然用宽的那条 —— 而用户报的正是「她以为自己是主人就给我下任务」。
+    //
+    // 现在口径统一成「谁都能给自己设提醒，但不能给别人的桌面推东西」：
+    //   · 群里不建（到点会变成对全群的定时发言，不受控）
+    //   · 必须能解析出提醒归属人（ownerKey），解析不出就拒绝，
+    //     绝不退化成 '_local'（退化就等于推到主人桌面上，这正是 A2 的漏洞）
+    if (String(ctx.isGroup) === 'true' || ctx.isGroup === true) {
+      return '群里不方便设定时提醒（到点会变成对整群的发言）。你私聊我，我帮你记着。';
+    }
+
+    let ownerKey = '';
+    try {
+      const workspace = require('./workspace');
+      ownerKey = String(workspace.resolveOwnerFromCtx(ctx) || '').trim();
+    } catch {
+      ownerKey = '';
+    }
+    if (!ownerKey) {
+      return '我现在还分不清这条提醒该归谁，怕设完推错人。你私聊我再说一次？';
+    }
+
+    // 每人一份配额，避免被当成无限闹钟刷爆。
+    // 注：jobStore 只提供按 sessionId 的 list；同一会话就对应同一个人，够用。
+    try {
+      const mine = jobStore.list(ctx.sessionId, 200) || [];
+      const pendingMine = mine.filter(
+        (j) => String(j.kind) === 'reminder' && String(j.status) === 'pending',
+      );
+      if (pendingMine.length >= MAX_REMINDERS_PER_SESSION) {
+        return `你手上的提醒已经有 ${pendingMine.length} 条了（上限 ${MAX_REMINDERS_PER_SESSION}），先取消几个吧。`;
+      }
+    } catch {
+      /* 配额查不到就不拦，别因为存储异常让正常需求失败 */
+    }
+
     const job = createJob({
       jobId: newId('job'),
       sessionId: ctx.sessionId,
@@ -142,10 +195,12 @@ function handleScheduleReminder(args, ctx) {
       recurrence: 'once',
       now,
     });
+    // 归属人必须落库：到点时只有这条 job，没有会话上下文可推。
+    job.ownerKey = ownerKey;
     jobStore.save(job, 'job_created');
     advancePendingStep(ctx.sessionId, 'reminder', null, `已设置：${spec.title}`, now);
     const when = new Date(spec.dueAt).toLocaleString('zh-CN');
-    return `已设好提醒「${spec.title}」，将在 ${when} 提醒主人：${spec.payload}`;
+    return `已设好提醒「${spec.title}」，将在 ${when} 提醒${target}：${spec.payload}`;
   } catch (e) {
     return `error: 设置提醒失败——${e instanceof Error ? e.message : String(e)}`;
   }

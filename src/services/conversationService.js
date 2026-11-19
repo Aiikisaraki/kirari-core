@@ -321,7 +321,15 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 只报事实（在哪、有几个任务），不列举全部文件（那会挤爆上下文），
     // 要看细节让她自己调 workspace 能力。
     try {
-      const wsBlock = buildWorkspaceBlock();
+      // 带上「此刻在跟谁说话」：工作空间按人隔开，不带的话她看到的就是全量，
+      // 或者（现在）什么都注入不了。与下一段记忆块同一套身份字段，别各写一份。
+      const wsBlock = buildWorkspaceBlock({
+        sessionId,
+        uid: aiContext.userid,
+        counterpartId: scene && scene.senderId ? String(scene.senderId) : undefined,
+        role: scene && scene.role ? String(scene.role) : null,
+        isGroup: scene ? 'group' === String(scene.chatType || '') : undefined,
+      });
       if (wsBlock) systemPrompt += wsBlock;
     } catch (e) {
       console.warn('[aiReply] 工作空间摘要注入失败（已忽略）:', e?.message || e);
@@ -708,6 +716,10 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             isGroup: scene ? String(scene.chatType || '') === 'group' : undefined,
             role: scene && scene.role ? String(scene.role) : null,
             counterpartId: scene && scene.senderId ? String(scene.senderId) : undefined,
+            // 本机可信入口标记（桌面/控制台）。selfOps.roleOf 只认这个，
+            // 不再靠 sessionId 前缀猜身份 —— 见 selfOps.js roleOf 的修正说明。
+            trustedLocal: scene && scene.chatType === 'local',
+            displayName: scene && scene.senderName ? String(scene.senderName) : undefined,
             // 前端工具执行器：若本 scope 注册了 connection 能力，registry 会用它；
             // 这里兜底挂上（兼容尚未按新接口注册的旧调用方）。
             invokeFrontendTool: aiContext.invokeFrontendTool,
