@@ -456,6 +456,40 @@ function getAdapter(adapterId) {
     return first.done ? null : first.value;
 }
 
+/**
+ * 主动回发到「主人」的 QQ 私聊窗口（按主人身份键，不按 job 的 sessionId）。
+ *
+ * ── 为什么需要这个（2026-11-20 用户拍板）────────────────────────────
+ *   「在这里创建的任务，同样会返回给我的 QQ 与她私聊的窗口，会同步到网页端。」
+ *
+ * 网页控制台 / 桌宠对话框定的任务，sessionId 是本机 UUID（不是 bot-*），
+ * pushToUserSession 按会话回发那条路根本走不通（它只认 bot-* 会话）。
+ * 但这些任务明明是**主人**建的，到点必须回到她的 QQ 私聊。
+ * 所以这里按「主人身份键」找配置了这位主人的适配器，直发私聊。
+ *
+ * 安全：ownerKey 由调用方从 job.ownerKey 解析（people.role=owner 的规范键），
+ * 且这里逐字比对 adapter.ownerAccount —— 配置里没设成主人的账号一律不发。
+ * 客人（role=user）的任务不会走到这里（scheduledJobsService 只在 owner 匹配时调）。
+ *
+ * @returns {boolean} 是否找到通道并发出
+ */
+function pushToOwnerPrivate(ownerKey, text) {
+    const key = String(ownerKey || '').trim();
+    const body = String(text || '').trim();
+    if (!key || !body) return false;
+
+    for (const [adapterId, adapter] of running) {
+        // 只有一个适配器会配置这位主人；ownerAccount 是实时同步的 setOwner 值
+        if (String(adapter.ownerAccount || '').trim() !== key) continue;
+        Promise.resolve()
+            .then(() => adapter.sendMessage({ isGroup: false, senderId: key }, { text: body, images: [] }))
+            .then(() => console.log(`[bot] 已把主人任务回发到 ${adapterId} 私聊 (${key})`))
+            .catch((e) => console.warn(`[bot] 主人任务回发私聊失败 (${key}):`, e?.message || e));
+        return true;
+    }
+    return false;
+}
+
 module.exports = {
     readAdapters,
     writeAdapters,
@@ -468,5 +502,6 @@ module.exports = {
     getAdapter,
     collectSkillPrompts,
     pushToUserSession,
+    pushToOwnerPrivate,
     adapterFilePath: () => clientConfig.clientConfigPath(),
 };

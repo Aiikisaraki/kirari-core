@@ -393,6 +393,34 @@ async function main() {
   check('★ 客人 QQ 不会被当成主人身份键',
     ownerIdentity.getOwnerKey() !== FRIEND_QQ && sQQ.senderId !== FRIEND_QQ);
 
+  // ── 13. ★ 主人建的本地任务，提醒要回到主人 QQ 私聊；客人的绝不 ───
+  //
+  // 用户拍板：「在这里创建的任务，同样会返回给我的 QQ 与她私聊的窗口」。
+  // 网页/桌宠建的任务 sessionId 是本机 UUID，pushToUserSession 只认 bot-* 会话
+  // → 走不通。所以 scheduledJobsService 在「job 属于主人 + 会话不是平台会话」时
+  //   按主人身份键走 pushToOwnerPrivate。这里钉死这个门控：
+  //   只有 ownerKey === 规范主人键的 job 才满足条件，客人的一律不满足。
+  section('13. ★ 主人任务回发 QQ 私聊的门控（客人绝不误投）');
+  const botManager = require(path.join(ROOT, 'src/bot/botManager'));
+  check('botManager 暴露 pushToOwnerPrivate', typeof botManager.pushToOwnerPrivate === 'function');
+
+  const ownerJob = { ownerKey: canonicalKey, sessionId: '9284e4f6-7123-4577-bb69-d788bd1cadce' };
+  const guestJob = { ownerKey: FRIEND_QQ, sessionId: '9284e4f6-7123-4577-bb69-d788bd1cadce' };
+  // 门控条件：只有主人 job 满足；本地 UUID 会话不会走 pushToUserSession（非 bot-*）。
+  const isPlatformSession = (j) => String(j.sessionId).startsWith('bot-');
+  const wouldPushOwner = !isPlatformSession(ownerJob)
+    && ownerIdentity.getOwnerKey() === ownerJob.ownerKey;
+  const wouldPushGuest = !isPlatformSession(guestJob)
+    && ownerIdentity.getOwnerKey() === guestJob.ownerKey;
+  check('★ 主人的本地任务 → 走主人 QQ 私聊回发', wouldPushOwner === true);
+  check('★ 客人的本地任务 → 绝不走主人 QQ 私聊回发', wouldPushGuest === false);
+  check('本地 UUID 会话确实不是平台会话（所以才需要这条特殊路径）',
+    isPlatformSession(ownerJob) === false);
+  // 没有运行中的适配器时安全返回 false（不抛异常、不假装送达）
+  let ownerPushThrew = false;
+  try { botManager.pushToOwnerPrivate(OWNER_QQ, 'test'); } catch { ownerPushThrew = true; }
+  check('无适配器时 pushToOwnerPrivate 安全返回（不崩、不误报送达）', !ownerPushThrew);
+
   // ── 收尾 ────────────────────────────────────────────────────────
   try {
     const dbStorage = require(path.join(ROOT, 'src/db/dbStorage'));

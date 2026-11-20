@@ -118,11 +118,26 @@ function deliverReminder(job) {
   }
 
   // ② 原会话所在平台。sessionId 是 `bot-<adapterId>-<conversationKey>` 才发得出去；
-  //    桌面本地会话（纯 uuid）没有平台通道，只能靠 ①。
+  //    桌面/网页本地会话（纯 uuid）没有平台通道，走下面的 ③。
+  let sentBySession = false;
   try {
     const botManager = require('../bot/botManager');
     if (typeof botManager.pushToUserSession === 'function') {
-      if (botManager.pushToUserSession(job.sessionId, text)) sentPlatform = 1;
+      sentBySession = !!botManager.pushToUserSession(job.sessionId, text);
+      if (sentBySession) sentPlatform = 1;
+    }
+
+    // ③ 主人从网页/桌宠建的提醒（本地会话）必须也能回到她的 QQ 私聊窗口。
+    //    用户 2026-11-20 拍板：「在这里创建的任务，同样会返回给我的 QQ 与她
+    //    私聊的窗口」。按主人身份键直发，绝不按 job.sessionId（那是 UUID）。
+    //    只对主人自己的 job 做——客人的任务只回客人自己的平台会话（②），
+    //    绝不进主人 QQ。
+    if (!sentBySession && owner) {
+      const ownerIdentity = require('./ownerIdentity');
+      if (ownerIdentity.getOwnerKey() === owner
+          && typeof botManager.pushToOwnerPrivate === 'function') {
+        if (botManager.pushToOwnerPrivate(owner, text)) sentPlatform = 1;
+      }
     }
   } catch (e) {
     console.warn(`[sched] 提醒 job=${job.jobId} 发回平台失败:`, e?.message || e);
