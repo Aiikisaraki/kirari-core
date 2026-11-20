@@ -297,10 +297,46 @@ function fmtTime(ts) {
     return new Date(ts).toLocaleString("zh-CN", { hour12: false });
 }
 
+/**
+ * 各叶子节点自报的工具能力（阶段 5）。
+ *
+ * 用户 2026-11-20：「在主机上可以列出所有叶子节点」—— 光有设备名不够，
+ * 还得能看见「那台机器上装了哪些 MCP / skill」，否则点名让它干活时心里没底。
+ * 数据来自叶子连上主机时上报的 tool_caps_report。
+ */
+const deviceCaps = ref({});
+
+async function loadDeviceCaps() {
+    try {
+        const r = await api.netDevices();
+        const next = {};
+        for (const d of r?.devices || []) next[d.deviceId] = d;
+        deviceCaps.value = next;
+    } catch {
+        // 能力清单是锦上添花：拿不到就不显示，不影响组网本身
+        deviceCaps.value = {};
+    }
+}
+
+/** 某台设备的工具摘要（一行说清装了什么） */
+function capsSummary(deviceId) {
+    const c = deviceCaps.value[deviceId];
+    if (!c) return "";
+    const parts = [];
+    if (c.mcpServers?.length) parts.push(`MCP ${c.mcpServers.length} 个`);
+    if (c.skills?.length) parts.push(`技能 ${c.skills.length} 个`);
+    return parts.length ? `可以远程调用：${parts.join("、")}` : "";
+}
+
 onMounted(() => {
     load();
-    // 组网是长时连接：轮询拿最新状态（成员上下线、待同步条数都会变）
-    pollTimer = setInterval(load, 5000);
+    void loadDeviceCaps();
+    // 组网是长时连接：轮询拿最新状态（成员上下线、待同步条数都会变）。
+    // 顺便刷工具能力清单 —— 叶子刚连上时会稍后上报，轮询能自然收敛。
+    pollTimer = setInterval(() => {
+        load();
+        void loadDeviceCaps();
+    }, 5000);
 });
 onUnmounted(() => {
     if (pollTimer) clearInterval(pollTimer);
@@ -454,6 +490,9 @@ onUnmounted(() => {
         <div class="list-main">
           <div class="list-title"><strong>{{ m.name || m.deviceId }}</strong></div>
           <div class="list-desc dim"><code>{{ m.deviceId }}</code></div>
+          <!-- 那台机器上装了哪些 MCP / skill（阶段 5）：
+               点名让它干活之前，先能看见它有什么可用的。 -->
+          <div v-if="capsSummary(m.deviceId)" class="list-desc dim">{{ capsSummary(m.deviceId) }}</div>
         </div>
         <div class="list-ops">
           <button class="mini danger" @click="removeDevice(m.deviceId, m.name)">移除</button>

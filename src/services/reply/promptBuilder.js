@@ -143,6 +143,67 @@ function locationSetMessage(loc, ambiguous) {
   return msg;
 }
 
+/**
+ * 组网设备段：告诉模型「现在能操作哪些机器、怎么点名」。
+ *
+ * 用户 2026-11-20 的规则：
+ *   「假如主机是在 QQ 或者本机聊天窗口（桌宠）或者网页端聊天窗口（核心），
+ *     默认情况下操作主机下的 mcp 和 skill。如果点明了某个叶子节点或者叶子节点的
+ *     别名，就操作那个叶子节点。如果请求来自某个叶子节点，那也默认操作自己这个
+ *     叶子节点。」
+ *
+ * 这段只负责让模型**知道**有这回事、以及点名的语法；"默认在哪跑"由
+ * services/toolRouting.js 在服务端判定（不靠模型自觉），模型只在需要
+ * 换机器时才需要显式点名。
+ *
+ * @param {object} opts
+ * @param {Array<{deviceId: string, name: string, online: boolean}>} opts.devices 可用叶子
+ * @param {string} [opts.selfDeviceId] 本次请求来源设备（叶子自己提问时）
+ * @param {string} [opts.selfDeviceName] 来源设备名
+ * @returns {string} 拼进 system 的段落；没有组网设备时返回空串（不打扰单机用户）
+ */
+function buildDeviceBlock({ devices = [], selfDeviceId = '', selfDeviceName = '' } = {}) {
+  const list = Array.isArray(devices) ? devices : [];
+  const fromLeaf = !!selfDeviceId;
+  // 单机安装（没有别的设备、也不是从叶子来的）：完全不注入，避免污染提示词
+  if (!list.length && !fromLeaf) return '';
+
+  const lines = ['\n\n【设备与工具执行位置】'];
+  if (fromLeaf) {
+    lines.push(
+      `这次请求来自「${selfDeviceName || selfDeviceId.slice(0, 8)}」这台设备。` +
+        '你不特别说明时，MCP 与 skill 都在这台设备上执行（那是它自己的机器）。',
+    );
+  } else {
+    lines.push(
+      '这次请求来自主机本体（本机聊天窗口 / QQ / 网页端）。' +
+        '你不特别说明时，MCP 与 skill 都在主机自己身上执行。',
+    );
+  }
+
+  if (list.length) {
+    const shown = list
+      .map((d) => `- ${d.name}（${d.online ? '在线' : '离线'}）`)
+      .join('\n');
+    lines.push(`\n组网里还有这些设备，可以把工具调用指到其中某一台：\n${shown}`);
+    lines.push(
+      '\n要指定设备时，把设备名或它的别名写在工具名前面，格式是：\n' +
+        '  @device:<设备名> <原来的工具名>\n' +
+        '例如想在那台机器的文件系统上读文件，就用 @device:书房的电脑 read_file；' +
+        '设备名可以只写能唯一认出来的部分（比如「书房」），大小写无所谓。',
+    );
+    lines.push(
+      '注意：' +
+        '① 只在**确实需要换机器**时才加这个前缀；不加就在上面说的默认设备上执行。' +
+        '② 如果我说了要某台机器但你没找到这台设备，工具结果里会明确告诉你没找到，' +
+        '你要把这件事如实说出来，不要假装在别处查过。',
+    );
+  } else {
+    lines.push('\n（当前没有其它在线设备，工具都在上面说的那台机器上执行。）');
+  }
+  return lines.join('');
+}
+
 const COMPLEXITY_RULES = [
   { pattern: /什么模型|哪个模型|由什么驱动|模型驱动|为什么|原理|分析|比较|区别|设计|实现/, timeout: 90000 },
   { pattern: /详细|具体|举例|步骤|代码|方案|如何接入|怎么实现/, timeout: 90000 },
@@ -177,6 +238,7 @@ module.exports = {
   LOCATION_ASK_MESSAGE,
   buildBasePrompt,
   buildSystemPrompts,
+  buildDeviceBlock,
   buildLocationSetRaw,
   locationSetMessage,
   getRequestTimeout,

@@ -121,6 +121,8 @@ export const api = {
     netSyncWhitelist: () => request("/api/net/sync"),
     netSetSyncWhitelist: (fields) => request("/api/net/sync", { method: "PUT", body: JSON.stringify({ fields }) }),
     netRelayStats: () => request("/api/net/relay-stats"),
+    // 主机侧：所有叶子节点 + 各自能跑哪些工具（阶段 5）
+    netDevices: () => request("/api/net/devices"),
     // 数据目录信息（设置页显示读的是哪份数据）
     dataInfo: () => request("/api/data-info"),
 };

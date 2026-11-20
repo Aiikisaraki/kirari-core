@@ -6,6 +6,7 @@ const { parseModelReply, isValidImageUrl } = require('./reply/parser');
 const {
   buildBasePrompt,
   buildSystemPrompts,
+  buildDeviceBlock,
   getRequestTimeout,
   locationSetMessage,
   buildLocationSetRaw,
@@ -76,7 +77,7 @@ async function salvageAsText(aiContext, messages, onDelta = null, profile = null
   }
 }
 
-async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, scopeId = null, scene = null, onDelta = null } = {}) {
+async function getReply({ aiContext, content = '', images = [], sessionId, clientIp = '', locationScope = null, skillPrompts = [], persona = null, kbContext = null, ws = null, scopeId = null, scene = null, onDelta = null, sourceDeviceId = null } = {}) {
   // 阶段 D：能力作用域。优先用调用方显式传入；否则从 ws 派生（WS 链路）；再否则回退到 uid。
   // 这是 frontend 工具与技能执行器的隔离维度——A 连接注册的工具不会出现在 B 连接。
   const capScope = scopeId || (ws ? capabilities.scopeKey('ws', ws.__capScopeId || String(ws.authUid || 'anon')) : capabilities.scopeKey('local', String(aiContext.userid ?? 'anon')));
@@ -298,6 +299,26 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 并给出群聊隐私红线（不复述私聊内容/设置/内部排查）与「别像模板」的语气要求。
     // 解决「共享身份后各窗口决策僵化」和「私聊内容被搬进群聊」。
     systemPrompt += buildSceneContext(scene);
+
+    // 设备与工具执行位置：让她知道「组网里还有哪些机器、怎么点名换机器」。
+    // 默认在哪台执行由服务端 toolRouting 判定（不靠模型自觉），这段只是让
+    // 「点名某个叶子」这件事对模型可见可用。单机安装不注入，不污染提示词。
+    try {
+      const toolRouting = require('./toolRouting');
+      const devices = toolRouting.listDevices();
+      const fromLeaf = sourceDeviceId ? String(sourceDeviceId) : '';
+      const selfDeviceName = fromLeaf
+        ? (devices.find((d) => d.deviceId === fromLeaf) || {}).name || ''
+        : '';
+      const deviceBlock = buildDeviceBlock({
+        devices,
+        selfDeviceId: fromLeaf,
+        selfDeviceName,
+      });
+      if (deviceBlock) systemPrompt += deviceBlock;
+    } catch (e) {
+      console.warn('[aiReply] 设备段注入失败（已忽略）:', e?.message || e);
+    }
 
     // 元指令（根本准则）：比人格更高一层，约束底线行为。永远追加、不可被覆盖。
     systemPrompt += buildCharter();
@@ -723,6 +744,16 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
             // 前端工具执行器：若本 scope 注册了 connection 能力，registry 会用它；
             // 这里兜底挂上（兼容尚未按新接口注册的旧调用方）。
             invokeFrontendTool: aiContext.invokeFrontendTool,
+            // ── 工具在哪台设备上跑（阶段 5）──
+            // 用户要的是「按来源决定」：
+            //   · 请求来自某台叶子 → 默认在那台叶子自己的 MCP/skill 上跑
+            //   · 主机本机 / QQ / 网页端 → 默认跑主机自己的
+            //   · 模型点名了别的设备 → 跑那台设备的
+            // 这里只把「来源」透传下去，具体选择由 toolRouting 决定
+            // （它还要解析模型给的 @device: 前缀与设备别名）。
+            sourceDeviceId: sourceDeviceId ? String(sourceDeviceId) : undefined,
+            // 主机侧的远程调用通道：交给 toolRouting 用，叶子/独立模式没有
+            callToolOnDevice: aiContext.callToolOnDevice,
           });
           result = dispatched.content;
         } catch (e) {

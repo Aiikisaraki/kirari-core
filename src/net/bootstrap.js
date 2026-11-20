@@ -51,6 +51,11 @@ const EXPIRY_KEYS = ["1h", "1d", "7d", "30d", "forever"];
  *  用户点「开启组网」会得到「功能还没准备好」，而桌面端同一时刻是能点的。 */
 let manager = null;
 let hostExecutorAttached = false;
+/**
+ * 叶子侧：本次连接是否已经上报过工具能力（阶段 5）。
+ * 掉线时重置，重连后重新上报 —— 期间用户可能装了新 MCP / 删了 skill。
+ */
+let capsReported = false;
 
 function log(message) {
   console.log(`[net] ${message}`);
@@ -151,6 +156,11 @@ function buildHostExecutor(modelUid) {
         // 不传 scene 会让 relayed 消息在主机被当成 user，读不到主人自己的记忆/任务。
         scene: ownerIdentity.sceneFromSessionId(sessionId),
         ws: null,
+        // 请求来源（阶段 5）：这条对话来自哪台设备。
+        // 主机据此让「模型没点名时，工具默认在请求方自己那台跑」——
+        // 叶子请求自己，主机/QQ/网页端请求主机自己。
+        // 空字符串一律归一成 undefined，避免 '' 被当成一台设备。
+        sourceDeviceId: deviceId ? String(deviceId) : undefined,
         // 流式：叶子请求了 stream 时，路由会传 onDelta 进来 —— 转给内核逐字回调，
         // 增量由组网层转成 relay_delta 单播回叶子。没请求流式时是 undefined，行为不变。
         onDelta: typeof onDelta === "function" ? onDelta : null,
@@ -185,9 +195,98 @@ async function backfillSink(msg) {
 }
 
 /**
+ * 叶子侧：执行主机指派过来的一次工具调用（阶段 5）。
+ *
+ * 为什么必须在叶子本地跑：MCP server 和 skill 都装在**各节点本地**，主机上没有
+ * 叶子的那些配置（也刻意不同步——见 SYNC_FIELDS 不含 mcp/skill）。所以
+ * 「点明书房的电脑，用它自己的技能」只能是：主机决策 → 叶子执行 → 结果回传。
+ *
+ * 约定：**无论成功失败都要回 tool_result**。不回主机只能等到超时，
+ * 而超时无法区分「工具报错」和「设备掉线」，排障时非常难受。
+ */
+async function runLocalToolCall(frame) {
+  const started = Date.now();
+  const callId = frame && frame.callId ? String(frame.callId) : "";
+  const name = frame && frame.name ? String(frame.name) : "";
+  const manager = getManager();
+  const reply = (out) => {
+    try {
+      manager?.replyToolResult({ callId, elapsedMs: Date.now() - started, ...out });
+    } catch (e) {
+      console.warn(`[net] 回传工具结果失败: ${e?.message || e}`);
+    }
+  };
+
+  if (!callId || !name) {
+    reply({ ok: false, error: "主机发来的工具调用缺少 callId 或工具名" });
+    return;
+  }
+
+  // 本机没装这个工具也要明确回「没这个工具」—— 别让主机等到超时
+  let capabilities;
+  try {
+    capabilities = require("../capabilities/registry");
+  } catch (e) {
+    reply({ ok: false, error: `本机能力注册表加载失败：${e?.message || e}` });
+    return;
+  }
+
+  try {
+    // 走 dispatch 的**本地路径**：这里绝不能带 sourceDeviceId（否则又会想远程转发），
+    // 也不能带 @device: 前缀（主机发来时已经剥掉了，名字就是本机的真实工具名）。
+    const dispatched = await capabilities.dispatch("net:remote", name, frame.args || {}, {
+      origin: "net-remote",
+      sessionId: frame.sessionId,
+    });
+    if (dispatched && dispatched.isError) {
+      reply({ ok: false, error: String(dispatched.content || "执行失败") });
+    } else {
+      reply({ ok: true, result: String((dispatched && dispatched.content) || "") });
+    }
+  } catch (e) {
+    reply({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/**
+ * 叶子侧：把本机可远程调用的工具清单报给主机（阶段 5）。
+ *
+ * 主机据此回答「这台设备能不能跑这个工具」，模型点名设备时才有依据。
+ * 连上主机之后调一次；装了新 MCP 可以再调（后来者覆盖）。
+ */
+function reportLocalToolCaps() {
+  const manager = getManager();
+  if (!manager || typeof manager.reportToolCaps !== "function") return false;
+  try {
+    const mcp = require("../mcp/mcpManager");
+    const servers = Array.isArray(mcp.readMcpServers()) ? mcp.readMcpServers() : [];
+    const skills = Array.isArray(mcp.readSkills()) ? mcp.readSkills() : [];
+    const toolNames = Array.isArray(mcp.getLocalToolNames()) ? mcp.getLocalToolNames() : [];
+    return manager.reportToolCaps({
+      mcpServers: servers
+        .map((s) => (s && typeof s.name === "string" ? s.name : ""))
+        .filter(Boolean),
+      skills: skills.map((s) => s.id).filter(Boolean),
+      toolNames: toolNames
+        .map((nm) => {
+          if (typeof nm !== "string" || !nm) return null;
+          return {
+            name: nm,
+            source: nm.startsWith("skill__") ? "skill" : "mcp",
+            owner: nm.split("__")[0],
+          };
+        })
+        .filter(Boolean),
+    });
+  } catch (e) {
+    console.warn(`[net] 上报工具能力失败: ${e?.message || e}`);
+    return false;
+  }
+}
+
+/**
  * 组网同步过来的配置落到本机。
  *
- * 与桌面端 writeModelConfigFile(patch) 等价：写进**同一份 config.json**，
  * 于是组网下发的模型/人格/搜索配置，本机控制台与桌宠版都能看到。
  * 五个同步字段全部有落点（早期版本只落 model/endpoint，其余记日志丢弃——
  * 那时核心版还没有 basePersona/searchProvider 这些配置，现在有了）。
@@ -296,6 +395,29 @@ async function start() {
     onConfigPush: (frame) => {
       // 叶子侧：收到主机下发。写进同一份 config.json（与桌面端同行为）。
       applyConfigChange(frame?.patch, "主机");
+    },
+    // 叶子侧：主机点名要本机跑一次工具（阶段 5）。
+    // 本机的 MCP/skill 只在本机可用，所以必须在本地执行再把结果回传。
+    onToolCall: (frame) => {
+      void runLocalToolCall(frame);
+    },
+    // 叶子接上主机后把「本机有哪些工具」报一次（阶段 5）。
+    // 只在 connected 上报，且同一状态不去重复刷 —— snapshot 会被各种事件触发。
+    onSnapshot: (snap) => {
+      if (!snap || snap.leafStatus !== "connected") {
+        capsReported = false; // 掉线后重置，重连时会再报一次
+        return;
+      }
+      if (capsReported) return;
+      capsReported = true;
+      // 延后一拍：此刻刚握手完成，等工具表刷新完再报更准
+      setTimeout(() => {
+        try {
+          reportLocalToolCaps();
+        } catch (e) {
+          console.warn(`[net] 上报工具能力失败: ${e?.message || e}`);
+        }
+      }, 500);
     },
   });
 
@@ -554,6 +676,8 @@ module.exports = {
   getSyncWhitelist,
   setSyncWhitelist,
   relayStats,
+  // 阶段 5：叶子把本机可远程调用的工具报给主机（连上主机后调一次）
+  reportLocalToolCaps,
   // 配置文件位置（设置页展示 + 排错）
   stateFilePath: () => HOME_PATHS.netState,
   identityFilePath: () => HOME_PATHS.netIdentity,

@@ -1184,6 +1184,38 @@ function setupConsoleRoutes(app) {
         if (!requireAdmin(req, res)) return;
         return res.json(netBootstrap.relayStats());
     });
+
+    /**
+     * 主机侧：列出所有叶子节点 + 各自能跑哪些工具（阶段 5）。
+     *
+     * 用户 2026-11-20：「在主机上可以列出所有叶子节点，而且也可以区分哪个请求
+     * 是来自哪个叶子节点。」这个接口就是那个列表的来源；工具清单来自叶子连上
+     * 主机时自报的 tool_caps_report。
+     *
+     * 注意：只列主机视角的成员。非主机角色返回空列表而不是报错 —— 界面上
+     * 「没有其它设备」和「查询失败」是两件事，不该混成同一个错误提示。
+     */
+    app.get("/api/net/devices", (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        try {
+            const routing = require("../services/toolRouting");
+            const devices = routing.listDevices().map((d) => {
+                const caps = routing.capsOf(d.deviceId) || null;
+                return {
+                    deviceId: d.deviceId,
+                    name: d.name,
+                    online: !!d.online,
+                    // 叶子自报的工具清单（可能还没上报，那时是 null）
+                    mcpServers: caps ? caps.mcpServers || [] : [],
+                    skills: caps ? caps.skills || [] : [],
+                    toolNames: caps && Array.isArray(caps.toolNames) ? caps.toolNames : [],
+                };
+            });
+            return res.json({ ok: true, role: (netBootstrap.snapshot().state || {}).role || "off", devices });
+        } catch (e) {
+            return res.status(500).json({ ok: false, error: e?.message || String(e) });
+        }
+    });
 }
 
 module.exports = { setupConsoleRoutes, isLeafSettingsReadonly };

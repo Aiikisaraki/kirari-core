@@ -24,6 +24,26 @@ const {
 // builtin/global 本就该全局共享，connection 级工具按调用方分桶互不覆盖。
 const registry = new CapabilityRegistry();
 
+/**
+ * 工具路由（阶段 5）：决定一次调用在**哪台设备**上执行。
+ *
+ * ⚠️ 惰性 require：toolRouting → net/bootstrap → conversationService →
+ *    capabilities/registry 会形成环。这里按需加载，第一次 dispatch 时模块早已
+ *    初始化完，既避免环，也不让「没开组网的普通安装」多 require 一堆组网代码。
+ */
+let _toolRouting;
+function toolRoutingModule() {
+  if (_toolRouting === undefined) {
+    try {
+      _toolRouting = require('../services/toolRouting');
+    } catch (e) {
+      console.warn('[capabilities] 工具路由模块加载失败（全部按本地执行）:', e?.message || e);
+      _toolRouting = null;
+    }
+  }
+  return _toolRouting;
+}
+
 // capability.id → dispatch(args, ctx) 执行器（builtin + global；connection 级另存）
 const executorById = new Map();
 // scopeId → (name → executor) —— 前端托管工具按连接隔离的执行器
@@ -173,33 +193,71 @@ async function withTimeout(promise, timeoutMs, name) {
  */
 async function dispatch(scopeId, name, args, ctx = {}) {
   loadBuiltin();
-  const key = String(scopeId || 'anonymous');
-  const cap = registry.resolve(key, name);
-  if (!cap) return { content: `未知工具：${name}`, isError: true, capability: null };
 
+  // ── 阶段 5：先决定这次调用在哪台设备上执行 ──
+  // 用户要的是「按来源决定」：叶子请求默认在叶子自己跑，主机/QQ/网页端默认在主机跑，
+  // 模型点名了某台设备就跑那台。判定细节见 services/toolRouting.js。
+  // 这里只在**真的需要远程执行**时才走组网，普通单机安装完全不受影响。
+  let route = null;
+  const routing = toolRoutingModule();
+  try {
+    route = routing ? routing.decide(ctx, name) : null;
+  } catch (e) {
+    // 路由判定炸了不能影响工具本身：退回本地执行
+    console.warn('[capabilities] 工具路由判定失败（按本地执行）:', e?.message || e);
+    route = null;
+  }
+  if (route && route.target === 'remote') {
+    try {
+      const remote = routing ? await routing.runRemote(ctx, route, args || {}) : null;
+      if (remote) {
+        // 点名了却找不到设备：把「没找到」附在结果前面，模型才知道该换说法
+        const prefix = route.note ? `[${route.note}]\n` : '';
+        return { content: prefix + remote.content, isError: remote.isError, capability: null };
+      }
+      // 没有远程通道（未开组网 / 老版本）：落回本地执行，不要因此失败
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { content: `error: 远程执行工具失败：${msg}`, isError: true, capability: null };
+    }
+  }
+  // 结构化前缀已剥掉设备名，本地执行要用真实工具名
+  const realName = route && route.name ? route.name : name;
+
+  const key = String(scopeId || 'anonymous');
+  const cap = registry.resolve(key, realName);
+  if (!cap) {
+    const miss = route && route.note ? `[${route.note}]\n` : '';
+    return { content: `${miss}未知工具：${realName}`, isError: true, capability: null };
+  }
   // 选执行器：connection 优先（按 scope 分桶），其次 builtin/global 的 id 执行器。
   let executor;
   if (cap.scope === 'connection') {
     executor =
-      connectionExecutors.get(key)?.get(name) ||
+      connectionExecutors.get(key)?.get(realName) ||
       (typeof ctx.invokeFrontendTool === 'function'
-        ? (args) => ctx.invokeFrontendTool(name, args)
+        ? (args) => ctx.invokeFrontendTool(realName, args)
         : undefined);
   } else {
     executor = executorById.get(cap.id);
   }
   if (typeof executor !== 'function')
-    return { content: `error: 能力 ${name} 无可用执行器`, isError: true, capability: cap };
+    return { content: `error: 能力 ${realName} 无可用执行器`, isError: true, capability: cap };
+
+  // 点名了却没找到设备时，即使这次侥幸在本地执行成功，也必须把
+  // 「没找到那台设备」一起回给模型。否则模型会以为查的是书房电脑，
+  // 实际查的是主机 —— 这类串线是最难排查的一种错。
+  const routeNote = route && route.note ? `[${route.note}]\n` : '';
 
   const timeoutMs = cap.timeoutMs || DEFAULT_CAPABILITY_TIMEOUT_MS;
   try {
-    const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx || {})), timeoutMs, name);
-    const content = truncateResult(String(raw), cap.truncateChars);
+    const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx || {})), timeoutMs, realName);
+    const content = routeNote + truncateResult(String(raw), cap.truncateChars);
     return { content, isError: false, capability: cap };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
-      content: truncateResult(`error: ${msg}`, cap.truncateChars),
+      content: routeNote + truncateResult(`error: ${msg}`, cap.truncateChars),
       isError: true,
       capability: cap,
     };
