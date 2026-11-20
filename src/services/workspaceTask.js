@@ -330,7 +330,9 @@ async function fire(job, now = Date.now()) {
         );
 
         if (deliver && speech) {
-            deliverResult(job, owner, taskId, speech);
+            // 必须 await：投递里有一条异步腿（按账号找客人通道），
+            // 不 await 会让「结果没送到」在日志里看起来像已送出。
+            await deliverResult(job, owner, taskId, speech);
         }
         return true;
     }
@@ -339,7 +341,7 @@ async function fire(job, now = Date.now()) {
     const result = await runLocally({ owner, taskId, title, instruction, ownerName, ownerRole, modelUid: uid, deliver });
 
     if (deliver && result.ok) {
-        deliverResult(job, owner, taskId, result.speech || `「${title}」跑完了。`);
+        await deliverResult(job, owner, taskId, result.speech || `「${title}」跑完了。`);
     }
     return true;
 }
@@ -351,12 +353,32 @@ async function fire(job, now = Date.now()) {
  * 原先只 pushProactiveMessage（桌面 WebSocket）。但任务往往是**在 QQ 里建的**，
  * 到点时桌面可能压根没开 —— 消息就这么静默丢了，job 却已经标成 fired。
  *
- * 所以两条腿都走：能发 QQ 就发 QQ（用户在哪建的就在哪收到），
- * 再推一次桌面（顺便让桌宠说出来）。两边都没有才算真没送达。
+ * 所以三条腿都走：能发 QQ 就发 QQ（用户在哪建的就在哪收到），
+ * 再推一次桌面（顺便让桌宠说出来）。全都失败才算真没送达。
+ *
+ * ── 2026-11-20 规范化：补上「按归属人发平台」这条腿（客人的任务全靠它）──
+ *   用户问：「那别人的任务啊提醒啊，也会正确送达别人那里吗」
+ *
+ *   实测答案曾经是**不会**。客人的定期任务 session_id 是
+ *   `workspace:<QQ号>:<任务名>`，不是 `bot-*`，而 pushToUserSession 只认
+ *   `bot-` 前缀（第一行就 return false）。于是：
+ *     · 桌面路：客人没有桌面连接 → 0
+ *     · 平台路：前缀不匹配 → 直接 false
+ *   两条都空，结果静默丢弃，还照样打印"结果送达"。
+ *
+ *   修法与提醒那条完全一致：
+ *     1. 能按原会话发就按原会话发（bot-* 时最精确，回到原窗口）
+ *     2. 不行就按**归属人**发：主人 → 主人私聊；客人 → 客人自己的私聊
+ *     3. 全都失败时明确告警，不再假装送达
+ *
+ *   客人的身份键就是自己的 QQ 号，直接按它找适配器私聊，
+ *   绝不会因为"不像主人"就退化成推给主人桌面（那是报障过的误投）。
  */
-function deliverResult(job, owner, taskId, speech) {
+async function deliverResult(job, owner, taskId, speech) {
     let sentWs = 0;
     let sentQq = 0;
+    const who = String(owner || '').trim();
+    const body = String(speech || '').trim();
 
     // ⚠️ 桌面推送必须按 owner 定向，不能 pushProactiveMessage(uid)：
     // uid 对 QQ 上所有人都是同一个账号 id，那样等于把任务结果广播给所有桌面 ——
@@ -373,18 +395,41 @@ function deliverResult(job, owner, taskId, speech) {
     }
 
     try {
-        // 惰性 require：botManager 依赖链很长，顶层引用容易成环。
+        // ① 原会话通道：只有 bot-* 会话发得出去（用户在哪个窗口建的，回哪个）
         const botManager = require('../bot/botManager');
         if (typeof botManager.pushToUserSession === 'function') {
             sentQq = botManager.pushToUserSession(job.sessionId, speech) ? 1 : 0;
+        }
+
+        // ② 按归属人直发私聊 —— 客人的 workspace:/sub:: 任务只能靠这条。
+        //    主人走 pushToOwnerPrivate（沿用既有做法的语义），
+        //    其他人按自己的 QQ 号找适配器。
+        if (!sentQq && who && body) {
+            const ownerIdentity = require('./ownerIdentity');
+            const isOwner = ownerIdentity.samePerson(who, ownerIdentity.getOwnerKey());
+            if (isOwner && typeof botManager.pushToOwnerPrivate === 'function') {
+                if (botManager.pushToOwnerPrivate(ownerIdentity.canonicalIdentity(who), body)) sentQq = 1;
+            } else if (!isOwner && typeof botManager.pushToUserByAccount === 'function') {
+                // 客人：按他自己的账号发，绝不进主人的窗口
+                if (await botManager.pushToUserByAccount(who, body)) sentQq = 1;
+            }
         }
     } catch (e) {
         console.warn('[wsTask] 回发消息失败（已忽略）:', e?.message || e);
     }
 
-    console.log(
-        `[wsTask] ${owner}/${taskId} 结果送达：桌面 ${sentWs} 个连接、平台 ${sentQq} 条`,
-    );
+    if (sentWs > 0 || sentQq > 0) {
+        console.log(
+            `[wsTask] ${owner}/${taskId} 结果送达：桌面 ${sentWs} 个连接、平台 ${sentQq} 条`,
+        );
+    } else {
+        // 与提醒那条一致：真的没送达时必须留痕，否则「任务跑了但没人收到」
+        // 只能靠用户反馈才能发现（这次就是）。
+        console.warn(
+            `[wsTask] ⚠️ ${owner}/${taskId} 的结果没有送达任何地方`
+            + `（桌面无连接、sessionId=${job.sessionId} 也发不出去）。内容：${String(speech || '').slice(0, 60)}`,
+        );
+    }
     return { sentWs, sentQq };
 }
 

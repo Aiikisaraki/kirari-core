@@ -508,6 +508,74 @@ function pushToOwnerPrivate(ownerKey, text) {
     return false;
 }
 
+/**
+ * 按「某个人的账号」直发私聊 —— 给客人的任务/提醒结果用。
+ *
+ * ── 为什么需要这个（2026-11-20）────────────────────────────────────
+ *   用户问：「那别人的任务啊提醒啊，也会正确送达别人那里吗」
+ *
+ *   客人的定期任务 session_id 是 `workspace:<QQ号>:<任务名>`，不是 `bot-*`，
+ *   pushToUserSession 第一行就 return false；而 pushToOwnerPrivate 只服务主人。
+ *   结果**客人的任务结果一条都发不出去**，还照样打印"结果送达"
+ *   （实测：`结果送达：桌面 0 个连接、平台 0 条`）。
+ *
+ * 与 pushToOwnerPrivate 的区别：那个只认配置里的那一位主人；
+ * 这个认任意账号，用于把结果回给任务的主人（客人本人）。
+ *
+ * 安全：绝不"有适配器就发"。必须先证明这个账号在本机有可用的私聊通道
+ * （是适配器登记的账号，或 people 里有这个人的档案），否则宁可发不出去
+ * 并告警，也不能把 A 的内容发到 B 那里 —— 那是隐私事故。
+ *
+ * @returns {Promise<boolean>} 是否找到通道并发出
+ */
+async function pushToUserByAccount(account, text) {
+    const target = String(account || '').trim();
+    const body = String(text || '').trim();
+    if (!target || !body) return false;
+
+    const send = (adapterId, adapter) => {
+        Promise.resolve()
+            .then(() => adapter.sendMessage({ isGroup: false, senderId: target }, { text: body, images: [] }))
+            .then(() => console.log(`[bot] 已把任务结果回发到 ${adapterId} 私聊 (${target})`))
+            .catch((e) => console.warn(`[bot] 任务结果回发私聊失败 (${target}):`, e?.message || e));
+    };
+
+    // ① 精确匹配适配器登记的账号（主号位）
+    for (const [adapterId, adapter] of running) {
+        if (String(adapter.ownerAccount || '').trim() === target) {
+            send(adapterId, adapter);
+            return true;
+        }
+    }
+
+    // ② 否则要求 people 里有这个人的档案（= 确实跟我说过话）。
+    //    ⚠️ getPerson 是 async，必须 await —— 直接当同步用会永远拿到 Promise，
+    //       判定恒为 false，客人照样收不到（静默失败的老套路）。
+    let seen = false;
+    try {
+        const memory = require('./memory');
+        if (typeof memory.getPerson === 'function') {
+            const p = await memory.getPerson(target);
+            seen = !!(p && String(p.personKey || p.person_key || '') === target);
+        }
+    } catch { /* 查不到就当没证据 */ }
+
+    if (!seen) {
+        console.warn(
+            `[bot] 任务结果发不出去：${target} 在本机没有可用的私聊通道`
+            + `（不是适配器账号，也没有该账号的人物档案）`,
+        );
+        return false;
+    }
+
+    for (const [adapterId, adapter] of running) {
+        if (typeof adapter.sendMessage !== 'function') continue;
+        send(adapterId, adapter);
+        return true;
+    }
+    return false;
+}
+
 module.exports = {
     readAdapters,
     writeAdapters,
@@ -521,5 +589,8 @@ module.exports = {
     collectSkillPrompts,
     pushToUserSession,
     pushToOwnerPrivate,
+    // 2026-11-20：按任意账号直发私聊，给客人自己的任务/提醒结果用。
+    // 没有这条，客人的 workspace:/sub:: 任务结果一条都发不出去。
+    pushToUserByAccount,
     adapterFilePath: () => clientConfig.clientConfigPath(),
 };
