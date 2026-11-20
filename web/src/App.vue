@@ -60,6 +60,12 @@ const SETTINGS_LABELS = {
     bot: "机器人",
     sync: "组网",
 };
+// 叶子节点：机器人统一从主机走，模型/人格/搜索/协议端这些"跟随主机"的设置
+// 必须灰掉只读（与后端 rejectIfLeaf 双保险）。组网设置页不在此列——要留退出叶子的入口。
+const settingsReadonly = computed(() => {
+    const s = netInfo.value && netInfo.value.state;
+    return !!(s && s.role === "leaf");
+});
 const crumbMain = computed(() => (page.value === "chat" ? "聊天" : "设置"));
 const crumbSub = computed(() =>
     page.value === "settings" ? SETTINGS_LABELS[settingsPage.value] || "" : ""
@@ -302,7 +308,10 @@ onMounted(() => {
               @saved="flashSaved('备注名已保存')"
             />
             <ProfileSettings v-else-if="settingsPage === 'profile'" @saved="flashSaved('头像已保存')" />
-            <PersonaSettings v-else-if="settingsPage === 'persona'" @saved="flashSaved('人格已保存')" />
+            <PersonaSettings
+              v-else-if="settingsPage === 'persona'"
+              @saved="flashSaved('人格已保存')"
+            />
             <ModelSettings
               v-else-if="settingsPage === 'model'"
               :brain-ready="brainReady"
@@ -311,7 +320,11 @@ onMounted(() => {
             <SkillSettings v-else-if="settingsPage === 'skill'" @saved="flashSaved('技能已保存')" />
             <KnowledgeSettings v-else-if="settingsPage === 'knowledge'" @saved="flashSaved('知识库已保存')" />
             <McpSettings v-else-if="settingsPage === 'mcp'" @saved="flashSaved('工具服务已保存')" />
-            <BotSettings v-else-if="settingsPage === 'bot'" @saved="flashSaved('机器人已保存')" />
+            <BotSettings
+              v-else-if="settingsPage === 'bot'"
+              :readonly="settingsReadonly"
+              @saved="flashSaved('机器人已保存')"
+            />
             <SyncSettings
               v-else-if="settingsPage === 'sync'"
               :net-info="netInfo"

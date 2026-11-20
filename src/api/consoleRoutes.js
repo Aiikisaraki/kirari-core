@@ -72,6 +72,36 @@ function requireAdmin(req, res) {
     return true;
 }
 
+/**
+ * 叶子节点机器人协议端只读守卫（2026-11-20 用户拍板）。
+ *
+ * 「一旦任意节点成为叶子，这个机器人都统一从主节点走，叶子节点时这个设置就灰掉，
+ * 里面东西锁定不可设置。」—— 只锁**机器人（协议端）设置**：QQ/OneBot 连接在主机上跑，
+ * 叶子上配了也不生效（还会误导用户）。模型/人格/搜索不在本守卫范围内，仍可本机编辑。
+ * 后端也必须拒绝，不能只靠前端置灰。
+ *
+ * 注意：这里判 role==='leaf'（真实组网角色），不是 canStartNetworking()——后者只说明
+ * 「有密钥能开网」，刚装好没开网的机器也会是 true，用它会把普通本机误锁。
+ */
+function rejectIfLeaf(res) {
+    if (isLeafSettingsReadonly(netBootstrap.shouldUplink())) {
+        res.status(409).json({
+            error: "LEAF_READONLY",
+            message: "当前节点是组网叶子，机器人统一由主机驱动：协议端（QQ/OneBot）设置跟随主机，不能在本机修改。请到主机上操作，或先把本机切换为主机/关闭组网。",
+        });
+        return true;
+    }
+    return false;
+}
+
+/**
+ * 纯判定：是否要锁这类"跟随主机"的设置。抽出来只为可单测 ——
+ * 决策本身很简单：只有真实 leaf 角色才锁，host/off 都放行。
+ */
+function isLeafSettingsReadonly(role) {
+    return role === 'leaf';
+}
+
 /** token 掩码：与桌面端同一格式（头 3 + 6 星 + 尾 4；太短只给 ****）。 */
 function maskToken(token) {
     if (!token) return "";
@@ -808,6 +838,7 @@ function setupConsoleRoutes(app) {
 
     app.post("/api/bot", (req, res) => {
         if (!requireAdmin(req, res)) return;
+        if (rejectIfLeaf(res)) return;
         const body = req.body || {};
         const name = String(body.name || "").trim();
         const type = body.type === "qqofficial" ? "qqofficial" : "onebot";
@@ -841,6 +872,7 @@ function setupConsoleRoutes(app) {
 
     app.put("/api/bot/:id", (req, res) => {
         if (!requireAdmin(req, res)) return;
+        if (rejectIfLeaf(res)) return;
         const adapters = botManager.readAdapters();
         const idx = adapters.findIndex((a) => a.id === req.params.id);
         if (idx < 0) return res.status(404).json({ message: "这个适配器不存在（可能已被删除）" });
@@ -872,6 +904,7 @@ function setupConsoleRoutes(app) {
      */
     app.post("/api/bot/:id/owner", async (req, res) => {
         if (!requireAdmin(req, res)) return;
+        if (rejectIfLeaf(res)) return;
         const account = String((req.body || {}).account || "").trim();
         try {
             // setOwner 会顺带把该账号此前以客人身份攒下的私聊记录并进主对话
@@ -888,6 +921,7 @@ function setupConsoleRoutes(app) {
 
     app.delete("/api/bot/:id", (req, res) => {
         if (!requireAdmin(req, res)) return;
+        if (rejectIfLeaf(res)) return;
         const adapters = botManager.readAdapters();
         const next = adapters.filter((a) => a.id !== req.params.id);
         if (next.length === adapters.length) return res.status(404).json({ message: "这个适配器不存在" });
@@ -1152,4 +1186,4 @@ function setupConsoleRoutes(app) {
     });
 }
 
-module.exports = { setupConsoleRoutes };
+module.exports = { setupConsoleRoutes, isLeafSettingsReadonly };

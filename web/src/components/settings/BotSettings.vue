@@ -12,6 +12,8 @@ import { ref, onMounted, onUnmounted } from "vue";
 import { api } from "../../api.js";
 
 const emit = defineEmits(["saved"]);
+// 叶子节点只读：协议端跟随主机（主机才是 QQ 连接出口），本机改了不生效
+const props = defineProps({ readonly: { type: Boolean, default: false } });
 
 const adapters = ref([]);
 const loading = ref(false);
@@ -56,12 +58,14 @@ function defaultConfig(type) {
 }
 
 function startAdd() {
+    if (props.readonly) return;
     // 默认 QQ 官方机器人（合规，无需第三方 QQ 客户端 / 公网回调）
     editing.value = { id: "new", type: "qqofficial", name: "", enabled: true, config: defaultConfig("qqofficial") };
     notice.value = "";
 }
 
 function startEdit(a) {
+    if (props.readonly) return;
     editing.value = JSON.parse(JSON.stringify({ ...a, config: { ...defaultConfig(a.type), ...(a.config || {}) } }));
     notice.value = "";
 }
@@ -78,7 +82,7 @@ function parseGroupList(text) {
 }
 
 async function saveEdit() {
-    if (!editing.value) return;
+    if (props.readonly || !editing.value) return;
     const f = editing.value;
     if (!f.name.trim()) {
         errorMsg.value = "名字要填";
@@ -107,6 +111,7 @@ async function saveEdit() {
 }
 
 async function toggle(a) {
+    if (props.readonly) return;
     try {
         await api.updateBot(a.id, { enabled: !a.enabled });
         await load();
@@ -117,6 +122,7 @@ async function toggle(a) {
 }
 
 async function remove(a) {
+    if (props.readonly) return;
     if (!confirm(`删掉机器人「${a.name}」？连接配置会一起消失。`)) return;
     try {
         await api.deleteBot(a.id);
@@ -129,6 +135,7 @@ async function remove(a) {
 
 // 设为主人：该账号之后发来的消息并进主对话（和控制台/桌宠版共用同一段记录）
 async function setOwner(a) {
+    if (props.readonly) return;
     try {
         const r = await api.setBotOwner(a.id, a._ownerKey || "");
         const moved = r?.moved || 0;
@@ -144,6 +151,7 @@ async function setOwner(a) {
 }
 
 async function clearOwner(a) {
+    if (props.readonly) return;
     try {
         await api.setBotOwner(a.id, "");
         notice.value = "已取消主人";
@@ -168,6 +176,7 @@ onUnmounted(() => {
 <template>
   <section class="card wide">
     <h2>机器人</h2>
+    <p v-if="readonly" class="leaf-lock">当前节点是组网叶子，QQ 连接由主机统一驱动，协议端设置跟随主机、这里只读。要修改请到主机上操作，或先退出组网。</p>
     <p class="card-desc">
       默认使用 QQ 官方机器人（官方 WebSocket 反向连接，合规稳定，无需公网回调与第三方 QQ 客户端）。
       OneBot 作为通用协议端保留，用于非 QQ 的自有机器人框架。与桌宠版共用同一份配置。
@@ -175,13 +184,13 @@ onUnmounted(() => {
 
     <div v-if="loading && adapters.length === 0" class="dim">读取中…</div>
     <div v-else-if="adapters.length === 0 && !editing" class="dim">
-      还没有接入机器人。点下面的「添加一个」开始。
+      {{ readonly ? "机器人由主机统一接入，本机不单独配置。" : "还没有接入机器人。点下面的「添加一个」开始。" }}
     </div>
 
     <div v-for="a in adapters" :key="a.id" class="list-item">
       <div class="list-main">
         <div class="list-title">
-          <label class="switch" :aria-label="`启用 ${a.name}`">
+          <label v-if="!readonly" class="switch" :aria-label="`启用 ${a.name}`">
             <input type="checkbox" :checked="a.enabled !== false" @change="toggle(a)" />
             <span class="switch__slider"></span>
           </label>
@@ -198,7 +207,7 @@ onUnmounted(() => {
         <div v-if="a.lastError" class="list-desc error">{{ a.lastError }}</div>
 
         <!-- 主人绑定：被设为 owner 的账号，消息并进主对话（与桌宠版同一功能） -->
-        <div class="owner-row">
+        <div class="owner-row" v-if="!readonly">
           <template v-if="a.ownerAccount">
             <span class="pill ok">主人：{{ a.ownerAccount }}</span>
             <button class="mini" @click="clearOwner(a)">取消主人</button>
@@ -215,7 +224,7 @@ onUnmounted(() => {
           连接后收到消息，这里才会出现可设为主人的账号。
         </p>
       </div>
-      <div class="list-ops">
+      <div class="list-ops" v-if="!readonly">
         <button class="mini" @click="startEdit(a)">编辑</button>
         <button class="mini danger" @click="remove(a)">删除</button>
       </div>
@@ -293,7 +302,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <button v-else class="ghost add-btn" @click="startAdd">＋ 添加一个</button>
+    <button v-else-if="!readonly" class="ghost add-btn" @click="startAdd">＋ 添加一个</button>
   </section>
 </template>
 

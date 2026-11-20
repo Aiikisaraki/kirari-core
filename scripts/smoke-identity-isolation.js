@@ -470,6 +470,39 @@ async function main() {
   check('★ 群聊会话 → isGroup，不授 owner 私聊身份',
     groupSc.isGroup === true && groupSc.role === 'user');
 
+  // ── 16. ★ 叶子节点「机器人设置」只读 ─────────────────────────────
+  //
+  // 用户拍板：「一旦任意节点成为叶子节点，这个机器人都统一从主节点走，
+  // 叶子节点时这个设置就灰掉，里面东西锁定不可设置。」
+  // 只锁协议端（bot）：QQ/OneBot 连接跑在主机上，叶子配了不生效。
+  // 模型/人格/搜索**不锁**——叶子改了要能同步到主机（applyLocalConfigPatch 上报）。
+  // 组网设置（退出叶子）绝不能锁。
+  section('16. ★ 叶子节点「机器人设置」只读守卫');
+  const consoleRoutes = require(path.join(ROOT, 'src/api/consoleRoutes'));
+  const leafGuard = consoleRoutes.isLeafSettingsReadonly;
+  check('★ leaf 角色 → 机器人设置只读（锁定）', leafGuard('leaf') === true);
+  check('★ host 角色 → 放行', leafGuard('host') === false);
+  check('★ off（未开组网）→ 放行（不能误锁普通本机）', leafGuard('off') === false);
+  check('★ 未知/null 角色 → 放行（fail-open 到可配置，避免锁死）',
+    leafGuard(null) === false && leafGuard(undefined) === false);
+  // 后端只有 bot 写路由带守卫
+  const routesSrc = fs.readFileSync(path.join(ROOT, 'src/api/consoleRoutes.js'), 'utf8');
+  const guardedRoutes = ['/api/bot', '/api/bot/:id', '/api/bot/:id/owner'];
+  for (const route of guardedRoutes) {
+    // 每条写路由的 handler 里必须出现 rejectIfLeaf
+    const re = new RegExp(`app\\.(?:put|post|delete)\\("${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[\\s\\S]{0,120}?rejectIfLeaf\\(res\\)`);
+    check(`写路由 ${route} 有叶子只读守卫`, re.test(routesSrc));
+  }
+  // 反向确认：模型/人格/设置不能被锁（叶子改了要能同步到主机）
+  const openRoutes = ['/api/settings', '/api/models', '/api/models/active', '/api/persona'];
+  for (const route of openRoutes) {
+    const re = new RegExp(`app\\.(?:put|post|delete)\\("${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[\\s\\S]{0,120}?rejectIfLeaf`);
+    check(`★ 写路由 ${route} 不锁（改动要能同步回主机）`, !re.test(routesSrc));
+  }
+  // 反向确认：组网退出类路由不能被这个守卫挡住
+  check('★ /api/net/leave 等退出路由不带只读守卫',
+    !/app\.post\("\/api\/net\/leave"[\s\S]{0,120}?rejectIfLeaf/.test(routesSrc));
+
   // ── 收尾 ────────────────────────────────────────────────────────
   try {
     const dbStorage = require(path.join(ROOT, 'src/db/dbStorage'));

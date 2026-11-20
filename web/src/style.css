@@ -231,6 +231,20 @@ body::before {
     font-size: 13px;
     margin: 0 0 4px;
 }
+/* 叶子节点只读提示：这些设置跟随主机，本机改了不生效 */
+.leaf-lock {
+    background: rgba(255, 170, 40, 0.12);
+    border-left: 3px solid #f0a030;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text);
+    margin: 0 0 12px;
+}
+input:disabled, select:disabled, textarea:disabled, button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
 
 /* ── 顶栏（面包屑 + 状态 + 图标操作）── */
 .topbar {
