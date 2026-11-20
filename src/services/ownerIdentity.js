@@ -56,6 +56,142 @@ function getOwnerKey() {
   return FALLBACK;
 }
 
+// ── 身份归一化（canonical identity）────────────────────────────────────
+//
+// ── 为什么需要这一层（2026-11-20 用户第二次拍桌）─────────────────────
+//   「既然三个入口是一个身份，那我不管哪个入口都可以应该看得到啊，
+//     你这 bug 也太多了」
+//   「还是打补丁，你要考虑一下还有没有其他是主人但是没被存为 _local 的情况，
+//     也一并处理掉，我们要规范化编码了」
+//
+// 她说得对。此前每次出问题都是「在比较的那一行」加一个 `|| x === FALLBACK`，
+// 于是同一个 bug 换个语句又活过来。真正的问题是：**同一个人有多个表示法，
+// 而没有任何一个地方负责把它们认成同一个人**。系统里同时流通着四种写法：
+//
+//   1. people.role='owner' 的 person_key（QQ 号 / openid）  ← 规范值
+//   2. '_local'           本机自用的旧别名（FALLBACK）
+//   3. 本机会话 UUID      local-session.json 那一份（身份≠会话，但历史数据混用了）
+//   4. uid=1              数据库内置账户编号
+//
+// 只要「写入方」和「读取方」用了不同写法，人就被劈成了两个：
+//   · 提醒存成 '_local'，投递时比对 '1980308740' → 判成非主人 → 静默丢弃
+//   · 网页建的任务 owner 是 UUID，QQ 来查时对不上 → 「我为什么看不到」
+//
+// 所以这里提供**唯一**的归一入口。规矩只有两条：
+//   · 所有「存身份」的地方，写之前一律过 canonicalIdentity()；
+//   · 所有「比身份」的地方，比之前两侧一律过 canonicalIdentity()。
+// 不再允许任何模块自己写 `x === '_local' || x === ownerKey`。
+//
+// 归一规则（顺序即优先级）：
+//   · 空 → ''（认不出，绝不默认成主人；调用方自己决定要不要拒）
+//   · '_local' / 'local' / 'uid=1' / '1' → 规范主人键
+//     （这些在历史数据里**只**可能指本机主人，不会指别人）
+//   · 本机会话 UUID / session_* / console-* → 规范主人键
+//     （本机会话只属于本机主人；这是「三入口同一身份」的直接推论）
+//   · 其余（客人 QQ 号、workspace:<owner>:、net:<device>:）→ 原样返回，
+//     但去掉 net: 命名空间外壳，露出里面真正的会话键再判一次。
+
+/** 指代「本机主人」的历史别名集合（小写比较）。 */
+const OWNER_ALIASES = new Set(['_local', 'local', 'uid=1', 'uid:1', '1', '__builtin__']);
+
+/**
+ * 判断一个会话键是不是「本机人机对话」。
+ *
+ * ⚠️ 这里必须**正向匹配**，不能写「不是 bot- 就当本机主人」。
+ * 上一版我正是那么写的，而客人的 QQ 号 `1658359753` 不以 bot- 开头，
+ * 于是会被判成本机会话 → 归一到主人 → 客人的东西全被并进主人口袋。
+ * 那等于把「客人隔离」这条红线直接抹掉，比原来的 bug 更严重。
+ *
+ * 所以只认两种**形状明确**的本机会话：
+ *   · 与 local-session.json 里那份 UUID 完全相同（最权威）
+ *   · UUID / session_* / console-* 这类本机入口自己生成的键
+ * 其余一律不动 —— 认不出就是认不出，绝不猜。
+ */
+function isOwnerLocalSession(sid) {
+  const s = String(sid || '').trim();
+  if (!s) return false;
+
+  // net:<device>:<原始 sessionId> —— 剥掉设备壳，用里面的键判
+  if (s.startsWith('net:')) {
+    const rest = s.slice('net:'.length);
+    const inner = rest.includes(':') ? rest.slice(rest.indexOf(':') + 1) : '';
+    return isOwnerLocalSession(inner);
+  }
+
+  // ① 与本机会话真源逐字相等（最权威，重启也稳定）
+  try {
+    const localSession = require('../session/localSession');
+    const real = String(localSession.currentSessionIdSync?.() || '').trim();
+    if (real && s === real) return true;
+  } catch {
+    /* 读不到就继续按形状判 */
+  }
+
+  // ② 本机入口生成键的形状：UUID / session_* / console-*
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return true;
+  if (/^(?:session|console)[_-][a-zA-Z0-9_-]{1,64}$/.test(s)) return true;
+
+  // 其余（含纯数字 QQ 号、群号、未知串）→ 不动
+  return false;
+}
+
+/**
+ * 把一个任意写法的主人类身份**归一**成规范身份键。
+ *
+ * @param {string} value 任何来源的身份值（senderId / ownerKey / sessionId / uid）
+ * @param {string} [asOwner] 以谁为「主人」来做归一，默认取本机规范键。
+ *        只有在调用方**明确知道**主人是谁时才传（如推送闸门里由外部传入的
+ *        ownerOfSystem）。传了它就以它为基准，不去读本机 people 表 ——
+ *        否则「按 A 判断主人」和「按本机 B 归一」两套基准打架，又会认错人。
+ * @returns {string} 规范身份键；'' 表示认不出（不是主人，也不是可用身份）
+ */
+function canonicalIdentity(value, asOwner) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+
+  const ownerKey = asOwner !== undefined && asOwner !== null && String(asOwner).trim()
+    ? String(asOwner).trim()
+    : getOwnerKey();
+
+  // ① 已经是规范键：直接返回（最常见的快路径）
+  if (raw === ownerKey) return ownerKey;
+
+  // ② 历史别名：只在「本机主人」这个语义下成立
+  if (OWNER_ALIASES.has(raw.toLowerCase())) return ownerKey;
+
+  // ③ 本机会话键（含 net: 包装）：本机人机对话只属于本机主人
+  if (isOwnerLocalSession(raw)) return ownerKey;
+
+  // ④ 其余（客人的 QQ 号等）：保持原样，不做任何"猜"。
+  //    客人的隔离是红线——绝不能因为猜错把客人并进主人。
+  return raw;
+}
+
+/**
+ * 两个人是不是同一个人（两侧都先归一）。
+ *
+ * 这是所有身份比较的**唯一**正确写法：
+ *   if (samePerson(job.ownerKey, getOwnerKey())) { ... }
+ * 替代以前散落各处的 `a === b || a === FALLBACK || ...`。
+ *
+ * @param {string} a
+ * @param {string} b
+ * @param {string} [asOwner] 可选：显式指定「主人」的基准（见 canonicalIdentity）
+ */
+function samePerson(a, b, asOwner) {
+  const ca = canonicalIdentity(a, asOwner);
+  const cb = canonicalIdentity(b, asOwner);
+  return !!ca && !!cb && ca === cb;
+}
+
+/**
+ * 把「这条归属是谁」解析成规范键；认不出返回 ''。
+ * 与 canonicalIdentity 的区别：空值就是认不出，不会变成主人。
+ */
+function canonicalOwnerKey(value) {
+  return canonicalIdentity(value);
+}
+
 /**
  * 本机主人入口（网页控制台 / 桌宠对话框 / 主人 QQ 私聊）统一 scene。
  *
@@ -141,4 +277,13 @@ function sceneFromSessionId(sessionId, platform = 'net') {
   return ownerScene({ platform, chatType: 'local' });
 }
 
-module.exports = { FALLBACK, getOwnerKey, ownerScene, sceneFromSessionId };
+module.exports = {
+  FALLBACK,
+  getOwnerKey,
+  canonicalIdentity,
+  canonicalOwnerKey,
+  samePerson,
+  isOwnerLocalSession,
+  ownerScene,
+  sceneFromSessionId,
+};

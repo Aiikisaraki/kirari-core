@@ -577,9 +577,15 @@ function manage(action, args = {}, ctx = {}) {
             // 归属人必须落库。self_manage 是 owner-only（上方已挡），所以这里必然是主人；
             // 但仍要显式写上 ownerKey —— 否则到点解析不出来会退化成 '_local'，
             // 而 '_local' 和「任何远程客户端建的提醒」在推送时不可区分（审计 A2）。
+            //
+            // 2026-11-20 规范化：存之前统一过 canonicalIdentity，把 '_local' /
+            // 本机会话 UUID 这类「其实是主人」的写法收敛成规范身份键。
+            // 存进去的永远是规范键，下游比较不会因为写法不同认错人。
             let ownerKey = '';
             try {
-                ownerKey = String(require('./workspace').resolveOwnerFromCtx(ctx) || '').trim();
+                ownerKey = require('./ownerIdentity').canonicalIdentity(
+                    require('./workspace').resolveOwnerFromCtx(ctx),
+                );
             } catch { ownerKey = ''; }
             if (!ownerKey) {
                 return 'error: 无法确定这条提醒属于谁，为避免推错人，先不建了。';

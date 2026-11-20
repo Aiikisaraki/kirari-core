@@ -495,20 +495,29 @@ function pushProactiveMessage(uid, message) {
  * @returns {boolean}
  */
 function shouldDeliverToConn({ want, cp, trustedLocal, ownerOfSystem }) {
-    // 规范身份键：'主人' 是同一个身份，历史数据里可能写成 '_local'。
-    // 先把「要投给谁」归一：_local / 空 owner 都收敛到真正的 owner 键。
-    const ownerKey = String(ownerOfSystem || '').trim();
-    const isOwnerMessage = !!ownerKey && (want === ownerKey || want === ownerIdentity.FALLBACK);
+    // ── 2026-11-20 规范化：身份比较只走 samePerson ────────────────────────
+    // 原来这里是手写的
+    //   const isOwnerMessage = want === ownerKey || want === FALLBACK
+    //   if (isOwnerMessage && (cpKey === ownerKey || cpKey === FALLBACK))
+    // 每多一种历史写法就要再补一个 ||，补漏一处就又出一次「提醒没送到」。
+    // 现在统一交给 ownerIdentity.samePerson：两侧都先归一再比。
+    //
+    // ⚠️ 归一必须**以调用方给的 ownerOfSystem 为基准**（第三个参数）。
+    // 不能让它去读本机 people 表：这个函数是纯函数、要能单测，
+    // 而且「按传进来的 owner 判断主人」和「按进程里那份 owner 归一」
+    // 两套基准打架时，会把人判成两个 —— 正是要根治的那种 bug。
+    const asOwner = String(ownerOfSystem || '').trim();
+
+    // 这条消息是不是发给主人的（_local / UUID / 规范键都认）
+    const isOwnerMessage = !!asOwner && ownerIdentity.samePerson(want, asOwner, asOwner);
 
     // 这条连接正在替某个具体的人说话：只有对得上才收。
     // 主人自己的联动连接记的也是规范 owner 键，所以主人消息仍只对主人连接可见。
     if (cp) {
-        const cpKey = String(cp).trim();
-        // cp 记成旧别名 '_local' 的连接，等同于本机主人连接。
-        if (isOwnerMessage && (cpKey === ownerKey || cpKey === ownerIdentity.FALLBACK)) {
+        if (isOwnerMessage && ownerIdentity.samePerson(cp, asOwner, asOwner)) {
             return !!trustedLocal;
         }
-        return cpKey === want;
+        return ownerIdentity.samePerson(cp, want, asOwner);
     }
 
     // 没在替谁说话（= 没上报联动、纯本机使用）：只有**主人自己的**消息才上桌面。

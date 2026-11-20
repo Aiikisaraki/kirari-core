@@ -65,7 +65,18 @@ function resolveJobOwner(job = {}) {
     );
     return '';
   }
-  return owner;
+
+  // ── 2026-11-20 规范化：返回前归一 ────────────────────────────────────
+  // 历史数据里 owner 可能是 '_local'（主人本机建的提醒），也可能是本机会话
+  // UUID。这两种写法在语义上就是主人，但如果不归一，调用方拿它跟规范键
+  // '1980308740' 一比就认不出来 —— 提醒静默消失那个 bug 就是这么来的。
+  // 这里统一收敛，让「存的是什么」与「比的是什么」永远是同一种写法。
+  if (!owner) return '';
+  try {
+    return require('./ownerIdentity').canonicalIdentity(owner);
+  } catch {
+    return owner;
+  }
 }
 
 /**
@@ -132,11 +143,21 @@ function deliverReminder(job) {
     //    私聊的窗口」。按主人身份键直发，绝不按 job.sessionId（那是 UUID）。
     //    只对主人自己的 job 做——客人的任务只回客人自己的平台会话（②），
     //    绝不进主人 QQ。
+    //
+    // ── 2026-11-20 规范化：结论必须用 samePerson 比，不能 === ────────────
+    // 原来这行是 `getOwnerKey() === owner`。主人 QQ 私聊建提醒时，owner 被存
+    // 成了 '_local'（因为 sessionId 已并成本机会话 UUID），于是
+    // '1980308740' === '_local' 为假 → 这一步被跳过 → 桌面又没开 →
+    // 整条提醒静默消失，job 却照样标成 fired。用户看到的就是「说好的提醒没来」。
+    //
+    // 现在两侧都过 canonicalIdentity 再比：'_local'、本机会话 UUID、
+    // '1980308740' 会被认成同一个人。以后不管写入方用哪种写法都不会再错。
     if (!sentBySession && owner) {
       const ownerIdentity = require('./ownerIdentity');
-      if (ownerIdentity.getOwnerKey() === owner
+      if (ownerIdentity.samePerson(owner, ownerIdentity.getOwnerKey())
           && typeof botManager.pushToOwnerPrivate === 'function') {
-        if (botManager.pushToOwnerPrivate(owner, text)) sentPlatform = 1;
+        // 发出去时一律用规范键，别把历史别名递给下游
+        if (botManager.pushToOwnerPrivate(ownerIdentity.canonicalIdentity(owner), text)) sentPlatform = 1;
       }
     }
   } catch (e) {

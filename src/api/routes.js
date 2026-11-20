@@ -385,7 +385,11 @@ function setupBotChatRoute(app) {
       }
     } catch { /* 查不到就当普通用户，fail-closed */ }
     const isPrivate = identity.chatType === 'private';
-    const isOwnerHere = personRole === 'owner' && isPrivate && senderId === ownerIdentity.getOwnerKey();
+    // 2026-11-20 规范化：身份比较统一走 samePerson（两侧先归一），
+    // 不再写 senderId === getOwnerKey()。这样将来任何入口传来历史别名
+    // （_local / 本机会话 UUID）也不会被误判成「不是主人」。
+    const isOwnerHere = personRole === 'owner' && isPrivate
+      && ownerIdentity.samePerson(senderId, ownerIdentity.getOwnerKey());
     const bridgeScene = {
       chatType: identity.chatType,
       isGroup: !isPrivate,

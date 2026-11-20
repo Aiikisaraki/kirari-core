@@ -356,6 +356,61 @@ if (!jobColumns.includes('owner_key')) {
 // 索引：推送与按人查任务都要按 owner 过滤
 db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_owner ON scheduled_jobs(owner_key, status)');
 
+// ── 2026-11-20 存量数据收敛：把历史别名刷成规范身份键 ─────────────────
+//
+// 背景（用户原话）：「还是打补丁，你要考虑一下还有没有其他是主人但是没被
+// 存为 _local 的情况，也一并处理掉，我们要规范化编码了」
+//
+// 光改代码不够 —— 库里已经有一批 owner_key='_local' 的提醒（主人从网页/
+// 桌宠建的，那时 sessionId 已并成本机会话 UUID，解析出 '_local' 就存了下来）。
+// 那些行不修，下次到点仍然发不出去。所以这里做一次幂等刷新：
+//
+//   owner_key ∈ ('_local','local','1','uid=1', 本机会话 UUID, ...)
+//     → 规范主人键（people.role='owner' 的 person_key）
+//
+// ⚠️ 只在**确实能确定规范键**时才刷；拿不到就整段跳过，绝不留半截。
+// ⚠️ 只碰「语义上只可能是主人」的那些值，绝不按形状批量改他人数据 ——
+//    客人的 QQ 号看起来也是纯数字，误刷就等于把客人并进主人。
+const CANON_OWNER_MIGRATION = (() => {
+  let ownerKey = '';
+  try {
+    const r = db.prepare("SELECT person_key FROM people WHERE role = 'owner' ORDER BY first_seen_at ASC LIMIT 1").get();
+    if (r && String(r.person_key || '').trim()) ownerKey = String(r.person_key).trim();
+  } catch { /* people 表还没建好，跳过 */ }
+  if (!ownerKey) return { skipped: 'no-owner' };
+
+  // 明确等同于「本机主人」的旧写法
+  const aliases = ['_local', 'local', '1', 'uid=1', 'uid:1', '__builtin__'];
+  let fixed = 0;
+  try {
+    const stmt = db.prepare(
+      "UPDATE scheduled_jobs SET owner_key = ? WHERE owner_key IN ("
+      + aliases.map(() => '?').join(', ')
+      + ') AND owner_key <> ?',
+    );
+    const info = stmt.run(ownerKey, ...aliases, ownerKey);
+    fixed += info.changes || 0;
+  } catch { /* 列不存在等异常，不影响启动 */ }
+
+  // 本机会话 UUID：local-session.json 里那份 id 只属于本机主人。
+  // 这里读不到文件也无所谓（容器首启可能还没生成），下一轮启动再刷。
+  try {
+    const localSession = require('../session/localSession');
+    const sid = String(localSession.currentSessionIdSync?.() || '').trim();
+    if (sid) {
+      const info = db.prepare(
+        'UPDATE scheduled_jobs SET owner_key = ? WHERE owner_key = ? AND owner_key <> ?',
+      ).run(ownerKey, sid, ownerKey);
+      fixed += info.changes || 0;
+    }
+  } catch { /* 忽略 */ }
+
+  if (fixed > 0) {
+    console.log(`[db] 身份规范化：已把 ${fixed} 条定时任务的归属人收敛到规范身份键`);
+  }
+  return { ownerKey, fixed };
+})();
+
 // 保留账户区间：uid 0-99999 为程序内置账户（本地部署内置账户固定 uid=1）。
 // 单独部署服务端时，真实用户注册从 100000 起，绝不占用保留区间。
 const BUILTIN_UID = 1;

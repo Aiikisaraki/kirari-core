@@ -122,4 +122,15 @@ async function ensureLocalSessionId({ storage = loadStorage(), quiet = false } =
     return id;
 }
 
-module.exports = { FILE, filePath, ensureLocalSessionId, isLocalSession, FOREIGN_SESSION_PREFIXES };
+/**
+ * 同步读当前本机会话 id（不创建、不收口）。
+ *
+ * 供身份归一化使用：ownerIdentity 需要判断「某个会话键是不是本机这段对话」，
+ * 而那个判断发生在同步路径里（推送闸门、权限判定），不能 await。
+ * 读不到就返回 ''，调用方按形状兜底 —— 绝不在这里创建会话。
+ */
+function currentSessionIdSync() {
+    return readFile();
+}
+
+module.exports = { FILE, filePath, ensureLocalSessionId, isLocalSession, currentSessionIdSync, FOREIGN_SESSION_PREFIXES };

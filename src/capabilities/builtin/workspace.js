@@ -168,7 +168,12 @@ async function dispatch(args, ctx = {}) {
                 // 连「有两三个别人」都不该泄露给普通用户 —— 那本身就是别人的信息。
                 return '你的工作空间里只有你自己的任务，没有别的可看。';
             }
-            const others = ws.listOwners().filter((o) => o.owner !== owner);
+            // 2026-11-20 规范化：过滤「别人」也是身份比较，两侧先归一。
+            // 否则同一主人可能以 '_local' / UUID 等形式在工作空间里占了两个
+            // 目录，主人会在「别人」列表里看到自己。
+            const ownerIdentity = require('../../services/ownerIdentity');
+            const others = ws.listOwners()
+                .filter((o) => !ownerIdentity.samePerson(o.owner, owner));
             if (!others.length) return '除了你自己，没有别人在这里建过任务。';
 
             const brief = others

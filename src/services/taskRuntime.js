@@ -158,10 +158,21 @@ function handleScheduleReminder(args, ctx) {
       return '群里不方便设定时提醒（到点会变成对整群的发言）。你私聊我，我帮你记着。';
     }
 
+    // ── 归属人：解析 + 归一（2026-11-20 规范化）────────────────────────
+    // 以前这里只做 resolveOwnerFromCtx，拿到什么存什么。于是主人 QQ 私聊
+    // （sessionId 已并成本机会话 UUID）解析出 '_local' 就直接存成 '_local'，
+    // 到点投递时与 getOwnerKey()='1980308740' 对不上 → 提醒静默消失。
+    //
+    // 现在这里多做一步 canonicalIdentity：把 '_local' / 本机会话 UUID 这类
+    // 「其实是主人」的写法统一收敛到规范身份键。存进库的永远是规范键，
+    // 下游任何比较都不会再因为写法不同而认错人。
     let ownerKey = '';
     try {
+      const ownerIdentity = require('./ownerIdentity');
       const workspace = require('./workspace');
-      ownerKey = String(workspace.resolveOwnerFromCtx(ctx) || '').trim();
+      ownerKey = ownerIdentity.canonicalIdentity(
+        workspace.resolveOwnerFromCtx(ctx),
+      );
     } catch {
       ownerKey = '';
     }

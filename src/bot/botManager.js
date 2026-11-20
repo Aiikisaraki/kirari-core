@@ -89,8 +89,16 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
     //    也不能写进只有两个人的本机会话——否则主人在群里 @ 她一句，
     //    这条群聊消息就混进了私聊历史，之后她在私聊里"记得"群里的内容，
     //    反向也会把私聊里商量过的事在群里说出来（2026-11-19 用户报的隐私问题）。
+    // ── 2026-11-20 规范化：比对前归一 ──────────────────────────────────
+    // 原来这里是 `incoming.senderId === owner`。initiator 的 senderId 是
+    // 平台传来的真实 QQ 号，owner 来自适配器配置，通常一致；但两者只要有一侧
+    // 是历史别名（'_local' / 带空白 / 大小写差异），主人就会被当成客人：
+    // 消息不再并入主对话、role 掉成 user、sessionId 变成 bot-*，
+    // 于是「网页能看到的记忆/任务，QQ 里看不到」——正是用户报的那个现象。
+    // 现在两侧归一再比，写法和读法不同也认成同一个人。
     const owner = String(ownerAccount || '');
-    const isOwnerAccount = !!owner && incoming.senderId === owner && !incoming.isGroup;
+    const isOwnerAccount = !!owner && !incoming.isGroup
+        && require('../services/ownerIdentity').samePerson(incoming.senderId, owner);
 
     // 身份不是「主人 / 客人」二元：每个说话的人都有自己的档案与记忆池，
     // role 只表达管理权限（owner 最高），不决定她记得谁。
@@ -478,13 +486,23 @@ function pushToOwnerPrivate(ownerKey, text) {
     const body = String(text || '').trim();
     if (!key || !body) return false;
 
+    // ── 2026-11-20 规范化：比对前先归一，不再逐字比 ──────────────────────
+    // 原来这里是 `adapter.ownerAccount !== key`。ownerKey 若以历史别名
+    // '_local' 传进来（主人本机建的提醒），就永远匹配不上 ownerAccount
+    // '1980308740' → 找不到通道 → 提醒发不出去且不加任何日志。
+    // 现在两侧都过 canonicalIdentity，写法和读法不同也能认成同一个人。
+    const ownerIdentity = require('../services/ownerIdentity');
+    const wantKey = ownerIdentity.canonicalIdentity(key);
+
     for (const [adapterId, adapter] of running) {
         // 只有一个适配器会配置这位主人；ownerAccount 是实时同步的 setOwner 值
-        if (String(adapter.ownerAccount || '').trim() !== key) continue;
+        if (!ownerIdentity.samePerson(adapter.ownerAccount, wantKey)) continue;
+        // 发出去一律用适配器自己记的那份账号（规范值），不把别名递给协议端
+        const sendTo = String(adapter.ownerAccount || wantKey).trim();
         Promise.resolve()
-            .then(() => adapter.sendMessage({ isGroup: false, senderId: key }, { text: body, images: [] }))
-            .then(() => console.log(`[bot] 已把主人任务回发到 ${adapterId} 私聊 (${key})`))
-            .catch((e) => console.warn(`[bot] 主人任务回发私聊失败 (${key}):`, e?.message || e));
+            .then(() => adapter.sendMessage({ isGroup: false, senderId: sendTo }, { text: body, images: [] }))
+            .then(() => console.log(`[bot] 已把主人任务回发到 ${adapterId} 私聊 (${sendTo})`))
+            .catch((e) => console.warn(`[bot] 主人任务回发私聊失败 (${sendTo}):`, e?.message || e));
         return true;
     }
     return false;
