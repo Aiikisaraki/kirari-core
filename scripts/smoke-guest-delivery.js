@@ -111,6 +111,27 @@ async function main() {
   check('空账号直接 false', (await botManager.pushToUserByAccount('', 'x')) === false);
   check('空内容直接 false', (await botManager.pushToUserByAccount(FRIEND_QQ, '')) === false);
 
+  // ── ⚠️ 本轮踩到的真 bug：botManager 里 require('./memory') 路径写错 ──
+  // 本文件在 src/bot/ 下，memory 在 src/services/ 下，正确是 '../services/memory'。
+  // 写错会抛 MODULE_NOT_FOUND，被空 catch 吞掉 → 判定恒为 false →
+  // 客人永远收不到，而日志只说"没有该账号的人物档案"，看起来像数据问题。
+  // 这里直接把两条路径都试一遍，钉死"必须是能加载到人的那条"。
+  let goodLoad = false;
+  let badLoad = false;
+  try {
+    const m = require(path.join(ROOT, 'src/services/memory'));
+    goodLoad = typeof m.getPerson === 'function';
+  } catch { goodLoad = false; }
+  try {
+    // 从 botManager 所在目录出发的相对路径（应有尽有）
+    require(path.join(ROOT, 'src/bot/memory'));
+    badLoad = true;
+  } catch { badLoad = false; }
+  check('src/services/memory 可以加载且提供 getPerson', goodLoad);
+  check('★ src/bot/memory 不存在（证明 ./memory 是错误路径）', badLoad === false);
+  check('★ 有档案的人能被 getPerson 查到（通道证据可用）',
+    !!(await require(path.join(ROOT, 'src/services/memory')).getPerson(FRIEND_QQ)));
+
   // ═══════════════════════════════════════════════════════════════════
   section('4. ★ 投递闸门：主人的只到主人，客人的绝不到主人');
   // ═══════════════════════════════════════════════════════════════════

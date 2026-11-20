@@ -551,19 +551,30 @@ async function pushToUserByAccount(account, text) {
     // ② 否则要求 people 里有这个人的档案（= 确实跟我说过话）。
     //    ⚠️ getPerson 是 async，必须 await —— 直接当同步用会永远拿到 Promise，
     //       判定恒为 false，客人照样收不到（静默失败的老套路）。
+    //
+    //    ⚠️ 路径是 ../services/memory，不是 ./memory（本文件在 src/bot/ 下）。
+    //       写错路径会直接抛 MODULE_NOT_FOUND，被下面的 catch 吞掉后
+    //       判定恒为 false —— 生产日志里就出现了"没有该账号的人物档案"，
+    //       而同时 getPerson 明明查得到人。catch 不能吞掉这类自身 bug。
     let seen = false;
+    let lookupError = '';
     try {
-        const memory = require('./memory');
+        const memory = require('../services/memory');
         if (typeof memory.getPerson === 'function') {
             const p = await memory.getPerson(target);
             seen = !!(p && String(p.personKey || p.person_key || '') === target);
         }
-    } catch { /* 查不到就当没证据 */ }
+    } catch (e) {
+        // 不静默：查档案失败和"确实没有档案"是两件事，混在一起就没法排查。
+        lookupError = e?.message || String(e);
+        console.warn(`[bot] 查 ${target} 的人物档案失败:`, lookupError);
+    }
 
     if (!seen) {
         console.warn(
             `[bot] 任务结果发不出去：${target} 在本机没有可用的私聊通道`
-            + `（不是适配器账号，也没有该账号的人物档案）`,
+            + `（不是适配器账号，也没有该账号的人物档案）`
+            + (lookupError ? `；查档案时出错：${lookupError}` : ''),
         );
         return false;
     }
