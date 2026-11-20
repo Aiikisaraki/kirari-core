@@ -1,4 +1,5 @@
 const WebSocket = require("ws");
+const ownerIdentity = require("../services/ownerIdentity");
 const { verifySession } = require("../auth/sessionAuth");
 const sessionManager = require("../session/sessionManager");
 const fallbackService = require("../services/fallbackService");
@@ -272,16 +273,10 @@ function setupWebSocket(server, options = {}) {
                     //    所以这里不需要"替别人说话"的分支 —— 曾经设想过，但那会造出
                     //    「senderId 是别人、role 却是 owner」的组合，正是用户最担心的
                     //    「她以为自己是主人，任务真的向我执行」。
+                    // 本机主人入口与网页控制台 / 主人 QQ 私聊用同一个身份键。
+                    // 这里必须由握手（trustedLocal）认定，不接受客户端自报身份。
                     scene: ws.trustedLocal
-                        ? {
-                              chatType: 'local',
-                              isGroup: false,
-                              isOwner: true,
-                              role: 'owner',
-                              senderId: '_local',
-                              senderName: '主人',
-                              platform: 'desktop',
-                          }
+                        ? ownerIdentity.ownerScene({ platform: 'desktop' })
                         : {
                               chatType: 'remote',
                               isGroup: false,
@@ -500,15 +495,25 @@ function pushProactiveMessage(uid, message) {
  * @returns {boolean}
  */
 function shouldDeliverToConn({ want, cp, trustedLocal, ownerOfSystem }) {
-    // 本机/控制台的推送：落在「没联动任何人」的桌面上
-    if (want === '_local') return !cp;
+    // 规范身份键：'主人' 是同一个身份，历史数据里可能写成 '_local'。
+    // 先把「要投给谁」归一：_local / 空 owner 都收敛到真正的 owner 键。
+    const ownerKey = String(ownerOfSystem || '').trim();
+    const isOwnerMessage = !!ownerKey && (want === ownerKey || want === ownerIdentity.FALLBACK);
 
-    // 这条连接正在替某个具体的人说话：只有对得上才收
-    if (cp) return cp === want;
+    // 这条连接正在替某个具体的人说话：只有对得上才收。
+    // 主人自己的联动连接记的也是规范 owner 键，所以主人消息仍只对主人连接可见。
+    if (cp) {
+        const cpKey = String(cp).trim();
+        // cp 记成旧别名 '_local' 的连接，等同于本机主人连接。
+        if (isOwnerMessage && (cpKey === ownerKey || cpKey === ownerIdentity.FALLBACK)) {
+            return !!trustedLocal;
+        }
+        return cpKey === want;
+    }
 
-    // 没在替谁说话（= 纯本机使用）：只有**主人自己的**消息才上桌面。
+    // 没在替谁说话（= 没上报联动、纯本机使用）：只有**主人自己的**消息才上桌面。
     // 不能反过来"没联动就都收" —— 那正是把朋友的提醒送进主人桌面的错逻辑。
-    const isOwnerMessage = !!ownerOfSystem && want === ownerOfSystem;
+    // 这里必须是本机可信连接（内置令牌 + 内网握手）。
     return isOwnerMessage && !!trustedLocal;
 }
 

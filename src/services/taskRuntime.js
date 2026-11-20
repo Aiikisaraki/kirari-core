@@ -200,7 +200,17 @@ function handleScheduleReminder(args, ctx) {
     jobStore.save(job, 'job_created');
     advancePendingStep(ctx.sessionId, 'reminder', null, `已设置：${spec.title}`, now);
     const when = new Date(spec.dueAt).toLocaleString('zh-CN');
-    return `已设好提醒「${spec.title}」，将在 ${when} 提醒${target}：${spec.payload}`;
+    // 回执里带两个「硬事实」，让转述没得编：
+    //   ① 这一次**只建了一条**（用户 2026-11-20 报障：她说过一次"早上8点半提醒我
+    //      起床"，模型却回"你发了两遍，我就设了一条"——用户根本没发两遍，那条
+    //      消息在库里也只有一条。它是在前一轮"读取被挡回来"之后心虚，自己补了
+    //      个解释把这个空填上了）。
+    //   ② 到点**只响一次**（recurrence 固定 once）。
+    // 把"建了几条"写进工具结果，模型再想解释"为什么只设一条"时手里有真数据。
+    return (
+      `已设好提醒「${spec.title}」，将在 ${when} 提醒${target}：${spec.payload}`
+      + `（本次共新建 1 条，提醒 id=${job.jobId}，只响一次）`
+    );
   } catch (e) {
     return `error: 设置提醒失败——${e instanceof Error ? e.message : String(e)}`;
   }

@@ -176,8 +176,27 @@ function read(topic, ctx = {}) {
     const role = roleOf(ctx);
     const tier = readTier(role);
     if (tier && !tier.includes(t)) {
-        return `关于${t}这件事我暂时不方便跟你说细的。你要是想了解我能做什么，我可以讲讲。`;
+        // 拒绝必须说清是「没权限」而不是「没有」。
+        //
+        // 2026-11-20 用户报障：「再怎么说也不该说查不到，没有任务那就说没有，
+        // 查不到就让我很担心，你是不是权限给错了」。她说得对 —— 原来这句
+        //「不方便跟你说细的」对模型来说语义太软，它转述时会滑成
+        //「这次读取被挡回来了，没拿到内容，只能照上一次查到的说」，
+        // 于是主人听到的是"系统出故障"，而不是"你没这个权限"。
+        // 两种情况的处置完全不同：前者要去查 bug，后者要去改配置。
+        return (
+            `（权限不足：${{ owner: '主人', admin: '管理员', user: '你自己' }[role] || role}`
+            + `这个身份不能读「${t}」这类内容，所以这次是**没权限查**，不是**没有**。）`
+        );
     }
+    // 会话 id：tasks / reminders 两个 topic 按会话查本轮的记录。
+    //
+    // ⚠️ 这两处原来直接引用了 `sid`，而 `sid` 在这个函数里**从来没定义过**
+    //    —— 一旦走到就会 ReferenceError。它藏了很久没被发现，是因为
+    //    `user` 角色的 readTier 不含 tasks/reminders，权限门先返回了拒绝，
+    //    根本执行不到取值那一行。2026-11-20 修好「网页端=主人」之后
+    //    主人第一次有权查任务，就必然撞上这个 ReferenceError。
+    const sid = ctx.sessionId ? String(ctx.sessionId) : '';
     switch (t) {
         case 'readme':
             return [

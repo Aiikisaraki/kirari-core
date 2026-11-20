@@ -297,6 +297,102 @@ async function main() {
       }) === '_local');
   }
 
+  // ── 11. ★ 本机入口的身份：网页端 / 桌宠对话框就是主人 ─────────────
+  //
+  // 用户 2026-11-20 报障：「网页端和我的 qq 一样应该同样是主人权限。再怎么说
+  // 也不该说查不到……你是不是权限给错了，我就连查我自己的任务的权限都没了？？」
+  //
+  // 根因：/api/chat 压根没传 scene → 下游 role=null / counterpartId=undefined
+  // → roleOf 兜底成 'user' → readTier('user') 不含 tasks → 主人查自己的任务
+  // 被判成「不方便说」。这是**安全侧误伤自己人**。
+  section('11. ★ 本机入口（网页/桌宠）是主人，不是匿名用户');
+
+  const selfOpsSvc = require(path.join(ROOT, 'src/services/selfOps'));
+
+  // 网页端 /api/chat 修复后应构造的 ctx
+  const consoleCtx = {
+    role: 'owner', isOwner: true, trustedLocal: true,
+    counterpartId: OWNER_QQ, sessionId: '9284e4f6-7123-4577-bb69-d788bd1cadce',
+  };
+  check('★ roleOf(网页端 ctx) === owner', selfOpsSvc.roleOf(consoleCtx) === 'owner');
+  check('★ 主人能读 tasks（不再被当成匿名用户拒绝）',
+    !String(selfOpsSvc.read('tasks', consoleCtx)).includes('权限不足'),
+    String(selfOpsSvc.read('tasks', consoleCtx)).slice(0, 40));
+  check('★ 主人能读 reminders',
+    !String(selfOpsSvc.read('reminders', consoleCtx)).includes('权限不足'),
+    String(selfOpsSvc.read('reminders', consoleCtx)).slice(0, 40));
+
+  // 修复前：没有 scene 的 ctx
+  const anonCtx = { role: null, isOwner: null, trustedLocal: false, sessionId: '9284e4f6-7123-4577-bb69-d788bd1cadce' };
+  check('没有 trustedLocal 标记时仍然降级为 user（不能靠猜提权）',
+    selfOpsSvc.roleOf(anonCtx) === 'user');
+
+  // ★ 拒绝语必须区分「没权限」和「没有」——
+  //   原来那句「不方便跟你说细的」会被模型转述成「读取被挡回来了」，
+  //   听起来像系统故障。用户明确要求：「没有任务那就说没有，查不到就让我很担心」。
+  const denied = String(selfOpsSvc.read('tasks', { role: 'user', sessionId: `bot-x-private:${FRIEND_QQ}` }));
+  check('★ 拒绝时明确说「没权限查」，不是含糊的「不方便说」',
+    denied.includes('权限不足') && denied.includes('没权限查'),
+    denied.slice(0, 60));
+  check('★ 且明确区分「不是没有」',
+    denied.includes('不是**没有**'), denied.slice(0, 80));
+
+  // ── 12. ★★★ 三入口同一个身份：网页 / 桌宠对话框 / 主人 QQ 私聊 ───
+  //
+  // 用户 2026-11-20 最终拍板（这不是"兼容"问题，是根本模型）：
+  //   「这三个入口，就是同一个身份，同一个对话框上下文。在这里说的话，
+  //     会同步、会记录共享、会共享会话窗口、会同步上下文；在这里创建的
+  //     任务，同样会返回给我的 QQ 与她私聊的窗口，会同步到网页端。」
+  //
+  // 之前的 bug：同一个主人有四个键 —— QQ 号 / '_local' / 本机会话 UUID / uid=1。
+  // 于是三端各查各的池子，网页查不到 QQ 建的任务、桌宠被当成 user。
+  // 现在只有一个键：ownerIdentity.getOwnerKey()（people 表 role=owner）。
+  section('12. ★★★ 三入口同一个身份键，会话 id 也共用');
+
+  // 在临时库里种一个 owner（用真实 dbStorage，确保 getOwnerKeySync 走同一条路）
+  const memorySvc = require(path.join(ROOT, 'src/services/memory'));
+  await memorySvc.touchPerson(
+    { personKey: OWNER_QQ, role: 'owner', displayName: 'Aii如樱如月', platform: 'onebot' },
+    {},
+  );
+  const ownerIdentity = require(path.join(ROOT, 'src/services/ownerIdentity'));
+  const canonicalKey = ownerIdentity.getOwnerKey();
+  check('★ 规范身份键 = people 表里的主人账号',
+    canonicalKey === OWNER_QQ, `key=${canonicalKey}`);
+
+  // 三个入口的 scene 由同一个函数生成 —— 身份字段必须逐字相同
+  const sConsole = ownerIdentity.ownerScene({ platform: 'console' });
+  const sDesktop = ownerIdentity.ownerScene({ platform: 'desktop' });
+  const sQQ = ownerIdentity.ownerScene({ platform: 'onebot', chatType: 'private' });
+  check('★ 网页 / 桌宠 / QQ 三入口 senderId 完全相同',
+    sConsole.senderId === sDesktop.senderId && sDesktop.senderId === sQQ.senderId,
+    `${sConsole.senderId} / ${sDesktop.senderId} / ${sQQ.senderId}`);
+  check('★ 且都是规范键（不是 _local、不是会话 UUID）',
+    sConsole.senderId === canonicalKey && sConsole.senderId !== '_local'
+      && !String(sConsole.senderId).startsWith('9284'),
+    `senderId=${sConsole.senderId}`);
+  check('三入口都带 role=owner / isOwner / trustedLocal',
+    [sConsole, sDesktop, sQQ].every((s) => s.role === 'owner' && s.isOwner === true && s.trustedLocal === true));
+
+  // 身份键 → 工作空间目录 / 记忆池 / 权限，全部收敛到同一个值
+  // （workspaceSvc 已在上面 section 声明，这里直接复用）
+  check('★ 三个入口解析出的工作空间 owner 完全相同',
+    [sConsole, sDesktop, sQQ].every((s) => workspaceSvc.resolveOwnerFromCtx(s) === canonicalKey),
+    [sConsole, sDesktop, sQQ].map((s) => workspaceSvc.resolveOwnerFromCtx(s)).join(' / '));
+  check('★ 三个入口 roleOf 都是 owner',
+    [sConsole, sDesktop, sQQ].every((s) => selfOpsSvc.roleOf(s) === 'owner'));
+
+  // 会话 id 共用：三端都从 localSession 取，不是各掷一个
+  const localSession = require(path.join(ROOT, 'src/session/localSession'));
+  const localId = await localSession.ensureLocalSessionId({ quiet: true });
+  check('★ 本机会话 id 稳定（三端共用同一份）',
+    !!localId && localId === await localSession.ensureLocalSessionId({ quiet: true }),
+    `session=${localId.slice(0, 8)}…`);
+
+  // 客人绝不因为这个函数被误认成主人
+  check('★ 客人 QQ 不会被当成主人身份键',
+    ownerIdentity.getOwnerKey() !== FRIEND_QQ && sQQ.senderId !== FRIEND_QQ);
+
   // ── 收尾 ────────────────────────────────────────────────────────
   try {
     const dbStorage = require(path.join(ROOT, 'src/db/dbStorage'));

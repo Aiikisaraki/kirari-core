@@ -15,6 +15,7 @@
 
 const crypto = require("crypto");
 const dbStorage = require("../db/dbStorage");
+const ownerIdentity = require("../services/ownerIdentity");
 const { invalidateUserContexts } = require("../websocket/socketServer");
 const { invalidate: invalidateCtx } = require("../ai/contextPool");
 const netBootstrap = require("../net/bootstrap");
@@ -425,6 +426,12 @@ function setupConsoleRoutes(app) {
                 content,
                 images,
                 sessionId,
+                // ── 身份（2026-11-20 用户拍板）──────────────────────────────
+                //   「这三个入口就是同一个身份、同一个对话框上下文。」
+                //   网页 / 桌宠对话框 / 主人 QQ 私聊：身份键逐字相同，会话 id 也共用。
+                //   口令已由 requireAdmin 校验，能走到这里的就是主人本人。
+                //   身份键统一走 ownerIdentity，绝不再各处手写 '_local' / QQ / UUID。
+                scene: ownerIdentity.ownerScene({ platform: 'console' }),
                 // 人格：读 config.json 的 basePersona（与桌宠版同一字段），空 = 用预设
                 persona: modelConfigFile.getBasePersona() || null,
                 // 技能提示词：启用中技能的 prompt 模板（与桌宠版 collectSkillPrompts 同格式）
