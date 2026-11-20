@@ -116,20 +116,106 @@ function safeAliasLookup(lowerAlias) {
 }
 
 /**
+ * args 里可能用来点名设备的字段名。
+ *
+ * 模型有时不会用 @device: 前缀，而是把设备塞进参数里（{"device": "书房"}），
+ * 这是它更自然的写法。这里认这几个名字，命中且**能解析出真实设备**才生效。
+ */
+const DEVICE_ARG_KEYS = [
+  'device',
+  'deviceid',
+  'device_id',
+  'devicename',
+  'device_name',
+  'machine',
+  'machine_name',
+  'node',
+  'node_name',
+  'target',
+  'target_device',
+  '设备',
+  '设备名',
+  '机器',
+  '节点',
+];
+
+/**
+ * 工具名前面挂了设备名、但漏了 @device: 标记的形态：
+ *   「书房 read_file」「书房:read_file」「书房的电脑/read_file」
+ * 只按「空白 / 冒号 / 斜杠 / 竖线 / @」切一刀，真实工具名里不会出现这些字符
+ * （MCP 是 <server>__<tool>，技能是 skill__<id>__<tool>，都只用下划线）。
+ */
+const LOOSE_DEVICE_RE = /^\s*([^\s:：/／|@]{1,40})\s*[:：/／|@\s]\s*(\S[\s\S]*)$/u;
+
+/**
+ * 自然语言回退：模型没用 @device: 前缀，但用别的方式点明了设备。
+ *
+ * ⚠️ 与结构化前缀的关键差别：**只认命中的，不报失配**。
+ * 这里拿到的东西未必真是设备名（比如某个工具自己的 `host` 参数），
+ * 误判会把本该在本机跑的调用劫持到别的机器上 —— 那是与「静默跨机」
+ * 同样严重、方向相反的错误。所以解析不出来就安静地返回 null，让调用
+ * 按默认规则走；只有确实解析到一台真实设备时才改路由。
+ *
+ * @param {string} rawName 模型给的工具名
+ * @param {object} args 模型给的参数
+ * @returns {{ deviceId: string, deviceName: string, name: string, dropArgKeys: string[] } | null}
+ */
+function detectNaturalDevice(rawName, args) {
+  if (!safeMembers().length) return null;
+
+  // (a) 参数里点名：{"device": "书房"} / {"设备": "书房的电脑"}
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    for (const key of Object.keys(args)) {
+      if (!DEVICE_ARG_KEYS.includes(String(key).toLowerCase())) continue;
+      const raw = args[key];
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const hit = resolveDevice(raw);
+      if (hit) {
+        return {
+          deviceId: hit.deviceId,
+          deviceName: hit.name,
+          name: String(rawName || ''),
+          // 这个字段是给路由看的，转发给叶子的工具时要去掉：
+          // MCP 工具的参数是按 schema 校验的，多一个未知键会直接报错。
+          dropArgKeys: [key],
+        };
+      }
+    }
+  }
+
+  // (b) 工具名前面挂了设备名但漏了标记：「书房 read_file」
+  const m = LOOSE_DEVICE_RE.exec(String(rawName || ''));
+  if (m) {
+    const hit = resolveDevice(m[1]);
+    if (hit) {
+      return {
+        deviceId: hit.deviceId,
+        deviceName: hit.name,
+        name: m[2].trim(),
+        dropArgKeys: [],
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * 本次调用最终要在哪台设备上执行。
  *
  * @param {object} ctx capabilities.dispatch 传下来的上下文
  * @param {string} rawName 模型给的原始工具名（可能带 @device: 前缀）
+ * @param {object} [args] 模型给的参数（自然语言回退要查里面有没有点名）
  * @returns {{
  *   target: 'local' | 'remote',
  *   deviceId?: string,
  *   deviceName?: string,
  *   name: string,
- *   source: 'explicit' | 'from-leaf' | 'host-default',
+ *   source: 'explicit' | 'natural' | 'from-leaf' | 'host-default',
+ *   dropArgKeys?: string[],
  *   note?: string
  * }}
  */
-function decide(ctx, rawName) {
+function decide(ctx, rawName, args) {
   const sourceDeviceId = ctx && ctx.sourceDeviceId ? String(ctx.sourceDeviceId) : '';
   const region = {
     target: 'local',
@@ -158,6 +244,21 @@ function decide(ctx, rawName) {
     // 仍然按默认回落执行（这样至少能给出答案），但把 note 一起回给模型
     region.source = 'explicit';
     region.explicitMiss = true;
+  }
+
+  // ── 规则 1b：自然语言回退（没写 @device:，但用别的写法点明了设备）──
+  // 只在确实解析到一台真设备时才改路由；解析不出来就当作没点名。
+  if (!parsed) {
+    const nat = detectNaturalDevice(rawName, args);
+    if (nat) {
+      region.target = 'remote';
+      region.deviceId = nat.deviceId;
+      region.deviceName = nat.deviceName;
+      region.name = nat.name;
+      region.source = 'natural';
+      if (nat.dropArgKeys.length) region.dropArgKeys = nat.dropArgKeys;
+      return region;
+    }
   }
 
   // ── 规则 2：请求来自叶子 → 那台叶子自己 ──
@@ -252,6 +353,7 @@ module.exports = {
   decide,
   resolveDevice,
   parseDevicePrefix,
+  detectNaturalDevice,
   listDevices,
   capsOf,
   allCaps,

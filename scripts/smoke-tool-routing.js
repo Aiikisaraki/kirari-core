@@ -55,11 +55,17 @@ let fakeMembers = [];
 let remoteCalls = [];
 let remoteOutcome = null;
 
-netBootstrap.snapshot = () => ({
+// 单独抽出来：resetNet 要能把它装回去。某些用例会临时把 snapshot 换成
+// 「非主机 / 没有成员」以验证不劫持路由，如果不恢复，后面的用例会全部
+// 因为"看不到成员"而静默走本地，表现为一批莫名其妙的失败。
+const hostSnapshot = () => ({
   enabled: true,
   running: true,
   state: { role: 'host', members: fakeMembers },
-});netBootstrap.getManager = () => ({
+});
+
+netBootstrap.snapshot = hostSnapshot;
+netBootstrap.getManager = () => ({
   toolCapsOf: () => null,
   allToolCaps: () => [],
   callToolOnDevice: async (deviceId, name, args, opts) => {
@@ -72,6 +78,8 @@ function resetNet(devices = [DEVICE_A, DEVICE_B], outcome = null) {
   fakeMembers = devices;
   remoteCalls = [];
   remoteOutcome = outcome;
+  // 恢复被用例改过的 snapshot（见上面 hostSnapshot 的注释）
+  netBootstrap.snapshot = hostSnapshot;
 }
 
 async function main() {
@@ -218,6 +226,76 @@ async function main() {
     );
     check('★ 点名不存在设备时，本地仍能用真实工具名执行', prefixedMiss && prefixedMiss.isError === false);
     check('  结果里明确说明了没找到那台设备', String(prefixedMiss.content).includes('阳台平板'));
+  }
+
+  // ───────────────────────────────────────────────────────────────
+  section('8. 自然语言点名回退（没写 @device: 也能认出来）');
+  {
+    resetNet();
+
+    // (a) 设备塞在参数里
+    const byArg = routing.decide({}, 'read_file', { device: '书房', path: '/a.txt' });
+    check('★ args.device 点名 → 路由到那台设备', byArg.target === 'remote');
+    check('  解析到的是书房那台', byArg.deviceId === DEVICE_A.deviceId);
+    check('  工具名保持原样（前缀没写在名字里）', byArg.name === 'read_file');
+    check('  标出来源是 natural（便于排查是谁改的路由）', byArg.source === 'natural');
+    check('  ★ 要摘掉路由专用的参数键，否则 MCP schema 校验会报错',
+      Array.isArray(byArg.dropArgKeys) && byArg.dropArgKeys[0] === 'device');
+
+    // 中文键名
+    const byCnArg = routing.decide({}, 'run_skill', { 设备: '卧室笔记本' });
+    check('中文参数键「设备」也认', byCnArg.target === 'remote' && byCnArg.deviceId === DEVICE_B.deviceId);
+
+    // (b) 设备名挂在工具名前面但漏了 @device: 标记
+    const byPrefixish = routing.decide({}, '书房 read_file', {});
+    check('★「书房 read_file」→ 认出设备并剥掉名字', byPrefixish.target === 'remote');
+    check('  真实工具名被正确剥离', byPrefixish.name === 'read_file');
+
+    const byColon = routing.decide({}, '书房的电脑/read_file', {});
+    check('「书房的电脑/read_file」（斜杠分隔）也认',
+      byColon.target === 'remote' && byColon.name === 'read_file');
+
+    // (c) 关键防误判：解析不出真实设备时，绝不能劫持路由
+    const notDevice = routing.decide({}, 'read_file', { device: '随便什么' });
+    check('★ 参数里填了不存在的设备 → 不劫持，按默认走本地', notDevice.target === 'local');
+    check('  且不产生失配 note（这不是点名，只是普通参数）', !notDevice.note);
+
+    const hostArg = routing.decide({}, 'http_get', { host: 'example.com' });
+    check('★ 工具自己的 host 参数不会被当成设备名', hostArg.target === 'local');
+
+    const plainArgs = routing.decide({}, 'read_file', { path: '/a.txt' });
+    check('没有设备相关参数时正常走本地', plainArgs.target === 'local');
+
+    // (d) 结构化前缀优先于自然语言：两者都有时听前缀的
+    const both = routing.decide({}, '@device:卧室 read_file', { device: '书房' });
+    check('★ 前缀与参数冲突时，以结构化前缀为准', both.deviceId === DEVICE_B.deviceId);
+    check('  来源标为 explicit（不是 natural）', both.source === 'explicit');
+
+    // (e) 来源叶子优先于"没点名"：叶子请求不该被自然语言误改到别处
+    const fromLeaf = routing.decide({ sourceDeviceId: DEVICE_B.deviceId }, 'read_file', {});
+    check('叶子来源 + 没点名 → 仍默认操作自己', fromLeaf.deviceId === DEVICE_B.deviceId);
+
+    // (f) 没有组网成员时，自然语言回退完全不生效
+    netBootstrap.snapshot = () => ({ enabled: true, running: true, state: { role: 'host', members: [] } });
+    const noMembers = routing.decide({}, 'read_file', { device: '书房' });
+    check('没有成员时不劫持路由（单机安装零影响）', noMembers.target === 'local');
+    check('  detectNaturalDevice 直接返回 null', routing.detectNaturalDevice('read_file', { device: '书房' }) === null);
+  }
+
+  // ───────────────────────────────────────────────────────────────
+  section('9. registry.dispatch 集成：自然语言点名的入参清理');
+  {
+    resetNet([DEVICE_A, DEVICE_B], null);
+    const caps = require(path.join(ROOT, 'src/capabilities/registry'));
+
+    const r = await caps.dispatch('smoke::routing', 'read_file', { device: '书房', path: '/a.txt' });
+    check('★ 自然语言点名后真的走了远程', remoteCalls.length === 1);
+    check('  目标是书房那台', remoteCalls[0] && remoteCalls[0].deviceId === DEVICE_A.deviceId);
+    check('  ★ 转发给叶子的参数里没有路由专用的 device 键',
+      remoteCalls[0] && remoteCalls[0].args && !('device' in remoteCalls[0].args));
+    check('  业务参数 path 原样保留',
+      remoteCalls[0] && remoteCalls[0].args && remoteCalls[0].args.path === '/a.txt');
+    check('  结果正常返回给模型', r && r.isError === false);
   }
 
   // ───────────────────────────────────────────────────────────────

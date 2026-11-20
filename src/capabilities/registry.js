@@ -187,6 +187,20 @@ async function withTimeout(promise, timeoutMs, name) {
 }
 
 /**
+ * 摘掉「临时用作设备点名」的参数键。
+ *
+ * 只在自然语言回退真的改写了路由时才动：既然那次调用去了别的机器，
+ * 这个键就纯粹是路由指令，不该出现在工具的入参里。没改路由时原样返回，
+ * 免得误删某个工具本来就有的 `device` 参数。
+ */
+function dropRouteArgKeys(args, route) {
+  if (!route || !Array.isArray(route.dropArgKeys) || !route.dropArgKeys.length) return args;
+  const next = { ...args };
+  for (const k of route.dropArgKeys) delete next[k];
+  return next;
+}
+
+/**
  * 统一执行流水线：resolve → 选执行器 → 超时 → 截断。
  * 返回 { content, isError, capability }，由调用方回灌模型并记事件。
  * 任何执行异常都转成 isError 结果，不冒泡打断对话循环（与旧 runTool 语义一致）。
@@ -201,15 +215,20 @@ async function dispatch(scopeId, name, args, ctx = {}) {
   let route = null;
   const routing = toolRoutingModule();
   try {
-    route = routing ? routing.decide(ctx, name) : null;
+    // 把 args 也传进去：模型常常不用 @device: 前缀，而是把设备塞在参数里
+    // （{"device": "书房"}）或直接挂在工具名前面（「书房 read_file」）。
+    route = routing ? routing.decide(ctx, name, args) : null;
   } catch (e) {
     // 路由判定炸了不能影响工具本身：退回本地执行
     console.warn('[capabilities] 工具路由判定失败（按本地执行）:', e?.message || e);
     route = null;
   }
+  // 自然语言回退认出来的「设备字段」是给路由看的，转发出去前要摘掉：
+  // MCP 工具的参数按 schema 校验，多一个未知键会被直接拒绝。
+  const routeArgs = dropRouteArgKeys(args || {}, route);
   if (route && route.target === 'remote') {
     try {
-      const remote = routing ? await routing.runRemote(ctx, route, args || {}) : null;
+      const remote = routing ? await routing.runRemote(ctx, route, routeArgs) : null;
       if (remote) {
         // 点名了却找不到设备：把「没找到」附在结果前面，模型才知道该换说法
         const prefix = route.note ? `[${route.note}]\n` : '';
@@ -251,7 +270,11 @@ async function dispatch(scopeId, name, args, ctx = {}) {
 
   const timeoutMs = cap.timeoutMs || DEFAULT_CAPABILITY_TIMEOUT_MS;
   try {
-    const raw = await withTimeout(Promise.resolve(executor(args || {}, ctx || {})), timeoutMs, realName);
+    const raw = await withTimeout(
+      Promise.resolve(executor(routeArgs, ctx || {})),
+      timeoutMs,
+      realName,
+    );
     const content = routeNote + truncateResult(String(raw), cap.truncateChars);
     return { content, isError: false, capability: cap };
   } catch (e) {
