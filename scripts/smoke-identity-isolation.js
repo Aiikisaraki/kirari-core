@@ -421,6 +421,55 @@ async function main() {
   try { botManager.pushToOwnerPrivate(OWNER_QQ, 'test'); } catch { ownerPushThrew = true; }
   check('无适配器时 pushToOwnerPrivate 安全返回（不崩、不误报送达）', !ownerPushThrew);
 
+  // ── 14. ★ /v1/chat 协议桥接入口：身份只从服务端判定 ────────────────
+  //
+  // /v1/chat 是带 BOT_TOKEN 的协议端调进来的。它不能自报 owner，
+  // 否则任何拿到 token 的协议端都能冒充主人。role 必须由 people 表查出来。
+  section('14. ★ 外部桥接入口不能自报主人身份');
+  const bridgeGuest = { chatType: 'private', senderId: FRIEND_QQ, role: 'user', trustedLocal: false };
+  const bridgeOwner = { chatType: 'private', senderId: canonicalKey, role: 'owner', trustedLocal: false };
+  check('★ 桥接入口 trustedLocal=false，客人仍是 user',
+    selfOpsSvc.roleOf(bridgeGuest) === 'user');
+  check('★ 服务端查证过的主人，即便 trustedLocal=false 也是 owner（靠 role，不靠标记）',
+    selfOpsSvc.roleOf(bridgeOwner) === 'owner');
+  // 关键反证：一个自称 owner 但 role 是 user 的 ctx，roleOf 以 role 为准 → user
+  const forged = { chatType: 'private', senderId: FRIEND_QQ, isOwner: true, role: 'user', trustedLocal: false };
+  check('★ 客户端自报 isOwner=true 但服务端判 user → 仍是 user（不能提权）',
+    selfOpsSvc.roleOf(forged) === 'user');
+  check('★ 群聊里即便是主人账号也不是 owner 私聊身份（群聊不当主人）',
+    selfOpsSvc.roleOf({ chatType: 'group', senderId: canonicalKey, role: 'user', trustedLocal: false }) === 'user');
+
+  // ── 15. ★ 组网 relayed 消息：主机按 sessionId 服务端派生身份 ───────
+  //
+  // 用户拍板：「所有叶子节点都是主人的设备」「叶子配置跟主机走，不能单独配
+  // 协议端」。信任来自配对码/长期凭据握手（hostServer 未鉴权 relay 帧丢弃），
+  // 所以叶子上行 = 主人在自己设备前打字。但身份仍只从服务端可验证事实派生，
+  // 绝不读帧里自报的 role/isOwner。
+  section('15. ★ 组网 relayed 消息身份派生（叶子=主人设备）');
+  const derive = ownerIdentity.sceneFromSessionId;
+  // 本机会话（UUID / session_*）→ 主人 owner，且身份键规范
+  for (const sid of ['9284e4f6-7123-4577-bb69-d788bd1cadce', 'session_1732000000000', 'console-abc']) {
+    const sc = derive(sid);
+    check(`本机 session (${sid.slice(0, 12)}…) → owner 且规范键`,
+      sc.role === 'owner' && sc.isOwner === true && sc.senderId === canonicalKey,
+      `role=${sc.role} sender=${sc.senderId}`);
+  }
+  // 主人 QQ 私聊平台会话 → owner + 规范键
+  const ownerBotSid = `bot-onebot-private:xxx:user:${canonicalKey}`;
+  const ownerBotSc = derive(ownerBotSid);
+  check('★ 主人 QQ 私聊平台会话 → owner + 规范键',
+    ownerBotSc.role === 'owner' && ownerBotSc.senderId === canonicalKey && !ownerBotSc.isGroup,
+    `role=${ownerBotSc.role} sender=${ownerBotSc.senderId}`);
+  // 客人 QQ 平台会话 → user，隔离
+  const friendBotSc = derive(`bot-onebot-private:xxx:user:${FRIEND_QQ}`);
+  check('★ 客人 QQ 平台会话 → user（不提权、不并池）',
+    friendBotSc.role === 'user' && friendBotSc.senderId === FRIEND_QQ && friendBotSc.isOwner !== true,
+    `role=${friendBotSc.role} sender=${friendBotSc.senderId}`);
+  // 群聊即便主人在里面也不是 owner 私聊身份
+  const groupSc = derive(`bot-onebot-group:${canonicalKey}`);
+  check('★ 群聊会话 → isGroup，不授 owner 私聊身份',
+    groupSc.isGroup === true && groupSc.role === 'user');
+
   // ── 收尾 ────────────────────────────────────────────────────────
   try {
     const dbStorage = require(path.join(ROOT, 'src/db/dbStorage'));

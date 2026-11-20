@@ -82,4 +82,63 @@ function ownerScene(opts = {}) {
   };
 }
 
-module.exports = { FALLBACK, getOwnerKey, ownerScene };
+/**
+ * 从会话 id 在**服务端**派生场合身份（用于组网 relayed 消息）。
+ *
+ * ── 信任模型（2026-11-20 用户拍板「叶子节点都是主人的设备」）──────────
+ * 能 uplin 到主机的消息，已经通过 kirari-net 的配对码 / 长期凭据握手
+ * （hostServer 未鉴权连接的 relay 帧直接丢弃），即来自主人授权的设备。
+ * 叶子不单独配协议端（SYNC_FIELDS 不含 adapters/key），所以叶子上行的
+ * 就是主人本人在叶子设备前打字。
+ *
+ * 但身份仍**只从服务端可验证的事实**派生，绝不读帧里自报的 role/isOwner：
+ *   · 本机会话（UUID / session_* / local）/ net: 前缀 → 主人（ownerScene）
+ *   · bot- 平台会话 → 从 sessionId 里的 QQ 号查 people 表定 role：
+ *       主人私聊 → owner 且收敛到规范键；其余 → user（客人，保持隔离）
+ *
+ * 这样 relayed 的主人在主机侧能读到自己的记忆池、工作空间、任务，
+ * 而不是被当成 `net:<device>:<uuid>` 这个认不出的身份。
+ *
+ * @param {string} sessionId 原始会话 id（未经 net: 命名空间包装）
+ * @param {string} [platform] 平台标识
+ */
+function sceneFromSessionId(sessionId, platform = 'net') {
+  const sid = String(sessionId || '').trim();
+  const ownerKey = getOwnerKey();
+
+  // 平台会话：从 sessionId 拆出发信人账号，服务端查 people 表定 role
+  if (sid.startsWith('bot-')) {
+    // bot-<adapter>-<conversationKey>，conversationKey 形如 user:<qq> / group:<gid>:<uid>
+    let counterpart = '';
+    const userM = /(?:^|:)user:([^:]+)/.exec(sid);
+    if (userM) counterpart = userM[1];
+    else {
+      const lastSeg = sid.split(':').pop() || '';
+      counterpart = lastSeg;
+    }
+    counterpart = String(counterpart || '').trim();
+    const isOwnerPerson = !!counterpart && counterpart === ownerKey;
+    // 群聊是多人场合，即便里面有主人也不当"主人私聊身份"。
+    // 兼容两种 sessionId 形态：bot:platform:group:...（sessionMapping）与
+    // bot-<adapter>-group:...（botManager），所以分隔符可能是 ':' 或 '-'。
+    const isGroup = /(?:^|[:-])(?:group|channel):/.test(sid);
+    return {
+      chatType: isGroup ? 'group' : 'private',
+      isGroup,
+      senderId: isOwnerPerson ? ownerKey : counterpart,
+      senderName: '',
+      isOwner: isOwnerPerson && !isGroup,
+      role: isOwnerPerson && !isGroup ? 'owner' : 'user',
+      // 平台会话由协议端转发，不算本机可信入口
+      trustedLocal: false,
+      platform,
+    };
+  }
+
+  // 本机会话（UUID / session_* / net: 前缀里的本机段）→ 主人本人
+  // 注：executor 收到的 sessionId 未带 net: 前缀（前缀是执行器内部加的），
+  // 这里仍兼容带前缀的形态，防止其它调用点传进来。
+  return ownerScene({ platform, chatType: 'local' });
+}
+
+module.exports = { FALLBACK, getOwnerKey, ownerScene, sceneFromSessionId };

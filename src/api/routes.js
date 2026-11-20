@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const { version: APP_VERSION } = require("../../package.json");
 const apiTokenManager = require("../token/apiTokenManager");
 const dbStorage = require("../db/dbStorage");
+const ownerIdentity = require("../services/ownerIdentity");
 const { verifySignedRequest } = require("./requestSigner");
 // 组网：本机作为叶子时要改走上行（不在这里 require 组网实现本身，只借它的判定与上行）
 const netBootstrap = require("../net/bootstrap");
@@ -366,6 +367,37 @@ function setupBotChatRoute(app) {
     // 不带就是 null，公用知识源照常在服务端检索 —— 两条路互不影响。
     const kbContext = sanitizeKbContext(body.kbContext);
 
+    // ── 场合信息（2026-11-20 三入口统一身份的收尾）────────────────────
+    // /v1/chat 是协议端（OneBot 等）带 BOT_TOKEN 调进来的桥接入口。它以前不传
+    // scene，下游 role 全降级成 user、memory 只能靠 sessionId 猜 counterpartId。
+    // 信任模型与 botManager.handleIncoming 完全一致：
+    //   · senderId 取协议端给的 userId（这就是"谁在说话"）
+    //   · role / isOwner 由**服务端查 people 表**决定，绝不读 body 自报的 role
+    //     （否则任何拿到 BOT_TOKEN 的协议端都能自称 owner —— 正是要堵死的洞）
+    //   · trustedLocal = false：外部桥接入口永远不算"本机可信入口"
+    //   · 主人私聊入口身份键 = ownerIdentity 的规范键（与网页/桌宠同一个值）
+    const senderId = String(identity.userId || '').trim();
+    let personRole = 'user';
+    try {
+      const person = senderId ? await dbStorage.getPerson(senderId) : null;
+      if (person && (person.role === 'owner' || person.role === 'admin')) {
+        personRole = person.role;
+      }
+    } catch { /* 查不到就当普通用户，fail-closed */ }
+    const isPrivate = identity.chatType === 'private';
+    const isOwnerHere = personRole === 'owner' && isPrivate && senderId === ownerIdentity.getOwnerKey();
+    const bridgeScene = {
+      chatType: identity.chatType,
+      isGroup: !isPrivate,
+      groupId: identity.groupId || '',
+      senderId: isOwnerHere ? ownerIdentity.getOwnerKey() : senderId,
+      senderName: typeof body.nickname === 'string' ? body.nickname.slice(0, 40) : '',
+      isOwner: isOwnerHere,
+      role: isOwnerHere ? 'owner' : personRole,
+      trustedLocal: false,
+      platform: identity.platform,
+    };
+
     // ── 组网叶子：本机不再调模型，把消息上行给主机 ──
     // 这是活锁模型的核心（ARCHITECTURE-PLAN 3.1「全网只有主机一个出口」），
     // 也是「叶子端不需要配置 Key」的原因：花钱的是主机。
@@ -418,6 +450,8 @@ function setupBotChatRoute(app) {
         persona: typeof body.persona === "string" ? body.persona : null,
         skillPrompts: [],
         kbContext,
+        // 身份只从服务端判定（见上面的 bridgeScene），不接受客户端自报
+        scene: bridgeScene,
         ws: null,
       });
       await sessionManager.saveMessage(identity.sessionId, "assistant", reply.speech);

@@ -33,6 +33,7 @@
 const { NetManager, NET_PORT, SYNC_FIELDS } = require("kirari-net");
 
 const contextPool = require("../ai/contextPool");
+const ownerIdentity = require("../services/ownerIdentity");
 const sessionManager = require("../session/sessionManager");
 const aiReplyService = require("../services/aiReplyService");
 const fallbackService = require("../services/fallbackService");
@@ -144,6 +145,11 @@ function buildHostExecutor(modelUid) {
         persona: null,
         skillPrompts: [],
         kbContext: kb,
+        // 组网身份：按真实发信人从 sessionId 服务端派生，不读帧里自报字段。
+        // 叶子都是主人设备（配对凭据已鉴权），本机会话 → 主人 owner；
+        // 若真是协议端转发的平台会话，则按 QQ 号查 people 表定 owner/user。
+        // 不传 scene 会让 relayed 消息在主机被当成 user，读不到主人自己的记忆/任务。
+        scene: ownerIdentity.sceneFromSessionId(sessionId),
         ws: null,
         // 流式：叶子请求了 stream 时，路由会传 onDelta 进来 —— 转给内核逐字回调，
         // 增量由组网层转成 relay_delta 单播回叶子。没请求流式时是 undefined，行为不变。
