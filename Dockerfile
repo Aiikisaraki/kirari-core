@@ -24,6 +24,7 @@ ENV NODE_ENV=production \
     PET_API_DATA_DIR=/data \
     TZ=Asia/Shanghai
 COPY --from=build /app /app
+# 扩展包管理脚本：由部署方挂载/拷贝进数据卷或容器（不在本仓库构建上下文里）
 # 容器内扩展包管理脚本（docker exec pet-api node /app/scripts/ext-install.cjs --help）
 COPY scripts/ext-install.cjs /app/scripts/ext-install.cjs
 EXPOSE 9089
