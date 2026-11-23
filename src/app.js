@@ -30,6 +30,10 @@ const mcpManager = require("./mcp/mcpManager");
 const botManager = require("./bot/botManager");
 const consoleSite = require("./web/consoleSite");
 const { dataDir, dataDirSource, dataDirDetail, migration } = require("./dataDir");
+// 外部扩展包（与桌宠端同一套契约、同一个 ~/.kirari/extensions 目录）：
+//   独立安装包装进来的能力（如本地语音合成 speech.tts），装一次两端都可用。
+const { homeDir: kirariHomeDir } = require("./kirariHome");
+const extensionHostModule = require("./extensions/host");
 
 // 每日简报（"每日记忆"）的调度已迁到落库任务表（阶段 E）：
 // 每个 uid × 08/16/22 三档一条 daily_brief job，由 scheduledJobsService 统一扫描。
@@ -120,6 +124,19 @@ function createServer() {
             // 两者都是可选能力，失败只打警告、不影响 API 本体。
             mcpManager.initTools();
             botManager.initBots();
+
+            // 外部扩展包：放在最后启动，不阻塞任何核心能力。
+            // 没装包时 startAll() 立刻返回空数组；某个包坏了也只记警告。
+            const extensionHost = new extensionHostModule.ExtensionHost({
+                rootDir: require("path").join(kirariHomeDir, "extensions"),
+            });
+            extensionHostModule.setExtensionHost(extensionHost);
+            extensionHost
+                .startAll()
+                .then((list) => {
+                    if (!list.length) console.log("[ext] 未安装扩展包");
+                })
+                .catch((e) => console.warn("[ext] 扩展扫描失败（已忽略）:", e?.message || e));
         });
     }
 
@@ -143,6 +160,8 @@ function createServer() {
         botManager.stopAll();
         scheduledJobsService.stop();
         contextPool.invalidateAll();
+        // 扩展包的子进程要主动收掉，否则会留孤儿进程
+        extensionHostModule.getExtensionHost()?.dispose();
     };
     process.on("SIGINT", () => { shutdown(); process.exit(0); });
     process.on("SIGTERM", () => { shutdown(); process.exit(0); });

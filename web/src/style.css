@@ -914,6 +914,34 @@ button.mini.danger:hover {
     opacity: 0.62;
     font-variant-numeric: tabular-nums;
 }
+/* 气泡内 meta 行：模型名 + 时间戳并排，时间靠右 */
+.meta-row {
+    margin-top: 5px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 11px;
+    opacity: 0.62;
+    font-variant-numeric: tabular-nums;
+}
+.meta-row .msg-time {
+    margin-left: auto;
+}
+/* 日期/时间分隔条：居中小药丸，与桌宠版同一形态 */
+.time-sep {
+    display: flex;
+    justify-content: center;
+    margin: 14px 0 8px;
+}
+.time-sep__pill {
+    font-size: 11.5px;
+    padding: 3px 12px;
+    border-radius: 999px;
+    background: var(--bg-soft);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
 .thinking {
     color: var(--dim);
 }

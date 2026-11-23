@@ -275,6 +275,9 @@ function setupHttpRoutes(app) {
   // Web 控制台：状态 / 设置 / 聊天（SSE），单一管理口令鉴权
   setupConsoleRoutes(app);
 
+  // 外部扩展包（语音等）：音色库列表 / 下载 / 删除。自带管理口令鉴权。
+  require("../extensions/voiceRoutes").setupVoiceRoutes(app);
+
   setupBotChatRoute(app);
 }
 

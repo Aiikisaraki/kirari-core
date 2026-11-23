@@ -89,6 +89,11 @@ const LAYOUT = Object.freeze({
     avatars: 'avatars',
     /** 「我的头像」目录 */
     userAvatar: 'user-avatar',
+    /**
+     * 外部扩展包根目录：每个包一个子目录（内含 manifest.json）。
+     * 由独立安装包装入，两端共享同一个目录 —— 装一次桌宠和控制台都可用。
+     */
+    extensions: 'extensions',
     /** 运行日志 */
     logs: 'logs',
     /** 迁移前快照 */
@@ -96,7 +101,7 @@ const LAYOUT = Object.freeze({
 });
 
 /** 需要预先建好的目录（其余由写入方按需建）。 */
-const DIR_KEYS = ['skillsRoot', 'avatars', 'userAvatar', 'logs', 'backups'];
+const DIR_KEYS = ['skillsRoot', 'avatars', 'userAvatar', 'extensions', 'logs', 'backups'];
 
 // ─────────────────────────── 解析 ───────────────────────────
 
