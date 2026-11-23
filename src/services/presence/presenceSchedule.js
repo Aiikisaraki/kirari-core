@@ -9,8 +9,8 @@
 //   主动搭话的素材只取该 uid 自己的简报与记忆，不跨人。
 
 const { createJob } = require('kirari-agent');
-const { jobStore } = require('../session/jobStore');
-const dbStorage = require('../db/dbStorage');
+const { jobStore } = require('../../session/jobStore');
+const dbStorage = require('../../db/dbStorage');
 const engine = require('./presenceEngine');
 const { loadOrInitPresenceState, savePresenceState, localDateKey } = require('./stateStore');
 
@@ -35,7 +35,7 @@ function presenceConfig(uid) {
 /** 读该 uid 的今日简报当素材（纯读，不触发生成）。 */
 async function briefMaterials(uid) {
   try {
-    const dailyBriefing = require('./dailyBriefingService');
+    const dailyBriefing = require('../dailyBriefingService');
     const brief = await dailyBriefing.readTodayBrief(uid);
     if (!brief) return [];
     return [{ id: 'brief-' + dailyBriefing.todayStr(), source: 'brief', text: brief, at: Date.now(), ownerRef: true }];

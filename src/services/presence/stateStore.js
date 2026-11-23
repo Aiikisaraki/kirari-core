@@ -5,7 +5,7 @@
 //
 // 两侧读写同一张表（共库部署时核心与桌宠共享状态）：键名带 uid 隔离。
 
-const dbStorage = require('../db/dbStorage');
+const dbStorage = require('../../db/dbStorage');
 
 const KEY = (uid) => 'presence_state:' + uid;
 
