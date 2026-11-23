@@ -24,9 +24,8 @@ ENV NODE_ENV=production \
     PET_API_DATA_DIR=/data \
     TZ=Asia/Shanghai
 COPY --from=build /app /app
-# 扩展包管理脚本：由部署方挂载/拷贝进数据卷或容器（不在本仓库构建上下文里）
-# 容器内扩展包管理脚本（docker exec pet-api node /app/scripts/ext-install.cjs --help）
-COPY scripts/ext-install.cjs /app/scripts/ext-install.cjs
+# 扩展包管理脚本（ext-install.cjs）属于 kirari-ext-voice 包，不在本仓库构建上下文里；
+# 由部署方挂载或 docker cp 进容器，不要在这里 COPY。
 EXPOSE 9089
 # 数据库落在 /data 卷，容器重建不丢数据。
 VOLUME ["/data"]
