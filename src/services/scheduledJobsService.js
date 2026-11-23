@@ -204,6 +204,16 @@ async function scanOnce() {
           // 产出落在主机，叶子只拿结果——用户 2026-11-19 明确要求的行为。
           const workspaceTask = require('./workspaceTask');
           await workspaceTask.fire(job, now);
+        } else if (job.kind === 'presence_tick') {
+          // 在场感主动搭话（presence:tick:<uid> job）：tickPresence 内部自己判闸门
+          // （安静时段/每日上限/素材）。没 fire 也会更新状态档的 nextFireAt，
+          // 由下方覆盖段把 job 顺延到那个点。
+          const presenceSchedule = require('./presence/presenceSchedule');
+          const uid = Number(job.uid) || 1;
+          const result = await presenceSchedule.tickPresence(uid, now);
+          if (result.fired) {
+            console.log(`[sched] presence 主动搭话完成 uid=${uid}：${result.reason}`);
+          }
         }
         // 没有在线连接也算触发过：once 任务不能因为「没连上」而永远 pending 反复推。
         const next = fireJob(job, now);
@@ -227,6 +237,24 @@ async function scanOnce() {
             if (overridden != null) next.dueAt = overridden;
           } catch (e) {
             console.warn(`[sched] 重算 job=${job.jobId} 下次时间失败（沿用共享包结果）:`, e?.message || e);
+          }
+        }
+
+        // presence_tick 的间隔不是 24h：2.5~5h 区间随机 + 安静时段避让，
+        // 都算在状态档的 nextFireAt 里。fireJob 的 daily +24h 必须在这里覆盖回去。
+        // ⚠️ nextFireAt 已经过去时（到点被安静时段挡下）不能退回 now+60s ——
+        // 那会变成安静时段里每分钟热循环；改用 quietEndAfter 推到安静时段结束。
+        if (job.kind === 'presence_tick' && next.status === 'pending') {
+          try {
+            const presenceEngine = require('./presence/presenceEngine');
+            const { loadOrInitPresenceState } = require('./presence/stateStore');
+            const uid = Number(job.uid) || 1;
+            const state = loadOrInitPresenceState(now, uid);
+            const want = state.nextFireAt || 0;
+            next.dueAt = want > now ? want : presenceEngine.quietEndAfter({ quietStart: '23:30', quietEnd: '08:00' }, now);
+          } catch (e) {
+            console.warn(`[sched] presence 重算下次时间失败（兜底 1h）:`, e?.message || e);
+            next.dueAt = now + 60 * 60000;
           }
         }
 

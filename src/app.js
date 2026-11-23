@@ -28,6 +28,9 @@ const netBootstrap = require("./net/bootstrap");
 //   机器人适配器启动时连 OneBot，收到消息直接走内核回复。
 const mcpManager = require("./mcp/mcpManager");
 const botManager = require("./bot/botManager");
+// 在场感：她的主动搭话（目的机制）。runner 用 botManager 回发主人 QQ 私聊。
+const presenceSchedule = require("./services/presence/presenceSchedule");
+const { getBasePersona } = require("./services/modelConfigFile");
 const consoleSite = require("./web/consoleSite");
 const { dataDir, dataDirSource, dataDirDetail, migration } = require("./dataDir");
 // 外部扩展包（与桌宠端同一套契约、同一个 ~/.kirari/extensions 目录）：
@@ -141,11 +144,73 @@ function createServer() {
     }
 
     startServer();
+    // ── 在场感：她的主动搭话 ──────────────────────────────────────
+    // runner：按目的机制提示词做一次轻量模型调用（不走完整 agent 回合），
+    // 生成后回发主人 QQ 私聊。模型回 SKIP = 这轮不说（比硬找话好）。
+    // 身份边界：状态按 uid 分键；回发只走 pushToOwnerPrivate（主人专属通道）。
+    presenceSchedule.setPresenceRunner(async ({ prompt, uid }) => {
+        const connectionAiContext = require("./ai/connectionAiContext");
+        let ctx = null;
+        try {
+            ctx = await connectionAiContext.createConnectionAiContext(uid);
+            const completion = await ctx.openai.chat.completions.create({
+                model: ctx.model,
+                messages: [
+                    {
+                        role: "system",
+                        content:
+                            (getBasePersona() || "") +
+                            "\n\n请只输出你要说的话本身（一到两句，口语化）。如果实在没话说，只输出 SKIP 三个字母。" +
+                            "\n不要 JSON、不要引号、不要解释、不要提到任何机制或状态。",
+                    },
+                    { role: "user", content: prompt },
+                ],
+                max_tokens: 200,
+                temperature: 0.9,
+            });
+            const text = (completion.choices?.[0]?.message?.content || "").trim();
+            if (!text || /^SKIP$/i.test(text)) {
+                console.log("[presence] 她决定这轮不说话（SKIP）uid=" + uid);
+                return false;
+            }
+            const speech = text.replace(/^["「『](.*).["」』]$/u, "$1").trim();
+            if (!speech) return false;
+            // 回发主人私聊（pushToOwnerPrivate 只服务主人，客人任务绝不误投）
+            const { getOwnerKey } = require("./services/ownerIdentity");
+            const ownerKey = getOwnerKey();
+            if (!ownerKey) {
+                console.warn("[presence] 查不到本机主人，这轮搭话放弃");
+                return false;
+            }
+            const sent = botManager.pushToOwnerPrivate(ownerKey, speech);
+            return !!sent;
+        } catch (e) {
+            console.warn("[presence] 主动搭话生成失败:", e?.message || e);
+            return false;
+        } finally {
+            if (ctx) {
+                try { connectionAiContext.cleanupConnectionAiContext(ctx); } catch { /* 忽略 */ }
+            }
+        }
+    });
+    presenceSchedule.setFocusProvider(() => false); // 专注模式第二版接控制台设置
+
     // 阶段 E：先把简报任务补齐（每 uid × 三档），再启动统一调度器。
     // 已过期但仍是 pending 的旧 job 会被调度器在启动首扫时补跑一次。
     void briefSchedule
       .ensureJobs()
       .catch((e) => console.warn("[brief] 初始化简报任务失败:", e?.message || e));
+    // 在场感：给每个活跃 uid 补一条 presence_tick 任务（在调度器启动之后立即补，
+    // 异步执行不阻塞监听；顺延逻辑在 scanOnce 的覆盖段）。
+    void (async () => {
+        try {
+            const dbStorage = require("./db/dbStorage");
+            const uids = await dbStorage.getAllUserids();
+            for (const uid of uids) presenceSchedule.ensureJob(uid);
+        } catch (e) {
+            console.warn("[presence] 初始化 tick 任务失败:", e?.message || e);
+        }
+    })();
     // 阶段 C：持久化定时任务调度器（提醒落库、重启补跑不丢；阶段 E 起也负责简报）。
     scheduledJobsService.start();
     // 回收闲置的 AI 上下文（HTTP 接入没有连接概念，靠空闲超时释放）。

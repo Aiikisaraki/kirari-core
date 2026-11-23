@@ -245,6 +245,21 @@ function setupWebSocket(server, options = {}) {
             );
             console.log(`[WS-PERF] saveMessage(user) 完成 @${Date.now()}`);
 
+            // 在场感：主人说了一句话 → 更新她的内在状态（驱动/间隔/心情）。
+            // 只认本机主人的桌面链路（trustedLocal）：QQ 群聊/客人的话不写主人的
+            // 亲密度 —— 与桌面端 isOwnerLocalSession 同一把门，两边口径一致。
+            // 机器人链路主人私聊的写入由 botManager 在回发处补（见 botManager.js）。
+            if (ws.trustedLocal) {
+                try {
+                    const { recordUserTurn } = require("../services/presence/presenceEngine");
+                    const { loadOrInitPresenceState, savePresenceState } = require("../services/presence/stateStore");
+                    const now = Date.now();
+                    savePresenceState(recordUserTurn(loadOrInitPresenceState(now, userid), userMessage || "", now), userid);
+                } catch (e) {
+                    console.warn("[presence] 记录主人发言失败（已忽略）:", e?.message || e);
+                }
+            }
+
             let reply;
             try {
                 console.log(`[WS-PERF] → getReply 调用前 @${Date.now()} (距接入 ${Date.now()-_wsT0}ms)`);
@@ -310,6 +325,19 @@ function setupWebSocket(server, options = {}) {
                     reply.speech,
                 );
                 console.log(`[WS-PERF] saveMessage(assistant) 完成 @${Date.now()}`);
+
+                // 在场感：她的话也是她经历的一部分 —— 按回复做一次评价，写回 mood。
+                // 同样只认本机主人链路。
+                if (ws.trustedLocal) {
+                    try {
+                        const { appraiseReply } = require("../services/presence/presenceEngine");
+                        const { loadOrInitPresenceState, savePresenceState } = require("../services/presence/stateStore");
+                        const now = Date.now();
+                        savePresenceState(appraiseReply(loadOrInitPresenceState(now, userid), reply.speech || "", reply.emotion || null, now), userid);
+                    } catch (e) {
+                        console.warn("[presence] 回复评价写入失败（已忽略）:", e?.message || e);
+                    }
+                }
 
                 if (ws.readyState === WebSocket.OPEN && !ws.aiContext.closed) {
                     console.log(`[WS-PERF] ws.send 前 @${Date.now()}`);

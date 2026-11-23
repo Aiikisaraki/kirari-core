@@ -300,6 +300,25 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 解决「共享身份后各窗口决策僵化」和「私聊内容被搬进群聊」。
     systemPrompt += buildSceneContext(scene);
 
+    // 在场感：「此刻的你」—— 心情、多久没见你、此刻想要什么、惦记的事 + 说话节奏。
+    // 只对主人本人的会话注入（scene.isOwner === true）：块里的时间戳来自主人视角，
+    // 对朋友/群聊注入等于把主人视角安到别人头上（分人识别的边界，不能破）。
+    // 读不到状态就返回空串，绝不阻塞。
+    try {
+      if (scene && scene.isOwner === true) {
+        const presenceEngine = require('./presence/presenceEngine');
+        const { loadOrInitPresenceState } = require('./presence/stateStore');
+        const now = Date.now();
+        const presenceState = loadOrInitPresenceState(now, aiContext.userid);
+        const presenceBlock = presenceEngine.buildPresenceBlock(presenceState, now);
+        if (presenceBlock) systemPrompt += '\n\n' + presenceBlock;
+        const paceBlock = presenceEngine.buildPaceBlock(presenceState, now);
+        if (paceBlock) systemPrompt += '\n\n' + paceBlock;
+      }
+    } catch (e) {
+      console.warn('[aiReply] 在场感注入失败（已忽略）:', e?.message || e);
+    }
+
     // 设备与工具执行位置：让她知道「组网里还有哪些机器、怎么点名换机器」。
     // 默认在哪台执行由服务端 toolRouting 判定（不靠模型自觉），这段只是让
     // 「点名某个叶子」这件事对模型可见可用。单机安装不注入，不污染提示词。

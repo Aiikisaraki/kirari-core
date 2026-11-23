@@ -32,6 +32,26 @@ async function getTodayBrief(aiContext) {
   return null;
 }
 
+/**
+ * 只读版：不要求 AiContext（在场感调度这类「不调模型」的调用方用）。
+ * 查库 + 缓存，不触发生成。没有就返回 null。
+ */
+async function readTodayBrief(userid = 1) {
+  const date = todayStr();
+  const key = `${userid}:${date}`;
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const row = await dbStorage.getDailyBrief(userid, date);
+    if (row && row.briefText) {
+      cache.set(key, row.briefText);
+      return row.briefText;
+    }
+  } catch (e) {
+    console.warn('[dailyBrief] 只读简报失败（当作没有）:', e?.message || e);
+  }
+  return null;
+}
+
 // 采集 + 压缩 + 落库。返回简报文本或 null。
 async function generateDailyBrief(aiContext) {
   const date = todayStr();
@@ -137,4 +157,4 @@ async function ensureDailyBrief(aiContext) {
   }
 }
 
-module.exports = { ensureDailyBrief, generateDailyBrief, getTodayBrief, todayStr };
+module.exports = { ensureDailyBrief, generateDailyBrief, getTodayBrief, readTodayBrief, todayStr };

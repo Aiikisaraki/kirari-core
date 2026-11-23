@@ -167,6 +167,18 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
         await sessionManager.saveMessage(sessionId, 'user', incoming.text, {
             images: Array.isArray(incoming.images) ? incoming.images : [],
         });
+        // 在场感：主人 QQ 私聊 = 主人本人说话 → 写她的内在状态。
+        // 群聊/客人不写 —— 与桌面端 isOwnerLocalSession 同一把门（2026-11-24 用户要求保住分人能力）。
+        if (isOwnerAccount && !incoming.isGroup) {
+            try {
+                const { recordUserTurn } = require('./presence/presenceEngine');
+                const { loadOrInitPresenceState, savePresenceState } = require('./presence/stateStore');
+                const now = Date.now();
+                savePresenceState(recordUserTurn(loadOrInitPresenceState(now, uid), incoming.text || '', now), uid);
+            } catch (e) {
+                console.warn('[presence] 记录主人发言失败（已忽略）:', e?.message || e);
+            }
+        }
         const reply = await aiReplyService.getReply({
             aiContext,
             content: incoming.text,
@@ -197,6 +209,17 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
             images: Array.isArray(reply.images) ? reply.images : [],
             emotion: reply.emotion || null,
         });
+        // 在场感：她的话也写回 mood（仅主人私聊）。
+        if (isOwnerAccount && !incoming.isGroup) {
+            try {
+                const { appraiseReply } = require('./presence/presenceEngine');
+                const { loadOrInitPresenceState, savePresenceState } = require('./presence/stateStore');
+                const now = Date.now();
+                savePresenceState(appraiseReply(loadOrInitPresenceState(now, uid), reply.speech || '', reply.emotion || null, now), uid);
+            } catch (e) {
+                console.warn('[presence] 回复评价写入失败（已忽略）:', e?.message || e);
+            }
+        }
         return reply;
     } catch (e) {
         console.error('[bot] 生成回复失败:', e?.message || e);
