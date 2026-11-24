@@ -310,7 +310,12 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         const { loadOrInitPresenceState } = require('./presence/stateStore');
         const now = Date.now();
         const presenceState = loadOrInitPresenceState(now, aiContext.userid);
-        const presenceBlock = presenceEngine.buildPresenceBlock(presenceState, now);
+        let presenceBlock = presenceEngine.buildPresenceBlock(presenceState, now);
+        // 闲时活动（如「正在刷B站」）：低优先级、可被中断；她被问「在干嘛」时能如实回答。
+        try {
+          const activity = require('./activityStore').describe(aiContext.userid, now);
+          if (activity) presenceBlock += '\n· ' + activity + '；这只是一个闲时小动作，随时会被别的事打断，被问起时可以如实说。';
+        } catch { /* 活动状态不可读不阻塞对话 */ }
         if (presenceBlock) systemPrompt += '\n\n' + presenceBlock;
         const paceBlock = presenceEngine.buildPaceBlock(presenceState, now);
         if (paceBlock) systemPrompt += '\n\n' + paceBlock;

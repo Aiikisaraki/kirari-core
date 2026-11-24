@@ -13,6 +13,7 @@ const memory = require('../../services/memory');
 const extensionHostModule = require('../../extensions/host');
 const dbStorage = require('../../db/dbStorage');
 const biliSettings = require('../../services/biliSettings');
+const activityStore = require('../../services/activityStore');
 
 const SERVICE_ID = 'bili.explore';
 const CHANNELS = { comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
@@ -32,6 +33,9 @@ const capability = defineCapability({
     '让她自己去 B 站逛逛（只读）+ 管理互动开关。' +
     '只读：popular 热门、search 搜索、opus 专栏文章、liveInfo/liveList 直播、musicSearch 音乐、' +
     'subtitles 字幕、comments 评论、explore 搜片并写记忆、loginStatus/qrGenerate/qrPoll 扫码登录。' +
+    'discover 自主发现（不看关键词，优先用她登录账号的推荐流找有趣内容）；' +
+    '刷B站是低优先级闲时活动，可被任何事打断；问「你在干嘛」她会如实说在刷B站。' +
+    'activity 动作查/停当前闲时活动（action=activity, stop=true 清除）。' +
     '互动：like/coin/favorite/comment（视频）与 opusLike/opusCoin/opusFavorite（专栏）——' +
     '必须先确认对应开关已开启，且 B 站输出只谈当前话题、只表达看法态度，不引用记忆。' +
     '只有主人能在私聊触发，客人/群聊会被拒绝。主人私聊可看 BV号/链接/视频名。' +
@@ -44,7 +48,7 @@ const capability = defineCapability({
         'popular','search','explore','settings','setInteraction',
         'subtitles','comments','opus','liveInfo','liveList','musicSearch',
         'loginStatus','qrGenerate','qrPoll','logout',
-        'like','coin','favorite','comment','opusLike','opusCoin','opusFavorite',
+        'like','coin','favorite','comment','opusLike','opusCoin','opusFavorite','discover','activity',
       ], description: '动作。' },
       keyword: { type: 'string', description: 'search/explore/musicSearch 的关键词。' },
       count: { type: 'number', description: 'popular/liveList 取几条。' },
@@ -89,6 +93,37 @@ async function dispatch(args, ctx) {
   if (action === 'qrGenerate') return { ok: true, ...(await svc.qrGenerate()) };
   if (action === 'qrPoll') return { ok: true, ...(await svc.qrPoll()) };
   if (action === 'logout') return { ok: true, ...(await svc.logout()) };
+
+  // 自主发现：用她登录号的推荐流找有趣内容，产出安全见闻
+  if (action === 'discover') {
+    // 标记闲时活动：她此刻正在刷B站（低优先级、可被打断）
+    activityStore.start('刷B站', c.uid || 1);
+    let knownPersons = [];
+    try {
+      const people = await dbStorage.listPeople ? await dbStorage.listPeople() : [];
+      knownPersons = (people || []).filter((p) => p && ['owner','family','friend'].includes(p.role))
+        .flatMap((p) => [p.displayName, p.alias, p.personKey].filter(Boolean).map((x) => String(x))).filter((x) => x.length >= 2);
+    } catch {}
+    const result = await svc.discover({ seenBvids: a.seenBvids || [], count: Number(a.count) || 3, knownPersons });
+    const written = [];
+    for (const ob of (result.observations || [])) {
+      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons });
+      if (!check.safe) continue;
+      const r = await memory.remember({ content: '[B站见闻·只谈自己的感受] ' + ob.text, scope: 'self',
+        source: 'observed', kind: 'event', visibility: 'private', importance: 3 }, ctx);
+      if (r && r.ok) written.push({ id: r.id, text: ob.text });
+    }
+    return { ok: true, audience: 'owner', personalized: result.personalized, totalCandidates: result.totalCandidates,
+      videos: (result.videos || []).map((v) => ({ ...fullMeta(v), score: v.score })), written,
+      note: '她自己从' + (result.personalized ? '你账号的推荐流' : '公开热门') + '里挑的；公开输出只谈当前话题' };
+  }
+
+  // 闲时活动查询/中断
+  if (action === 'activity') {
+    if (a.stop === true) { activityStore.clear(c.uid || 1); return { ok: true, activity: null, message: '闲逛已停下' }; }
+    const cur = activityStore.get(c.uid || 1);
+    return { ok: true, activity: cur, description: activityStore.describe(c.uid || 1) };
+  }
 
   // 开关查询与设置（二次确认）
   if (action === 'settings') return { ok: true, ...biliSettings.read() };
