@@ -8,6 +8,8 @@
 const props = defineProps({
     page: { type: String, default: "chat" },
     settings: { type: String, default: "general" },
+    // 已安装扩展提供的服务 id（speech.tts / bili.explore）；没装包的设置页自动隐藏。
+    installedServices: { type: Array, default: () => [] },
 });
 const emit = defineEmits(["update:page", "update:settings"]);
 
@@ -45,7 +47,7 @@ function goSettings(key) {
     </button>
     <div class="nav-group-title">设置</div>
     <button
-      v-for="it in items.filter((x) => !x.requiresExtension || props.installedServices.includes(x.requiresExtension))"
+      v-for="it in items.filter((x) => !x.requiresExtension || (props.installedServices || []).includes(x.requiresExtension))"
       :key="it.key"
       class="nav-item"
       :class="{ active: page === 'settings' && settings === it.key }"
