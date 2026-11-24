@@ -154,6 +154,9 @@ function buildInstruction(task, dateStr) {
         '3. 如果这个任务需要看之前的结果（比如对比、累计），先用 workspace 的 ls/read 读回来再写。',
         '4. 这次是到点自动跑的，没有人在屏幕前等你：不要反问，不要要求确认，直接做完。',
         `5. 做完后给用户一两句话说明这次做了什么、写到了哪个文件。语气自然，别写成分条报告。`,
+        '6. 如果任务涉及 B站：用 bili_explore 工具。它受 enabled（功能总开关）和 autoBrowse（自主闲逛）两个总闸控制。',
+        '   到点自动闲逛调度会被 autoBrowse 拦，但定时任务本身就是明确指令——直接调 discover 即可（不要带 fromSchedule=true）；',
+        '   互动（评论/赞/币/藏）仍遵守各自开关与话题相关原则，禁私信、不引用历史记忆。',
     ];
     return lines.join('\n');
 }
@@ -225,6 +228,16 @@ async function runLocally({
             aiContext: ctx,
             content,
             sessionId: sessionId || sessionIdFor(ow, id),
+            // 任务执行时构造归属场景：能力 dispatch 的 owner/role 取自 scene，
+            // 不传的话主人建的任务也调不了 owner 级能力（如 B站）。
+            // 身份只从存下来的 ownerRole/owner 来，模型传不进来。
+            scene: {
+                chatType: 'local',
+                isOwner: ownerRole === 'owner',
+                role: ownerRole || 'user',
+                senderId: ow || '',
+                senderName: ownerName || '',
+            },
             // 位置/人格/技能：用本机自己的配置（主机执行时就是主机的配置，
             // 与「全网只有一个大脑出口」一致）
             locationScope: null,
