@@ -86,6 +86,10 @@ function formatChatTime(ts) {
     const time = `${hh}:${mm}`;
     const now = new Date();
     if (isSameDay(ts, now.getTime())) return time;
+    // 昨天显示「昨天」而不是日期，翻历史时更自然
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (isSameDay(ts, yesterday.getTime())) return `昨天 ${time}`;
     const md = `${d.getMonth() + 1}月${d.getDate()}日`;
     if (d.getFullYear() === now.getFullYear()) return `${md} ${time}`;
     return `${d.getFullYear()}年${md} ${time}`;

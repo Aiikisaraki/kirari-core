@@ -660,19 +660,31 @@ button.mini.danger:hover {
 }
 
 /* ── 设置区排布 ── */
+/* 统一宽度：所有设置内容区都是同一条中轴、同一个最大宽度。
+   之前 .settings 是 1fr 1fr 双列 + .card.wide 跨列，导致同一页里
+   大脑卡片撑满、搜索卡片只有一半宽；而其他页裸 .card 又是另一套宽度。
+   现在改成单列：所有卡片自然同宽，和聊天区（.chat max-width:860px）对齐。 */
 .settings {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    flex-direction: column;
     gap: 16px;
-    align-items: start;
+    align-items: stretch;
+    max-width: 860px;
+    margin: 0 auto;
 }
-.settings .card.wide {
-    grid-column: 1 / -1;
+.settings .card.wide,
+.settings .col {
+    width: 100%;
 }
 .settings .col {
     display: flex;
     flex-direction: column;
     gap: 16px;
+}
+/* 裸 .card 的设置页（外观/通用/人格/头像等）也要和 .settings 同宽同中轴 */
+.content > section.card {
+    max-width: 860px;
+    margin: 0 auto 16px;
 }
 
 /* 设置页行式条目（限定在卡片内，避免和聊天气泡的 .row 打架） */
