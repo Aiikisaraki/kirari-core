@@ -175,6 +175,31 @@ function setupConsoleRoutes(app) {
         });
     });
 
+    // ---- B站登录（扫码：凭证只存本机扩展包目录，绝不进记忆） ----
+    app.get("/api/bili/login/status", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        res.json(await svc.loginStatus());
+    });
+    app.post("/api/bili/login/qr", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        try { res.json(await svc.qrGenerate()); } catch (e) { res.status(500).json({ message: e.message }); }
+    });
+    app.get("/api/bili/login/poll", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        try { res.json(await svc.qrPoll()); } catch (e) { res.status(500).json({ message: e.message }); }
+    });
+    app.post("/api/bili/login/logout", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        res.json(await svc.logout());
+    });
     // ---- B站互动开关（命令与设置界面双向同步的唯一真相源） ----
     app.get("/api/bili/interaction", async (req, res) => {
         if (!requireAdmin(req, res)) return;

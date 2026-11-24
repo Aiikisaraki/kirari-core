@@ -1,9 +1,16 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { request } from '../../api.js';
 
 // B站互动开关：与命令共用 settings_kv 单键，命令改完这里刷新即可见（双向同步）。
 const emit = defineEmits(['saved']);
 const state = ref({ enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
+const login = ref({ loggedIn: false, anonymousOnly: true });
+const qr = ref('');          // 二维码扫码链接
+const qrMsg = ref('');       // 轮询提示
+// 用公开 QR 服务把扫码链接渲染成图片；外网不通时下面的降级链接仍可用
+const qrImageUrl = computed(() => qr.value ? 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(qr.value) : '');
+let pollTimer = null;
 const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
@@ -22,9 +29,9 @@ const CH = [
 async function load() {
   loading.value = true; error.value = '';
   try {
-    const r = await fetch('/api/bili/interaction');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    state.value = { ...state.value, ...(await r.json()) };
+    // request() 直接返回解析后的 JSON（不是 Response），端点返回裸开关对象
+    const data = await request('/api/bili/interaction');
+    state.value = { ...state.value, ...data };
   } catch (e) { error.value = '读取失败：' + e.message; }
   finally { loading.value = false; }
 }
@@ -32,16 +39,41 @@ async function toggle(key) {
   saving.value = true; error.value = '';
   try {
     const next = { ...state.value, [key]: !state.value[key] };
-    const r = await fetch('/api/bili/interaction', {
+    const data = await request('/api/bili/interaction', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: next[key] }),
     });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    state.value = await r.json();
+    state.value = data;
     emit('saved', 'B站互动开关已更新');
   } catch (e) { error.value = '保存失败：' + e.message; }
   finally { saving.value = false; }
 }
-onMounted(load);
+async function loadLogin() {
+  try { const d = await request('/api/bili/login/status'); login.value = d || { loggedIn: false }; } catch {}
+}
+async function startQr() {
+  qrMsg.value = '正在生成二维码…'; qr.value = '';
+  try {
+    const d = await request('/api/bili/login/qr', { method: 'POST' });
+    if (d?.url) { qr.value = d.url; qrMsg.value = '请用手机 B站 App 扫码，扫码后自动登录。'; pollQr(); }
+    else qrMsg.value = d?.message || '生成失败';
+  } catch (e) { qrMsg.value = '生成失败：' + (e.message || e); }
+}
+function pollQr() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const d = await request('/api/bili/login/poll');
+      if (d?.status === 'success') { clearInterval(pollTimer); pollTimer = null; qr.value = ''; qrMsg.value = '登录成功'; await loadLogin(); emit('saved', 'B站登录成功'); }
+      else if (d?.status === 'expired') { clearInterval(pollTimer); pollTimer = null; qrMsg.value = '二维码已过期，请重新生成'; }
+      else if (d?.message) qrMsg.value = d.message;
+    } catch {}
+  }, 2000);
+}
+async function doLogout() {
+  try { await request('/api/bili/login/logout', { method: 'POST' }); qr.value = ''; await loadLogin(); emit('saved', '已退出B站登录'); } catch {}
+}
+onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
+onMounted(() => { load(); loadLogin(); });
 defineExpose({ reload: load }); // 供外部命令修改后刷新
 </script>
 
@@ -52,6 +84,23 @@ defineExpose({ reload: load }); // 供外部命令修改后刷新
       她去 B 站是公开环境，默认把互动对象当作可能是恶意第三人：评论和动态只谈当前话题、只表达看法态度，
       不透露过去看过什么、不引用记忆、不给来源线索。三个开关与命令双向同步。
     </p>
+    <!-- B站登录：扫码二维码（凭证只存本机，不进记忆） -->
+    <div class="bili-login">
+      <div class="row">
+        <div class="row-text">
+          <h3>B站账号</h3>
+          <p class="dim">{{ login.loggedIn ? '已登录（可以用推荐流发现内容、互动）' : '未登录：只能看公开热门，互动与个性化发现需要扫码登录。凭证只存本机，绝不进记忆。' }}</p>
+        </div>
+        <button v-if="login.loggedIn" class="mini" @click="doLogout">退出登录</button>
+        <button v-else class="mini primary" @click="startQr">扫码登录</button>
+      </div>
+      <p v-if="qrMsg" class="dim">{{ qrMsg }}</p>
+      <div v-if="qr" class="qr-box">
+        <p class="dim">手机 B站 App → 我的 → 扫一扫：</p>
+        <img :src="qrImageUrl" alt="B站登录二维码" class="qr-img" />
+        <p class="dim"><a :href="qr" target="_blank" rel="noopener">打不开二维码？点这里用手机浏览器打开链接</a></p>
+      </div>
+    </div>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="loading" class="dim">读取中…</p>
     <div v-else class="rows">

@@ -5,7 +5,7 @@
  * 后端端点：/api/extensions/voices（GET 列表 / POST 下载 / DELETE 删除 / GET progress）。
  */
 import { ref, onMounted, onUnmounted } from 'vue';
-import { api } from '../../api.js';
+import { request } from '../../api.js';
 
 const emit = defineEmits(['saved']);
 const libs = ref([]);
@@ -17,26 +17,26 @@ let timer = null;
 
 async function refresh() {
   loading.value = true; errorMsg.value = '';
-  try { const r = await api('/api/extensions/voices'); if (r?.ok) libs.value = r.libs || []; else errorMsg.value = r?.message || '读取失败'; }
+  try { const r = await request('/api/extensions/voices'); if (r?.ok) libs.value = r.libs || []; else errorMsg.value = r?.message || '读取失败'; }
   catch (e) { errorMsg.value = e?.message || String(e); }
   finally { loading.value = false; }
 }
 function startPoll(id) {
   busyId.value = id; progress.value[id] = '准备下载…';
   if (timer) clearInterval(timer);
-  timer = setInterval(async () => { try { const r = await api('/api/extensions/voices/progress'); if (r?.progress) progress.value[id] = r.progress; } catch {} }, 600);
+  timer = setInterval(async () => { try { const r = await request('/api/extensions/voices/progress'); if (r?.progress) progress.value[id] = r.progress; } catch {} }, 600);
 }
 function stopPoll() { if (timer) clearInterval(timer); timer = null; busyId.value = ''; }
 async function download(lib) {
   errorMsg.value = ''; startPoll(lib.id);
-  try { const r = await api('/api/extensions/voices/' + encodeURIComponent(lib.id) + '/download', { method: 'POST' }); if (r?.ok) emit('saved', '「' + lib.name + '」下载完成'); else errorMsg.value = r?.error || r?.message || '下载失败'; }
+  try { const r = await request('/api/extensions/voices/' + encodeURIComponent(lib.id) + '/download', { method: 'POST' }); if (r?.ok) emit('saved', '「' + lib.name + '」下载完成'); else errorMsg.value = r?.error || r?.message || '下载失败'; }
   catch (e) { errorMsg.value = e?.message || String(e); }
   finally { stopPoll(); await refresh(); }
 }
 async function remove(lib) {
   if (!window.confirm('删掉音色库「' + lib.name + '」？删了可以重新下载。')) return;
   errorMsg.value = '';
-  try { const r = await api('/api/extensions/voices/' + encodeURIComponent(lib.id), { method: 'DELETE' }); if (r?.ok) emit('saved', '音色库已删除'); else errorMsg.value = r?.error || r?.message || '删除失败'; }
+  try { const r = await request('/api/extensions/voices/' + encodeURIComponent(lib.id), { method: 'DELETE' }); if (r?.ok) emit('saved', '音色库已删除'); else errorMsg.value = r?.error || r?.message || '删除失败'; }
   catch (e) { errorMsg.value = e?.message || String(e); }
   finally { await refresh(); }
 }

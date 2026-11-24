@@ -14,7 +14,7 @@ export function clearToken() {
     localStorage.removeItem(KEY);
 }
 
-async function request(path, options = {}) {
+export async function request(path, options = {}) {
     const res = await fetch(path, {
         ...options,
         headers: {

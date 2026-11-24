@@ -1238,3 +1238,7 @@ textarea {
   border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px 14px; }
 .voice-lib-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .voice-lib-ops { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* B站扫码登录二维码 */
+.qr-box { margin: 10px 0; }
+.qr-img { width: 200px; height: 200px; display: block; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
