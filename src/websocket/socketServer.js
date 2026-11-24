@@ -319,11 +319,17 @@ function setupWebSocket(server, options = {}) {
                 }
 
                 console.log(`[WS-PERF] saveMessage(assistant) 前 @${Date.now()}`);
-                await sessionManager.saveMessage(
-                    sessionId,
-                    "assistant",
-                    reply.speech,
-                );
+                // 气泡拆分：存储逐条 → 桌宠端读历史看到一致的拆分气泡。
+                // reply 带 bubbles 数组 → 桌宠端实时消息也按气泡渲染。
+                const { splitSpeechBubbles } = require("../services/reply/promptBuilder");
+                reply.bubbles = splitSpeechBubbles(reply.speech);
+                for (let i = 0; i < reply.bubbles.length; i++) {
+                    await sessionManager.saveMessage(
+                        sessionId,
+                        "assistant",
+                        reply.bubbles[i],
+                    );
+                }
                 console.log(`[WS-PERF] saveMessage(assistant) 完成 @${Date.now()}`);
 
                 // 在场感：她的话也是她经历的一部分 —— 按回复做一次评价，写回 mood。

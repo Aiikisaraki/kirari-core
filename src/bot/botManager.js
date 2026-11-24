@@ -205,10 +205,17 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
             },
             ws: null,
         });
-        await sessionManager.saveMessage(sessionId, 'assistant', reply.speech, {
-            images: Array.isArray(reply.images) ? reply.images : [],
-            emotion: reply.emotion || null,
-        });
+        // 气泡拆分：一条回复按句拆成多条独立消息（真人聊天是连发短消息）。
+        // 存储逐条 → 三端（QQ/控制台/桌宠）读历史看到一致的拆分气泡。
+        const { splitSpeechBubbles } = require('../services/reply/promptBuilder');
+        const bubbles = splitSpeechBubbles(reply.speech);
+        for (let i = 0; i < bubbles.length; i++) {
+            await sessionManager.saveMessage(sessionId, 'assistant', bubbles[i], {
+                images: Array.isArray(reply.images) ? reply.images : [],
+                // emotion 只挂第一条（表情动作跟第一句走）
+                emotion: i === 0 ? (reply.emotion || null) : null,
+            });
+        }
         // 在场感：她的话也写回 mood（仅主人私聊）。
         if (isOwnerAccount && !incoming.isGroup) {
             try {
@@ -307,10 +314,18 @@ function startAdapter(cfg) {
         // ownerAccount 从实例实时读（设主人后即时生效，不等重启）
         const reply = await handleIncoming(cfg, incoming, adapter.ownerAccount);
         try {
-            await adapter.sendMessage(incoming, {
-                text: reply.speech || '',
-                images: Array.isArray(reply.images) ? reply.images : [],
-            });
+            // 气泡逐条发送：真人聊天是连发短消息。200ms 间隔防限流（feiyu-os「频率克制」条款）。
+            const { splitSpeechBubbles } = require('../services/reply/promptBuilder');
+            const bubbles = splitSpeechBubbles(reply.speech || '');
+            for (let i = 0; i < bubbles.length; i++) {
+                await adapter.sendMessage(incoming, {
+                    text: bubbles[i],
+                    images: i === 0 ? (Array.isArray(reply.images) ? reply.images : []) : [],
+                });
+                if (i < bubbles.length - 1) {
+                    await new Promise((r) => setTimeout(r, 200));
+                }
+            }
         } catch (e) {
             console.warn(`[bot] 回发失败（${incoming.conversationKey}）:`, e?.message || e);
         }

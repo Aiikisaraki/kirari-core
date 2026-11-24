@@ -245,6 +245,42 @@ function getRequestTimeout(content) {
   return 45000;
 }
 
+// ── 气泡拆分 ────────────────────────────────────────────────────────────
+// 把一条回复拆成多条"独立气泡"。参考 feiyu-os 角色卡：「每个换行 = 通道上一条独立气泡，
+// 一条一个念头，一般 3~8 条」。真人聊天是连发短消息，不是一整段。
+//
+// 拆分规则（按优先级）：
+//   1. 模型输出的换行是天然的气泡边界——提示词已引导模型按念头换行
+//   2. 无换行的长文本按句末标点（。？！…）切，每条 ≥2 字
+//   3. 单条超长（>120 字）不再硬切——宁可不拆也不破坏语义
+//   4. 最多 5 条——连发超过 5 条在 IM 里是刷屏
+//   5. 全部为空的行被丢弃；结果为空时返回 [原文]（空内容不拆）
+// 用于：QQ 发送逐条、三个落地存储逐条 —— 三端看到一致的拆分气泡。
+function splitSpeechBubbles(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  // 按换行拆
+  let lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // 只有单行且较长时按句末标点切（保留标点）
+  if (lines.length === 1 && lines[0].length > 40) {
+    const sentences = lines[0].split(/(?<=[。？！…])/).map((s) => s.trim()).filter(Boolean);
+    // 切出来至少 2 段才有意义，且每段不产生超短碎片
+    if (sentences.length >= 2 && sentences.every((s) => s.length >= 2)) lines = sentences;
+  }
+  // 过滤空行、限制条数（超长条不硬切，宁缺毋滥）
+  const out = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (out.length >= 5) {
+      // 超出 5 条：把剩余内容并回最后一条，避免丢内容
+      out[out.length - 1] += '\n' + line;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.length ? out : [raw];
+}
+
 // 剔除交给 LLM 的对话历史中的系统噪声消息（如启动问候语），避免污染上下文。
 function stripNonConversational(messages) {
   return messages.filter((m) => {
@@ -261,6 +297,7 @@ function stripNonConversational(messages) {
 }
 
 module.exports = {
+    splitSpeechBubbles,
   DEFAULT_PERSONA,
   GREETING_MESSAGE,
   LOCATION_ASK_MESSAGE,

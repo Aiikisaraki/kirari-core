@@ -204,7 +204,18 @@ async function send() {
                     scrollBottom();
                 }
             } else if (event === "done") {
-                messages.value.push({ role: "pet", text: data.speech, model: data.model });
+                // 气泡拆分：后端已按句拆好，逐条渲染（真人聊天是连发短消息）。
+                const bubbles = Array.isArray(data.bubbles) && data.bubbles.length
+                    ? data.bubbles
+                    : [data.speech];
+                for (const b of bubbles) {
+                    messages.value.push({
+                        role: "pet",
+                        text: b,
+                        model: data.model,
+                        timestamp: Date.now(),
+                    });
+                }
                 streamingText.value = "";
                 sending.value = false;
                 currentStream = null;

@@ -473,13 +473,19 @@ function setupConsoleRoutes(app) {
                     send("delta", chunk === null ? { reset: true } : { text: String(chunk) });
                 },
             });
-            await sessionManager.saveMessage(sessionId, "assistant", reply.speech, {
-                // 情绪/图片进 extras 列（桌宠版引擎同样存）：共享历史里桌宠端原样带回
-                emotion: reply.emotion ?? null,
-                images: Array.isArray(reply.images) ? reply.images : [],
-            });
+            // 气泡拆分：存储逐条 → 控制台/桌宠读历史看到一致的拆分气泡。
+            // SSE done 事件带 bubbles 数组，前端按气泡渲染（打字效果仍按整段流出）。
+            const { splitSpeechBubbles } = require("../services/reply/promptBuilder");
+            const bubbles = splitSpeechBubbles(reply.speech);
+            for (let i = 0; i < bubbles.length; i++) {
+                await sessionManager.saveMessage(sessionId, "assistant", bubbles[i], {
+                    emotion: i === 0 ? (reply.emotion ?? null) : null,
+                    images: Array.isArray(reply.images) ? reply.images : [],
+                });
+            }
             send("done", {
                 speech: reply.speech,
+                bubbles,
                 emotion: reply.emotion ?? null,
                 model: reply.model || "",
             });
