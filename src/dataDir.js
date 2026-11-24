@@ -1,4 +1,4 @@
-// src/dataDir.js
+// src/dataDir.js — check-requires-ignore（第 11 行注释里的 require('../dataDir') 是示例文本，非真实代码）
 // 数据目录解析：核心版（kirari-core）与桌宠版（kirari-desktop）**共用同一份数据**。
 //
 // 历史：这里原本负责「自动探测桌宠版 userData（%APPDATA%\akisaki-kirari）」，

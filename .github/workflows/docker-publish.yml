@@ -93,6 +93,13 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # ── 6.5 相对 require 体检 ────────────────────────────────────────
+      # 背景：1.1.0 的 presence 模块出现过 require 路径少一层的错误，CI 构建绿灯
+      # 但运行即崩（MODULE_NOT_FOUND）。这个脚本解析所有相对 require 并对磁盘
+      # 验证目标存在，坏路径当场拦截 —— 不会进镜像。
+      - name: 相对 require 体检
+        run: node scripts/check-requires.cjs src
+
       # ── 7. 构建并推送 ────────────────────────────────────────────────
       # 单架构 linux/amd64：VPS / openEuler / OpenCloudOS / NAS 主流都是 x86，
       # 单架构能省掉 QEMU 跨架构模拟，构建快且不会出模拟环境的玄学问题。
