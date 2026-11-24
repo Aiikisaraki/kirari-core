@@ -103,6 +103,7 @@ async function tryToken(t) {
         netInfo.value = s.net;
         loadAppearance();
         loadPetName();
+        loadInstalledServices();
     } catch (e) {
         if (e.authFailed) {
             // 口令不对：把刚才存进去的错口令清掉，别让下次自动重试用它当默认
@@ -194,6 +195,11 @@ async function loadAppearance() {
 }
 
 /** 备注名从 pet-client.config.json 读（桌宠版改了这边同步显示）。 */
+async function loadInstalledServices() {
+    // 已安装扩展提供的服务 id：语音/B站等设置页按此条件显示（与桌宠端同机制）
+    try { const r = await api('/api/extensions/installed'); if (r?.ok) installedServices.value = r.serviceIds || []; } catch { /* 扩展列表读不到就都不显示 */ }
+}
+
 async function loadPetName() {
     try {
         const r = await api.getPetName();
