@@ -1231,3 +1231,10 @@ textarea {
         animation: none !important;
     }
 }
+
+/* ── 音色库列表（语音设置页）── */
+.voice-libs { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.voice-lib { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px 14px; }
+.voice-lib-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.voice-lib-ops { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }

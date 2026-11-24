@@ -21,7 +21,8 @@ const items = [
     { key: "knowledge", label: "知识库", desc: "私人知识", icon: "book" },
     { key: "mcp", label: "工具服务", desc: "MCP", icon: "plug" },
     { key: "bot", label: "机器人", desc: "QQ 接入", icon: "bot" },
-    { key: "bili", label: "B站互动", desc: "评论/动态/私信", icon: "globe" },
+    { key: "voice", label: "语音", desc: "音色库管理", icon: "chat", requiresExtension: "speech.tts" },
+    { key: "bili", label: "B站互动", desc: "评论/动态/私信", icon: "globe", requiresExtension: "bili.explore" },
     { key: "sync", label: "组网", desc: "多机同步", icon: "sync" },
 ];
 
@@ -44,7 +45,7 @@ function goSettings(key) {
     </button>
     <div class="nav-group-title">设置</div>
     <button
-      v-for="it in items"
+      v-for="it in items.filter((x) => !x.requiresExtension || props.installedServices.includes(x.requiresExtension))"
       :key="it.key"
       class="nav-item"
       :class="{ active: page === 'settings' && settings === it.key }"

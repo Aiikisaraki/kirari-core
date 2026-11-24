@@ -223,6 +223,18 @@ function removeVoiceLib(libId) {
 
 /** 把语音相关端点挂到 express app 上（setupHttpRoutes 内调用）。 */
 function setupVoiceRoutes(app) {
+  // 已安装扩展提供的服务 id（与桌宠端 ext:installed 同契约）——
+  // 前端据此决定是否显示 requiresExtension 的设置页（语音/B站…）。
+  app.get("/api/extensions/installed", (_req, res) => {
+    try {
+      const host = require('./host').getExtensionHost();
+      const packs = host ? host.status().map((p) => ({ packId: p.packId, contributions: p.contributions || [] })) : [];
+      const serviceIds = [];
+      for (const p of packs) for (const c of (p.contributions || [])) if (c.type === 'service' && c.id) serviceIds.push(c.id);
+      return res.json({ ok: true, packs, serviceIds });
+    } catch (e) { return res.status(500).json({ ok: false, message: e?.message || '读取失败' }); }
+  });
+
   app.get("/api/extensions/voices", async (_req, res) => {
     try {
       return res.json({ ok: true, libs: listVoiceLibs() });

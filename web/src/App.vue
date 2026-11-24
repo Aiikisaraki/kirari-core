@@ -14,6 +14,7 @@ import McpSettings from "./components/settings/McpSettings.vue";
 import BotSettings from "./components/settings/BotSettings.vue";
 import SyncSettings from "./components/settings/SyncSettings.vue";
 import BiliSettings from "./components/settings/BiliSettings.vue";
+import VoiceSettings from "./components/settings/VoiceSettings.vue";
 
 // 外观缓存的 localStorage 键（防刷新闪白用，真正的配置以服务端那份为准）
 const APPEARANCE_CACHE = "kirari-console-appearance";
@@ -26,6 +27,7 @@ const authError = ref("");
 const page = ref("chat"); // chat | settings
 const settingsPage = ref("general"); // 设置子页（见 SettingsNav）
 const brainReady = ref(null);
+const installedServices = ref([]); // 已安装扩展提供的服务 id（决定条件设置页是否显示）
 const netInfo = ref(null);
 const petName = ref("Kirari");
 const savedOk = ref("");
@@ -60,6 +62,8 @@ const SETTINGS_LABELS = {
     mcp: "工具服务",
     bot: "机器人",
     sync: "组网",
+    voice: "语音",
+    bili: "B站互动",
 };
 // 叶子节点：机器人统一从主机走，模型/人格/搜索/协议端这些"跟随主机"的设置
 // 必须灰掉只读（与后端 rejectIfLeaf 双保险）。组网设置页不在此列——要留退出叶子的入口。
@@ -291,7 +295,7 @@ onMounted(() => {
               <span>智能助手</span>
             </div>
           </div>
-          <SettingsNav v-model:page="page" v-model:settings="settingsPage" />
+          <SettingsNav v-model:page="page" v-model:settings="settingsPage" :installed-services="installedServices" />
           <div class="side-foot">聊天记录与桌宠版互通</div>
         </aside>
 
