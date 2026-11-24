@@ -109,9 +109,10 @@ defineExpose({ reload: load }); // 供外部命令修改后刷新
       </div>
     </div>
     <!-- 发送前审核：评论先到队列，批准后才真发 -->
-    <div v-if="pending.length" class="review-box">
-      <h3>待审核评论（{{ pending.length }}）</h3>
-      <p class="dim">她想发的评论会先到这里，你批准后才会真正发出去。</p>
+    <div class="review-box">
+      <h3>待审核评论<span v-if="pending.length">（{{ pending.length }}）</span></h3>
+      <p class="dim">她想发的评论会先到这里，你批准后才会真正发出去。需要先开启上面的「评论」开关，她才会产生待审评论。</p>
+      <p v-if="!pending.length" class="dim" style="opacity:.7">暂无待审核评论。</p>
       <div v-for="p in pending" :key="p.id" class="review-item">
         <span class="dim">{{ p.kind }} · {{ new Date(p.createdAt).toLocaleString() }}</span>
         <p>{{ p.text }}</p>
