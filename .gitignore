@@ -38,3 +38,6 @@ data/
 
 # Claude
 .claude
+
+# 预检脚本 stage 的 kirari-net（不入库）
+.kirari-net-build/
