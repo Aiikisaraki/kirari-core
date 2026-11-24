@@ -115,6 +115,41 @@ else
   echo "==> 使用自带的控制台构建产物（web/dist）"
 fi
 
+# ── 5.6 可选扩展包：语音 / B站 ─────────────────────────────
+# 装了包，控制台侧栏才会长出「语音」「B站互动」设置页（requiresExtension 机制）。
+# 源码目录里若带了PACKS（随发行包分发）就优先用本地；否则从 GitHub 拉。
+# 全部失败也不阻断核心服务 —— 扩展包是可选能力。
+KIRARI_HOME_DIR="${KIRARI_HOME:-$HOME/.kirari}"
+EXT_ROOT="$KIRARI_HOME_DIR/extensions"
+EXT_PACKS="
+  com.akisaki.voice.aishell3 https://github.com/Aiikisaraki/kirari-ext-voice.git
+  com.akisaki.bili.explore https://github.com/Aiikisaraki/kirari-ext-bili.git
+"
+if [ -n "$EXT_PACKS" ]; then
+  mkdir -p "$EXT_ROOT"
+  echo "$EXT_PACKS" | while read -r pack_id repo_url; do
+    [ -z "${pack_id:-}" ] && continue
+    dest="$EXT_ROOT/$pack_id"
+    local_src="$SRC_DIR/../$(basename "$repo_url" .git)"
+    if [ -d "$local_src" ] && [ -f "$local_src/manifest.json" ]; then
+      echo "==> 扩展包 $pack_id：用本地源码 $local_src"
+      mkdir -p "$dest"
+      rsync -a --exclude '.git/' --exclude 'node_modules/' "$local_src"/ "$dest"/
+    elif [ -d "$dest/manifest.json" ] || [ -f "$dest/manifest.json" ]; then
+      echo "==> 扩展包 $pack_id：已安装，跳过（要更新请手动删除后重跑）"
+    elif command -v git >/dev/null 2>&1; then
+      echo "==> 扩展包 $pack_id：从 GitHub 拉取"
+      if git clone --depth 1 "$repo_url" "$dest" 2>/dev/null; then
+        echo "    ✓ $pack_id 已安装"
+      else
+        echo "    ⚠ $pack_id 拉取失败（跳过；核心服务照常启动）" >&2
+        rm -rf "$dest"
+      fi
+    else
+      echo "    ⚠ 没找到 git，$pack_id 无法自动安装（跳过）" >&2
+    fi
+  done
+fi
 # ── 6. 配置文件 ────────────────────────────────────────────
 if [ -f .env ]; then
   echo "==> .env 已存在，保持不动"
