@@ -171,8 +171,8 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
         // 群聊/客人不写 —— 与桌面端 isOwnerLocalSession 同一把门（2026-11-24 用户要求保住分人能力）。
         if (isOwnerAccount && !incoming.isGroup) {
             try {
-                const { recordUserTurn } = require('./presence/presenceEngine');
-                const { loadOrInitPresenceState, savePresenceState } = require('./presence/stateStore');
+                const { recordUserTurn } = require('../services/presence/presenceEngine');
+                const { loadOrInitPresenceState, savePresenceState } = require('../services/presence/stateStore');
                 const now = Date.now();
                 savePresenceState(recordUserTurn(loadOrInitPresenceState(now, uid), incoming.text || '', now), uid);
             } catch (e) {
@@ -212,8 +212,8 @@ async function handleIncoming(cfg, incoming, ownerAccount) {
         // 在场感：她的话也写回 mood（仅主人私聊）。
         if (isOwnerAccount && !incoming.isGroup) {
             try {
-                const { appraiseReply } = require('./presence/presenceEngine');
-                const { loadOrInitPresenceState, savePresenceState } = require('./presence/stateStore');
+                const { appraiseReply } = require('../services/presence/presenceEngine');
+                const { loadOrInitPresenceState, savePresenceState } = require('../services/presence/stateStore');
                 const now = Date.now();
                 savePresenceState(appraiseReply(loadOrInitPresenceState(now, uid), reply.speech || '', reply.emotion || null, now), uid);
             } catch (e) {
