@@ -13,6 +13,7 @@ import KnowledgeSettings from "./components/settings/KnowledgeSettings.vue";
 import McpSettings from "./components/settings/McpSettings.vue";
 import BotSettings from "./components/settings/BotSettings.vue";
 import SyncSettings from "./components/settings/SyncSettings.vue";
+import BiliSettings from "./components/settings/BiliSettings.vue";
 
 // 外观缓存的 localStorage 键（防刷新闪白用，真正的配置以服务端那份为准）
 const APPEARANCE_CACHE = "kirari-console-appearance";
@@ -329,6 +330,10 @@ onMounted(() => {
               v-else-if="settingsPage === 'sync'"
               :net-info="netInfo"
               @saved="flashSaved('组网配置已保存')"
+            />
+            <BiliSettings
+              v-else-if="settingsPage === 'bili'"
+              @saved="flashSaved('B站互动开关已同步')"
             />
           </template>
 

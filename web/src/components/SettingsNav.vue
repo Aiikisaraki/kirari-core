@@ -21,6 +21,7 @@ const items = [
     { key: "knowledge", label: "知识库", desc: "私人知识", icon: "book" },
     { key: "mcp", label: "工具服务", desc: "MCP", icon: "plug" },
     { key: "bot", label: "机器人", desc: "QQ 接入", icon: "bot" },
+    { key: "bili", label: "B站互动", desc: "评论/动态/私信", icon: "globe" },
     { key: "sync", label: "组网", desc: "多机同步", icon: "sync" },
 ];
 
@@ -90,6 +91,10 @@ function goSettings(key) {
         <template v-else-if="it.icon === 'sync'">
           <path d="M20 7H7m0 0 3-3M7 7l3 3" />
           <path d="M4 17h13m0 0-3-3m3 3-3 3" />
+        </template>
+        <template v-else-if="it.icon === 'globe'">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.3 3.4 8.5S14.3 18.1 12 20.5c-2.3-2.4-3.4-5.3-3.4-8.5S9.7 5.9 12 3.5Z" />
         </template>
       </svg>
       <span class="nav-body">

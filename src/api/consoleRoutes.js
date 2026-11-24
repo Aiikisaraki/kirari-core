@@ -175,6 +175,26 @@ function setupConsoleRoutes(app) {
         });
     });
 
+    // ---- B站互动开关（命令与设置界面双向同步的唯一真相源） ----
+    app.get("/api/bili/interaction", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        res.json(require("../services/biliSettings").read());
+    });
+    app.put("/api/bili/interaction", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const b = req.body || {};
+        const valid = ["comment", "dynamic", "dm", "like", "coin", "favorite"];
+        const patch = {};
+        for (const k of valid) {
+            if (b[k] !== undefined) {
+                if (typeof b[k] !== "boolean") return res.status(400).json({ message: k + " 必须是 true/false" });
+                patch[k] = b[k];
+            }
+        }
+        if (!Object.keys(patch).length) return res.status(400).json({ message: "没有要更新的开关" });
+        res.json(require("../services/biliSettings").write({ ...require("../services/biliSettings").read(), ...patch }));
+    });
+
     // ---- 模型配置读写 ----
     app.get("/api/settings", async (req, res) => {
         if (!requireAdmin(req, res)) return;

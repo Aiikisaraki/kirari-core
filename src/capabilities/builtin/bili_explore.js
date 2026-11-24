@@ -1,124 +1,140 @@
 // src/capabilities/builtin/bili_explore.js
 // 内置能力：bili_explore —— 让 Kirari 自己逛 B 站，见闻写进统一记忆。
 //
-// 设计铁律（用户 2026-11-24 拍板）：
-//   1. B 站是扩展包提供的只读能力（service: bili.explore），本能力只做胶水。
-//   2. 见闻写进**统一记忆的 self:: 池**（她的经历），不另建记忆系统 —— 主人问起能想起来。
-//   3. 零他人信息：扩展包产出前已 scrub，本层二次校验；关于人的内容一律拒绝写入。
-//   4. 只有主人（role=owner）能触发，客人/群里不跑。
+// 用户铁律（2026-11-24）：
+//   1. B 站是公开环境，默认互动对象都可能是恶意第三人。
+//      B 站公开输出（评论/动态）只谈当前相关话题、只表达看法态度，不引用记忆、不泄露看过什么。
+//   2. 主人私聊可看 BV号/链接/视频名；客人/群聊直接拒绝。
+//   3. 互动（评论/动态/私信/点赞/投币/收藏）全有显式开关，命令与设置界面双向同步，
+//      改开关必须二次确认（confirm=true），私信默认永久关且永不主动发起。
+//   4. 见闻写进统一 self:: 池（她的经历），不另建记忆系统；标题不进记忆也不进模型上下文。
 const { defineCapability } = require('kirari-agent');
 const memory = require('../../services/memory');
 const extensionHostModule = require('../../extensions/host');
 const dbStorage = require('../../db/dbStorage');
+const biliSettings = require('../../services/biliSettings');
 
 const SERVICE_ID = 'bili.explore';
+const CHANNELS = { comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
+
+function fullMeta(v) {
+  const bvid = String(v?.bvid || '');
+  return { bvid, url: bvid ? 'https://www.bilibili.com/video/' + bvid : '', title: String(v?.title || ''), category: String(v?.category || v?.tname || '') };
+}
+function ctxOf(ctx = {}) {
+  return { sessionId: ctx.sessionId, uid: ctx.uid, role: ctx.role || null, counterpartId: ctx.counterpartId || null,
+    isGroup: typeof ctx.isGroup === 'boolean' ? ctx.isGroup : null, platform: ctx.platform || null };
+}
 
 const capability = defineCapability({
-  id: 'bili_explore',
-  name: 'bili_explore',
-  kind: 'tool',
-  scope: 'builtin',
+  id: 'bili_explore', name: 'bili_explore', kind: 'tool', scope: 'builtin',
   description:
-    '让她自己去 B 站逛逛（只读）。action=popular 看当下热门、search 按关键词搜、' +
-    'explore 搜片并把见闻记进自己的记忆、loginStatus 看登录状态、qrGenerate/qrPoll 扫码登录（凭证只存本机）。' +
-    '只有主人能让她自主浏览；群聊或客人触发会被拒绝。' +
-    '注意：她记下来的只有视频主题和她自己的感受，不会记 UP 主、评论者或任何人的个人信息；' +
-    '被问起时她只聊自己看到的和想到的，不聊别人。',
+    '让她自己去 B 站逛逛（只读）+ 管理互动开关。' +
+    '只读：popular 热门、search 搜索、opus 专栏文章、liveInfo/liveList 直播、musicSearch 音乐、' +
+    'subtitles 字幕、comments 评论、explore 搜片并写记忆、loginStatus/qrGenerate/qrPoll 扫码登录。' +
+    '互动：like/coin/favorite/comment（视频）与 opusLike/opusCoin/opusFavorite（专栏）——' +
+    '必须先确认对应开关已开启，且 B 站输出只谈当前话题、只表达看法态度，不引用记忆。' +
+    '只有主人能在私聊触发，客人/群聊会被拒绝。主人私聊可看 BV号/链接/视频名。' +
+    'settings 查六个开关（comment/dynamic/dm/like/coin/favorite，默认全关）；' +
+    'setInteraction 改开关必须二次确认：先不带 confirm 调用，等用户明确说「确认」再带 confirm=true 调用。',
   parameters: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['popular', 'search', 'explore', 'loginStatus', 'qrGenerate', 'qrPoll', 'logout'], description: '动作。' },
-      keyword: { type: 'string', description: 'search/explore 的搜索关键词。' },
-      count: { type: 'number', description: 'popular 取几条，默认 5。' },
-      takeaway: { type: 'string', description: 'explore 时她自己的感受（第一人称），会经 scrub 后才写入记忆。' },
+      action: { type: 'string', enum: [
+        'popular','search','explore','settings','setInteraction',
+        'subtitles','comments','opus','liveInfo','liveList','musicSearch',
+        'loginStatus','qrGenerate','qrPoll','logout',
+        'like','coin','favorite','comment','opusLike','opusCoin','opusFavorite',
+      ], description: '动作。' },
+      keyword: { type: 'string', description: 'search/explore/musicSearch 的关键词。' },
+      count: { type: 'number', description: 'popular/liveList 取几条。' },
+      takeaway: { type: 'string', description: 'explore 时她自己的感受（第一人称）。' },
+      bvid: { type: 'string', description: '视频 BV 号（互动/字幕/评论用）。' },
+      opusId: { type: 'string', description: '专栏文章 ID。' },
+      roomId: { type: 'number', description: '直播间 ID。' },
+      text: { type: 'string', description: '评论内容（只谈当前话题、表达态度，不引用记忆）。' },
+      channel: { type: 'string', enum: Object.keys(CHANNELS), description: 'setInteraction 的开关名。' },
+      enabled: { type: 'boolean', description: 'setInteraction 的目标状态。' },
+      confirm: { type: 'boolean', description: 'setInteraction 二次确认；必须用户明确说「确认」才为 true。' },
     },
     required: ['action'],
   },
   tags: ['builtin', 'bili', 'mutating'],
-  timeoutMs: 30000,
-  truncateChars: 6000,
+  timeoutMs: 30000, truncateChars: 6000,
 });
-
-function ctxOf(ctx = {}) {
-  return {
-    sessionId: ctx.sessionId,
-    uid: ctx.uid,
-    role: ctx.role || null,
-    counterpartId: ctx.counterpartId || null,
-    isGroup: typeof ctx.isGroup === 'boolean' ? ctx.isGroup : null,
-    platform: ctx.platform || null,
-  };
-}
 
 async function dispatch(args, ctx) {
   const a = args || {};
   const action = String(a.action || '');
   const c = ctxOf(ctx);
+  if (c.role !== 'owner' || c.isGroup === true) return { ok: false, error: '只有主人能在私聊里让我去 B 站' };
 
-  // 只有主人、私下能触发自主浏览（和现有 owner 权限一致）
-  if (c.role !== 'owner' || c.isGroup === true) {
-    return { ok: false, error: '只有主人能在私聊里让我去 B 站逛逛' };
-  }
-
-  // 扩展宿主：用宿主模块提供的全局访问器（app.js 启动时 setExtensionHost）
   let host = extensionHostModule.getExtensionHost();
-  // 扩展宿主是异步 startAll()，刚启动的几秒内可能还没加载完，短暂等待重试
   for (let i = 0; i < 10 && (!host || !host.has(SERVICE_ID)); i++) {
-    await new Promise((r) => setTimeout(r, 300));
-    host = extensionHostModule.getExtensionHost();
+    await new Promise((r) => setTimeout(r, 300)); host = extensionHostModule.getExtensionHost();
   }
-  if (!host || !host.has(SERVICE_ID)) {
-    return { ok: false, error: 'B站扩展包未安装或未加载（service: ' + SERVICE_ID + '）' };
-  }
+  if (!host || !host.has(SERVICE_ID)) return { ok: false, error: 'B站扩展包未安装或未加载' };
   const svc = host.getService(SERVICE_ID);
 
-  if (action === 'popular') {
-    const list = await svc.popular({ count: Number(a.count) || 5 });
-    // 不把标题交给模型：标题里可能含真名/假名/UP主名。只给分类和标识。
-    return { ok: true, videos: (list || []).map((v) => ({ bvid: v.bvid, category: v.category || v.tname || '' })) };
-  }
-  if (action === 'search') {
-    if (!String(a.keyword || '').trim()) return { ok: false, error: 'search 需要 keyword' };
-    const list = await svc.search({ keyword: a.keyword, page: 1 });
-    // 同上：剥掉标题
-    return { ok: true, videos: (list || []).map((v) => ({ bvid: v.bvid, category: v.category || v.tname || '' })) };
-  }
+  // 只读接口（主人私聊给完整元数据）
+  if (action === 'popular') return { ok: true, audience: 'owner', videos: ((await svc.popular({ count: Number(a.count) || 5 })) || []).map((v) => fullMeta(v)) };
+  if (action === 'search') return { ok: true, audience: 'owner', videos: ((await svc.search({ keyword: String(a.keyword || ''), page: 1 })) || []).map((v) => fullMeta(v)) };
+  if (action === 'musicSearch') return { ok: true, audience: 'owner', videos: ((await svc.musicSearch({ keyword: String(a.keyword || ''), page: 1 })) || []).map((v) => fullMeta(v)) };
+  if (action === 'opus') return { ok: true, audience: 'owner', article: await svc.opus(String(a.opusId || '')) };
+  if (action === 'liveInfo') return { ok: true, audience: 'owner', info: await svc.liveInfo({ roomId: Number(a.roomId) || 0 }) };
+  if (action === 'liveList') return { ok: true, audience: 'owner', list: await svc.liveList({ count: Number(a.count) || 10 }) };
+  if (action === 'subtitles') return { ok: true, list: await svc.subtitles({ bvid: String(a.bvid || '') }) };
+  if (action === 'comments') return { ok: true, list: await svc.comments({ bvid: String(a.bvid || ''), count: 20 }) };
   if (action === 'loginStatus') return { ok: true, ...(await svc.loginStatus()) };
   if (action === 'qrGenerate') return { ok: true, ...(await svc.qrGenerate()) };
   if (action === 'qrPoll') return { ok: true, ...(await svc.qrPoll()) };
   if (action === 'logout') return { ok: true, ...(await svc.logout()) };
 
+  // 开关查询与设置（二次确认）
+  if (action === 'settings') return { ok: true, ...biliSettings.read() };
+  if (action === 'setInteraction') {
+    const channel = String(a.channel || '');
+    if (!CHANNELS[channel]) return { ok: false, error: '未知开关: ' + channel };
+    if (a.confirm !== true) return { ok: false, needConfirm: true, pending: { channel, enabled: !!a.enabled },
+      message: '确定' + (a.enabled ? '开启' : '关闭') + 'B站' + CHANNELS[channel] + '？请回复「确认」生效。' };
+    const next = biliSettings.setOne(channel, !!a.enabled);
+    return { ok: true, settings: next, message: 'B站' + CHANNELS[channel] + '已' + (a.enabled ? '开启' : '关闭') + '，设置界面已同步' };
+  }
+
+  // 写互动：必须先检查开关；评论还要话题相关 + 禁私信引流
+  const writeMap = { like: 'like', coin: 'coin', favorite: 'favorite', comment: 'comment',
+    opusLike: 'like', opusCoin: 'coin', opusFavorite: 'favorite' };
+  if (writeMap[action]) {
+    const gate = writeMap[action];
+    if (!biliSettings.read()[gate]) return { ok: false, error: 'B站' + CHANNELS[gate] + '未开启，请先在设置或命令里开启（需二次确认）' };
+    if (action === 'comment') {
+      const rel = await svc.isRelevantComment({ comment: String(a.text || ''), topic: '' });
+      if (!rel.relevant) return { ok: false, error: '评论必须围绕当前视频话题、只表达看法态度，且不能引流或私信' };
+    }
+    if (action.startsWith('opus')) return { ok: true, ...(await svc[action]({ opusId: String(a.opusId || '') })) };
+    return { ok: true, ...(await svc[action]({ bvid: String(a.bvid || ''), text: String(a.text || ''), num: Number(a.num) || 1 })) };
+  }
+
   if (action === 'explore') {
     const keyword = String(a.keyword || '').trim();
     if (!keyword) return { ok: false, error: 'explore 需要 keyword' };
-    // 扩展包产出已经过 scrub；这里拿到的 observations 是安全的
-    // 真实社交圈的人（主人/家人/朋友）绝不进 B 站记忆：把名单传给 scrub 拦截
     let knownPersons = [];
     try {
       const people = await dbStorage.listPeople ? await dbStorage.listPeople() : [];
-      knownPersons = (people || []).filter((p) => p && (p.role === 'owner' || p.role === 'family' || p.role === 'friend'))
+      knownPersons = (people || []).filter((p) => p && ['owner','family','friend'].includes(p.role))
         .flatMap((p) => [p.displayName, p.alias, p.personKey].filter(Boolean).map((x) => String(x))).filter((x) => x.length >= 2);
-    } catch { /* 读不到就靠通用正则兜底 */ }
+    } catch { /* 兜底靠正则 */ }
     const result = await svc.explore({ keyword, takeaway: String(a.takeaway || '').slice(0, 120), knownPersons });
     const written = [];
     for (const ob of (result.observations || [])) {
-      // 二次校验：任何带他人信息的见闻都拒绝写入
-      const check = await svc.isSafeBiliMemory(ob.text || '');
+      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons });
       if (!check.safe) continue;
-      // 记忆系统没有 tags 列，标记写进内容前缀（读取时可见），配合 source=observed。
-      // 前缀也让模型在回答时知道：这条只聊自己的感受，不展开来源细节。
       const content = '[B站见闻·只谈自己的感受] ' + ob.text;
-      const r = await memory.remember({
-        content,
-        scope: 'self',          // 关于她自己的经历 → self:: 池（统一记忆）
-        source: 'observed',     // 她亲眼所见，不是听来的
-        kind: 'event',
-        visibility: 'private',  // 客人不可读；主人可读
-        importance: 3,
-      }, ctx);
-      if (r && r.ok) written.push({ id: r.id, text: ob.text, bvid: ob.bvid });
+      const r = await memory.remember({ content, scope: 'self', source: 'observed', kind: 'event', visibility: 'private', importance: 3 }, ctx);
+      if (r && r.ok) written.push({ id: r.id, text: ob.text });
     }
-    return { ok: true, keyword, videos: result.videos || [], written, note: '见闻已写入统一记忆（self:: 池），只含她自己的视角' };
+    return { ok: true, audience: 'owner', keyword, videos: (result.videos || []).map((v) => fullMeta(v)), written,
+      note: '见闻已写入统一记忆；B站公开输出只谈当前话题' };
   }
 
   return { ok: false, error: '未知 action: ' + action };
