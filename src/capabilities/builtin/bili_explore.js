@@ -33,12 +33,15 @@ const capability = defineCapability({
     '让她自己去 B 站逛逛（只读）+ 管理互动开关。' +
     '只读：popular 热门、search 搜索、opus 专栏文章、liveInfo/liveList 直播、musicSearch 音乐、' +
     'subtitles 字幕、comments 评论、explore 搜片并写记忆、loginStatus/qrGenerate/qrPoll 扫码登录。' +
+    'debrief 六路看懂一条视频（封面/简介/字幕/弹幕热区/热评），round 跑一轮完整浏览（选片→粗看→深读，返回带来源素材）；' +
+    '**没素材就跳过是正常的**：round 返回 skipped=true 时不要编内容。' +
     'discover 自主发现（不看关键词，优先用她登录账号的推荐流找有趣内容）；' +
     '刷B站是低优先级闲时活动，可被任何事打断；问「你在干嘛」她会如实说在刷B站。' +
     'activity 动作查/停当前闲时活动（action=activity, stop=true 清除）。' +
     '互动：like/coin/favorite/comment（视频）与 opusLike/opusCoin/opusFavorite（专栏）——' +
     '必须先确认对应开关已开启，且 B 站输出只谈当前话题、只表达看法态度，不引用记忆。' +
     '只有主人能在私聊触发，客人/群聊会被拒绝。主人私聊可看 BV号/链接/视频名。' +
+    'reviewList/reviewDecide 管理待审核的评论；评论默认进审核队列，主人批准后才真发。' +
     'settings 查六个开关（comment/dynamic/dm/like/coin/favorite，默认全关）；' +
     'setInteraction 改开关必须二次确认：先不带 confirm 调用，等用户明确说「确认」再带 confirm=true 调用。',
   parameters: {
@@ -48,7 +51,7 @@ const capability = defineCapability({
         'popular','search','explore','settings','setInteraction',
         'subtitles','comments','opus','liveInfo','liveList','musicSearch',
         'loginStatus','qrGenerate','qrPoll','logout',
-        'like','coin','favorite','comment','opusLike','opusCoin','opusFavorite','discover','activity',
+        'like','coin','favorite','comment','opusLike','opusCoin','opusFavorite','reviewList','reviewDecide','debrief','round','receipts','discover','activity',
       ], description: '动作。' },
       keyword: { type: 'string', description: 'search/explore/musicSearch 的关键词。' },
       count: { type: 'number', description: 'popular/liveList 取几条。' },
@@ -60,6 +63,12 @@ const capability = defineCapability({
       channel: { type: 'string', enum: Object.keys(CHANNELS), description: 'setInteraction 的开关名。' },
       enabled: { type: 'boolean', description: 'setInteraction 的目标状态。' },
       confirm: { type: 'boolean', description: 'setInteraction 二次确认；必须用户明确说「确认」才为 true。' },
+      reviewId: { type: 'string', description: 'reviewDecide 的审核条目 id（先用 reviewList 查）。' },
+      approve: { type: 'boolean', description: 'reviewDecide：true 批准，false 拒绝。' },
+      maxVideos: { type: 'number', description: 'round 每轮候选数，默认 5。' },
+      deepCount: { type: 'number', description: 'round 深读几条，默认 2。' },
+      keywords: { type: 'array', items: { type: 'string' }, description: 'round 的口味关键词。' },
+      avoidWords: { type: 'array', items: { type: 'string' }, description: 'round 要避开的词。' },
     },
     required: ['action'],
   },
@@ -145,6 +154,36 @@ async function dispatch(args, ctx) {
   }
 
   // 写互动：必须先检查开关；评论还要话题相关 + 禁私信引流
+  if (action === 'debrief') return { ok: true, ...(await svc.debrief({ bvid: String(a.bvid||''), noFrames: a.noFrames !== false, comments: Number(a.comments)||8 })) };
+  if (action === 'round') {
+    activityStore.start('刷B站', c.uid || 1);
+    const r = await svc.round({ maxVideos: Number(a.maxVideos)||5, deepCount: Number(a.deepCount)||2, keywords: a.keywords||[], avoidWords: a.avoidWords||[] });
+    return { ok: true, ...r };
+  }
+  if (action === 'receipts') return { ok: true, ...(await svc.receipts({ count: Number(a.count)||10 })) };
+
+  // ── 心情/分享欲（affect）：记录经历、查状态，B站公开输出原则同前 ──
+  if (action === 'affect') {
+    const r = await svc.affect(a.experiences ? { experiences: a.experiences } : {});
+    return { ok: true, ...r };
+  }
+  // ── 两本日记：事件落库 / 素材 prompt / 提交 / 查看 ──
+  if (action === 'diaryAddEvent') { const ev = { type: String(a.type||'note'), bvid: String(a.bvid||''), topic: String(a.topic||''), text: String(a.text||''), visibility: String(a.visibility||'private') }; await svc.diaryAddEvent(ev); return { ok: true, sent: ev }; }
+  if (action === 'diaryBuildPrompt') { const r = await svc.diaryBuildPrompt({ date: String(a.date||''), visibility: String(a.visibility||'public') }); return { ok: true, ...r }; }
+  if (action === 'diaryCommit') { await svc.diaryCommit({ date: String(a.date||''), publicText: String(a.publicText||''), privateText: String(a.privateText||'') }); return { ok: true }; }
+  if (action === 'diaryShow') { const r = await svc.diaryShow({ which: String(a.which||'public'), days: Number(a.days) || 1 }); return { ok: true, text: r }; }
+  // ── 有来源记忆（notes）──
+  if (action === 'notesAdd') return { ok: true, ...(await svc.notesAdd({ bvid: String(a.bvid||''), title: String(a.title||''), excerpt: String(a.excerpt||''), takeaway: String(a.takeaway||'') })) };
+  if (action === 'notesRecall') return { ok: true, ...(await svc.notesRecall({ keywords: a.keywords || [] })) };
+  if (action === 'notesStats') return { ok: true, ...(await svc.notesStats({})) };
+  // ── 真看画面 ──
+  if (action === 'watch') return { ok: true, ...(await svc.watch({ bvid: String(a.bvid||'') })) };
+  // ── 生物钟状态 ──
+  if (action === 'biolock') return { ok: true, ...(await svc.biolock({})) };
+
+  if (action === 'reviewList') return { ok: true, pending: await svc.listPending() };
+  if (action === 'reviewDecide') { const a2 = a; return { ok: true, ...(await svc.decide({ id: String(a2.reviewId||a2.id||''), approve: !!a2.approve })) }; }
+
   const writeMap = { like: 'like', coin: 'coin', favorite: 'favorite', comment: 'comment',
     opusLike: 'like', opusCoin: 'coin', opusFavorite: 'favorite' };
   if (writeMap[action]) {

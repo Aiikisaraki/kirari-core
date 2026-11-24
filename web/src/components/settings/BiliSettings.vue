@@ -6,6 +6,7 @@ import { request } from '../../api.js';
 const emit = defineEmits(['saved']);
 const state = ref({ enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
 const login = ref({ loggedIn: false, anonymousOnly: true });
+const pending = ref([]); // 待审核评论
 const qr = ref('');          // 二维码扫码链接
 const qrMsg = ref('');       // 轮询提示
 // 用公开 QR 服务把扫码链接渲染成图片；外网不通时下面的降级链接仍可用
@@ -72,8 +73,14 @@ function pollQr() {
 async function doLogout() {
   try { await request('/api/bili/login/logout', { method: 'POST' }); qr.value = ''; await loadLogin(); emit('saved', '已退出B站登录'); } catch {}
 }
+async function loadPending() {
+  try { const d = await request('/api/bili/review/pending'); pending.value = d?.pending || []; } catch {}
+}
+async function decide(id, approve) {
+  try { await request('/api/bili/review/decide', { method:'POST', body: JSON.stringify({ id, approve }) }); await loadPending(); emit('saved', approve ? '已批准评论' : '已拒绝评论'); } catch {}
+}
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
-onMounted(() => { load(); loadLogin(); });
+onMounted(() => { load(); loadLogin(); loadPending(); });
 defineExpose({ reload: load }); // 供外部命令修改后刷新
 </script>
 
@@ -99,6 +106,19 @@ defineExpose({ reload: load }); // 供外部命令修改后刷新
         <p class="dim">手机 B站 App → 我的 → 扫一扫：</p>
         <img :src="qrImageUrl" alt="B站登录二维码" class="qr-img" />
         <p class="dim"><a :href="qr" target="_blank" rel="noopener">打不开二维码？点这里用手机浏览器打开链接</a></p>
+      </div>
+    </div>
+    <!-- 发送前审核：评论先到队列，批准后才真发 -->
+    <div v-if="pending.length" class="review-box">
+      <h3>待审核评论（{{ pending.length }}）</h3>
+      <p class="dim">她想发的评论会先到这里，你批准后才会真正发出去。</p>
+      <div v-for="p in pending" :key="p.id" class="review-item">
+        <span class="dim">{{ p.kind }} · {{ new Date(p.createdAt).toLocaleString() }}</span>
+        <p>{{ p.text }}</p>
+        <div class="review-ops">
+          <button class="mini primary" @click="decide(p.id, true)">批准</button>
+          <button class="mini" @click="decide(p.id, false)">拒绝</button>
+        </div>
       </div>
     </div>
     <p v-if="error" class="error">{{ error }}</p>

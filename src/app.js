@@ -140,6 +140,12 @@ function createServer() {
                     if (!list.length) console.log("[ext] 未安装扩展包");
                 })
                 .catch((e) => console.warn("[ext] 扩展扫描失败（已忽略）:", e?.message || e));
+            // B站生物钟：按作息自己醒来刷 B站（需 enabled + autoBrowse 双开；默认不动）
+            try {
+                require("./services/biliBiolock").start();
+            } catch (e) {
+                console.warn("[biolock] 启动失败（已忽略）:", e?.message || e);
+            }
         });
     }
 

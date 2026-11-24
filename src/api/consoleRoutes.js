@@ -175,6 +175,19 @@ function setupConsoleRoutes(app) {
         });
     });
 
+    // ---- B站发送审核队列（评论发出前逐条批准/拒绝） ----
+    app.get("/api/bili/review/pending", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        res.json({ pending: await svc.listPending() });
+    });
+    app.post("/api/bili/review/decide", async (req, res) => {
+        if (!requireAdmin(req, res)) return;
+        const svc = require('../extensions/host').getExtensionHost()?.getService('bili.explore');
+        if (!svc) return res.status(503).json({ message: 'B站扩展包未安装' });
+        res.json(await svc.decide({ id: String(req.body?.id||''), approve: !!req.body?.approve }));
+    });
     // ---- B站登录（扫码：凭证只存本机扩展包目录，绝不进记忆） ----
     app.get("/api/bili/login/status", async (req, res) => {
         if (!requireAdmin(req, res)) return;

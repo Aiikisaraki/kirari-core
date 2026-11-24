@@ -125,6 +125,7 @@ async function loadHistory() {
         sessionId.value = s.sessionId || "";
         const r = await api.getHistory(sessionId.value, 200);
         messages.value = mapItems(r.items);
+        await nextTick(); // DOM 渲染完再滚，否则滚的是旧高度
         scrollBottom();
     } catch (e) {
         // 历史读不出来不该挡住发消息，提示一下就行
