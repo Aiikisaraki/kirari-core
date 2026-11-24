@@ -3,7 +3,8 @@
 // 命令改 → 写这里 → UI 读这里；UI 改 → 也写这里 → 命令读到新值。天然双向同步。
 // 默认全关。dm（私信）即使开了也永不主动发起。
 const KEY = 'bili_interaction';
-const DEFAULTS = { comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
+// enabled = B站功能总闸（关掉后所有 B站动作全禁）；autoBrowse = 允许她闲时自主刷（默认关，需显式开）。
+const DEFAULTS = { enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false };
 
 function read() {
   try {

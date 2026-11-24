@@ -3,12 +3,14 @@ import { ref, onMounted } from 'vue';
 
 // B站互动开关：与命令共用 settings_kv 单键，命令改完这里刷新即可见（双向同步）。
 const emit = defineEmits(['saved']);
-const state = ref({ comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
+const state = ref({ enabled: false, autoBrowse: false, comment: false, dynamic: false, dm: false, like: false, coin: false, favorite: false });
 const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
 
 const CH = [
+  { key: 'enabled', name: 'B站总开关', desc: '关掉后我完全不去B站，所有B站动作都会被拒绝。' },
+  { key: 'autoBrowse', name: '自主闲逛', desc: '允许我在空闲时自己去看有趣的内容（低优先级，随时可中断）。关掉后只有你明确叫我去我才去。' },
   { key: 'comment', name: '评论', desc: '视频与专栏下只就当前话题表达看法态度；不引用记忆、不引流。' },
   { key: 'dynamic', name: '动态', desc: '需要时会发一条动态；不带任何浏览历史或他人的信息。' },
   { key: 'dm', name: '私信', desc: '默认永久关闭。即使手动开启，也不会主动私信任何人。' },

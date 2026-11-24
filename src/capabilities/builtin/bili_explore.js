@@ -16,7 +16,7 @@ const biliSettings = require('../../services/biliSettings');
 const activityStore = require('../../services/activityStore');
 
 const SERVICE_ID = 'bili.explore';
-const CHANNELS = { comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
+const CHANNELS = { enabled: '总开关', autoBrowse: '自主闲逛', comment: '评论', dynamic: '动态', dm: '私信', like: '点赞', coin: '投币', favorite: '收藏' };
 
 function fullMeta(v) {
   const bvid = String(v?.bvid || '');
@@ -70,6 +70,11 @@ const capability = defineCapability({
 async function dispatch(args, ctx) {
   const a = args || {};
   const action = String(a.action || '');
+  // 总闸：B站功能被关掉后，除查看/修改开关本身外，所有动作一律拒绝
+  const bs = biliSettings.read();
+  if (!bs.enabled && !['settings', 'setInteraction'].includes(action)) {
+    return { ok: false, disabled: true, error: 'B站功能总开关已关闭。要让我去B站，先说「开启B站」（需确认）。' };
+  }
   const c = ctxOf(ctx);
   if (c.role !== 'owner' || c.isGroup === true) return { ok: false, error: '只有主人能在私聊里让我去 B 站' };
 
@@ -96,6 +101,9 @@ async function dispatch(args, ctx) {
 
   // 自主发现：用她登录号的推荐流找有趣内容，产出安全见闻
   if (action === 'discover') {
+    // 自主闲逛总闸：autoBrowse 关时，只能由主人当场叫她去（在对话里明确要求），
+    // 这里限定：只有 fromSchedule=true（内部调度）才被 autoBrowse 拦；用户主动叫她去不受限。
+    if (a.fromSchedule === true && !bs.autoBrowse) return { ok: false, disabled: true, error: '自主闲逛已关闭（autoBrowse=false）' };
     // 标记闲时活动：她此刻正在刷B站（低优先级、可被打断）
     activityStore.start('刷B站', c.uid || 1);
     let knownPersons = [];

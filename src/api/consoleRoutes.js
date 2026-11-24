@@ -183,7 +183,7 @@ function setupConsoleRoutes(app) {
     app.put("/api/bili/interaction", async (req, res) => {
         if (!requireAdmin(req, res)) return;
         const b = req.body || {};
-        const valid = ["comment", "dynamic", "dm", "like", "coin", "favorite"];
+        const valid = ["enabled", "autoBrowse", "comment", "dynamic", "dm", "like", "coin", "favorite"];
         const patch = {};
         for (const k of valid) {
             if (b[k] !== undefined) {
