@@ -67,7 +67,15 @@ async function tick(now = Date.now()) {
     db.prepare("INSERT INTO settings_kv (key, value) VALUES ('bili_biolock', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(cfg));
     const svc = host.getService('bili.explore');
     console.log('[biolock] 醒来刷B站（' + winName + '）');
-    const result = await svc.discover({ count: 3 });
+    // ⚠️ 必须带 fromSchedule=true：这是「内部调度自己醒来」，不是主人当面叫她。
+    //
+    // 这个标记原来是个**死代码**：capability 里读它来决定 autoBrowse 拦不拦，
+    // 但两端都没有任何调用方真的把它置 true（workspaceTask 的提示词还写着
+    // 「不要带 fromSchedule=true」）。结果是：用户关掉「自主闲逛」开关后，
+    // 生物钟照样醒来刷 B 站 —— 开关形同虚设，而且没有任何报错可见。
+    //
+    // 这里补上真正的调用方，让 autoBrowse 开关终于生效。
+    const result = await svc.discover({ count: 3, fromSchedule: true });
 
     // ── 看完之后：她可能想跟你说说 ────────────────────────────────
     // 原来 discover 完就结束了：见闻写进记忆，但**没有任何渠道让她开口**。
