@@ -44,6 +44,8 @@ const pairs = [
   ['src/services/reply/style.js', 'electron/ai/reply/style.ts'],
   ['src/services/reply/speakingDesire.js', 'electron/ai/reply/speakingDesire.ts'],
   ['src/services/personaFile.js', 'electron/ai/persona-file.ts'],
+  // proactive 的措辞决定「主动联系」听起来像想你、还是像定时通知，必须两端一致
+  ['src/services/presence/proactive.js', 'electron/ai/presence/proactive.ts'],
 ];
 
 let bad = 0;
