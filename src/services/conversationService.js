@@ -325,6 +325,27 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       console.warn('[aiReply] 在场感注入失败（已忽略）:', e?.message || e);
     }
 
+    // ── 她最近在B站看过什么（2026-11-25 用户报障的第三处断点）──────────────
+    // 用户原话：「我今天问她看过什么，她依旧记不得东西，不知道视频名和视频内容」。
+    //
+    // 根因不是没写进库，而是**注入路径只认关键词**：buildMemoryBlock 按当前这句
+    // 问话做相关度打分，「你今天看过什么」跟记忆正文一个词都不重合，
+    // 于是那段记忆根本不进上下文。数据在库里，她却答不上来。
+    //
+    // 这里给「她自己的经历」单开一条时间线注入：最近 2 天的见闻做成很短的摘要块。
+    // 参考 dsh-bili-humanism 的「信笺 + 固定读取入口」——主提示只放摘要，
+    // 完整条目仍由记忆检索 / notesRecall 去取。
+    // 只给主人本人的私聊注入：见闻是她和主人之间的经历，群里不该被搬出来。
+    try {
+      if (scene && scene.isOwner === true && !(scene && 'group' === String(scene.chatType || ''))) {
+        const biliDigest = require('./biliDigest');
+        const digest = biliDigest.buildDigestBlock({ days: 2, limit: 6 });
+        if (digest) systemPrompt += '\n' + digest;
+      }
+    } catch (e) {
+      console.warn('[aiReply] B站见闻摘要注入失败（已忽略）:', e && e.message ? e.message : e);
+    }
+
     // 设备与工具执行位置：让她知道「组网里还有哪些机器、怎么点名换机器」。
     // 默认在哪台执行由服务端 toolRouting 判定（不靠模型自觉），这段只是让
     // 「点名某个叶子」这件事对模型可见可用。单机安装不注入，不污染提示词。

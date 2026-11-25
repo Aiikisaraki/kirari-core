@@ -124,11 +124,17 @@ async function dispatch(args, ctx) {
     const result = await svc.discover({ seenBvids: a.seenBvids || [], count: Number(a.count) || 3, knownPersons });
     const written = [];
     for (const ob of (result.observations || [])) {
-      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons });
+      // ⚠️ 第三个参数 publicContent=true：这段文本来自**公开作品**（标题/简介），
+      // 不是私聊里提到的熟人。默认模式的激进正则会把「长达数小时！」「@某某」
+      // 这类正常标题判死 —— 见闻全被拦掉，她就永远「什么都不记得」。
+      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons, publicContent: true });
       if (!check.safe) continue;
-      const r = await memory.remember({ content: '[B站见闻·只谈自己的感受] ' + ob.text, scope: 'self',
-        source: 'observed', kind: 'event', visibility: 'private', importance: 3 }, ctx);
-      if (r && r.ok) written.push({ id: r.id, text: ob.text });
+      // importance 4：见闻是「她自己的经历」，比普通事件更该被想起来。
+      // 正文带 BV 号 —— 主人问「哪个视频」时她得能报得出来。
+      const content = '[B站见闻·她自己的经历] ' + ob.text + (ob.bvid ? '（' + ob.bvid + '）' : '');
+      const r = await memory.remember({ content, scope: 'self',
+        source: 'observed', kind: 'event', visibility: 'private', importance: 4 }, ctx);
+      if (r && r.ok) written.push({ id: r.id, text: ob.text, bvid: ob.bvid });
     }
     return { ok: true, audience: 'owner', personalized: result.personalized, totalCandidates: result.totalCandidates,
       videos: (result.videos || []).map((v) => ({ ...fullMeta(v), score: v.score })), written,
@@ -209,11 +215,11 @@ async function dispatch(args, ctx) {
     const result = await svc.explore({ keyword, takeaway: String(a.takeaway || '').slice(0, 120), knownPersons });
     const written = [];
     for (const ob of (result.observations || [])) {
-      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons });
+      const check = await svc.isSafeBiliMemory({ text: ob.text || '', knownPersons, publicContent: true });
       if (!check.safe) continue;
-      const content = '[B站见闻·只谈自己的感受] ' + ob.text;
-      const r = await memory.remember({ content, scope: 'self', source: 'observed', kind: 'event', visibility: 'private', importance: 3 }, ctx);
-      if (r && r.ok) written.push({ id: r.id, text: ob.text });
+      const content = '[B站探索·关键词「' + keyword + '」] ' + ob.text + (ob.bvid ? '（' + ob.bvid + '）' : '');
+      const r = await memory.remember({ content, scope: 'self', source: 'observed', kind: 'event', visibility: 'private', importance: 4 }, ctx);
+      if (r && r.ok) written.push({ id: r.id, text: ob.text, bvid: ob.bvid });
     }
     return { ok: true, audience: 'owner', keyword, videos: (result.videos || []).map((v) => fullMeta(v)), written,
       note: '见闻已写入统一记忆；B站公开输出只谈当前话题' };
