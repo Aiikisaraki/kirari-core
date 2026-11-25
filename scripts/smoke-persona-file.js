@@ -113,6 +113,22 @@ check('config.json 的老字段依然保留（跨版本安全）', cfgAfter.base
 const m2 = pf2.migrateFromConfig();
 check('第二次不再重复迁移', m2.migrated === false);
 
+section('上限一致性：self_ops 不能比 persona.md 更严');
+// 2026-11-25 的教训：把 persona.md 打开到 20000，却漏了 selfOpsPolicy 里的 4000 校验，
+// 结果「从对话里改人格被拒」而「设置页/直接改文件可以」—— 半截状态比不改更让人困惑。
+const policy = require(path.join(ROOT, 'src/services/selfOpsPolicy'));
+const writable = policy.describeWritable();
+const personaField = writable.filter((x) => x.key === 'persona.basePersona')[0];
+check('白名单里有 persona.basePersona', !!personaField);
+check('描述里已写 20000 字', String(personaField && personaField.description).indexOf('20000') >= 0, String(personaField && personaField.description));
+check('描述里不再写 4000 字', String(personaField && personaField.description).indexOf('4000') < 0);
+let rejectedAt = 0;
+try { policy.validate('persona.basePersona', '啊'.repeat(15000)); } catch (e) { rejectedAt = 15000; }
+check('15000 字可以通过校验（旧上限会拒）', rejectedAt === 0);
+let rejectedAt2 = false;
+try { policy.validate('persona.basePersona', '啊'.repeat(20001)); } catch (e) { rejectedAt2 = true; }
+check('20001 字仍然拒绝（上限有界）', rejectedAt2 === true);
+
 fs.rmSync(tmpHome, { recursive: true, force: true });
 console.log('\n共 ' + checks + ' 项检查，失败 ' + failures + ' 项');
 if (failures > 0) process.exitCode = 1;
