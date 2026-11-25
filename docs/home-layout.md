@@ -21,7 +21,8 @@
 ```
 ~/.kirari/
 ├── home.json                    目录版本 + 一次性迁移记录（程序维护，不建议手改）
-├── config.json                  当前生效的模型三件套 / 搜索 / 人格 / AgentProfile —— 两端同一份
+├── config.json                  当前生效的模型三件套 / 搜索 / AgentProfile —— 两端同一份
+├── persona.md                   人格正文（她是谁）—— 2026-11-25 从 config.json 搬出的独立文件
 ├── models.json                  模型清单（WorkBuddy 同构，可整份与别家 agent 互拷）
 ├── pet-client.config.json       桌宠本机配置：备注名 / 我的头像 / 适配器 / 窗口 / 主题 / 形象
 ├── console-appearance.json      控制台外观（仅核心版，与桌宠主题刻意分开）
@@ -78,6 +79,41 @@
 - 转换只在文件边界发生一次，实现真源：核心版 `src/mcp/standardMcp.js`、桌宠版 `electron/mcp/standardMcp.ts`。
 
 旧格式 `mcp/servers.json`（裸数组）首次启动自动并入 `mcp.json`，只补不覆盖，随后改名 `.migrated-<时间戳>.bak`。
+
+### `persona.md` —— 人格正文（2026-11-25 从 config.json 搬出）
+
+「她是谁」的**唯一可编辑来源**，一份明文 Markdown，两端共用同一份。
+
+为什么搬出来：原来存在 `config.json` 的 `basePersona` 字段里，三个毛病——
+
+| 毛病 | 后果 |
+| --- | --- |
+| 4000 字上限（setBasePersona 里 slice） | 写得细一点就被**静默截断**，人格是最该写长的东西却和配置字段共用限额 |
+| 和模型/密钥同一个文件 | config.json 写坏或被整体覆盖时，人格跟着一起丢 |
+| 藏在 JSON 字符串里 | 想读、想改、想 diff、想备份，都得先挖字符串 |
+
+读取优先级（`services/personaFile.js` 的 `resolvePersona`）：
+
+1. `persona.md` 有内容 → 用它（上限 **20000** 字）
+2. 否则回退 `config.json` 的 `basePersona`（**兼容老部署**，升级不会让人格凭空消失）
+3. 都空 → 内置 `DEFAULT_PERSONA`（`services/reply/persona.js`）
+
+写入纪律：
+
+- 内容没变就不写盘（否则每轮自省都可能触发一次备份 + 写文件）
+- 原子写：先写 .tmp 再 rename，断电不会留下半个文件
+- 覆盖前把旧文件复制到 backups/persona-<时间戳>.md，只留最近 10 份
+- 读不出来时按「未自定义」处理并 warn，绝不因为人格文件坏了就起不来
+
+「恢复预设」= **真的删掉 persona.md**，同时清空 config.json 里的老字段。
+只删文件不清老字段的话，回退链会立刻把它读回来，用户看到的是「点了没反应」——
+这是双层存储最典型的坑，smoke-persona-file.js 专门钉了这一条。
+
+首次启动会把 config.json 的 basePersona 迁进 persona.md，但**不删老字段**：
+两端（核心版 / 桌宠版）可能版本不同步，旧版本还在读那个字段，删了会让它在升级前
+突然「人格变回预设」。等两端都读 persona.md 之后，这个字段自然不再被读。
+
+设置页入口不变：核心版 PUT /api/persona、桌宠版「人格」页，都写到这份文件。
 
 ### `models.json` —— 模型清单（WorkBuddy 同构）
 
