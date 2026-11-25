@@ -382,8 +382,10 @@ function getProfileSnapshot() {
         searchEndpoint: config.searchEndpoint || '',
         searchKeyMasked: maskKey(config.searchKey),
         hasSearchKey: !!config.searchKey,
-        // 与桌宠版共用的「自定义基础人格」；空 = 用后端预设人格
-        basePersona: typeof config.basePersona === 'string' ? config.basePersona : '',
+        // 自定义人格：2026-11-25 起真源是 persona.md（见 services/personaFile.js）。
+        // 这里给的是「当前生效值」，不是 config.json 的原始字段 ——
+        // 否则人格搬走后自省会显示「（用预设人格）」，看起来像人格丢了。
+        basePersona: getBasePersona(),
     };
 }
 
