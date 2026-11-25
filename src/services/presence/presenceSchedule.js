@@ -218,7 +218,51 @@ function outreachToday(uid, now = Date.now()) {
   return state.outreachDate === localDateKey(now) ? state.outreachToday : 0;
 }
 
+/**
+ * 带自定义 prompt 的主动开口（供 biolock 这类「刚做完某事、想说点什么」的时机用）。
+ *
+ * 与 tickProactive 的区别只在素材来源：那边从简报/记忆里挖，这边由调用方直接给。
+ * 闸门与账本完全共用 —— 不然「刷完B站说一次」会绕过每日上限，变成刷屏的新通道。
+ *
+ * @param {number} uid
+ * @param {number} now
+ * @param {object} opts { prompt, timing, chance }
+ * @returns {Promise<{fired:boolean, reason:string}>}
+ */
+async function proactiveWithTiming(uid, now = Date.now(), opts = {}) {
+  const prompt = String((opts && opts.prompt) || '').trim();
+  if (!prompt) return { fired: false, reason: 'no prompt' };
+
+  const state = loadOrInitPresenceState(now, uid);
+  const cfg = presenceConfig(uid);
+  const today = localDateKey(now);
+  const ledger = readLedger(uid);
+
+  const verdict = proactive.gate({
+    cfg: cfg,
+    ledger: ledger,
+    today: today,
+    inQuietHours: engine.inQuietHours(cfg, now),
+    focus: cfg.focus,
+    now: now,
+    chance: opts && opts.chance !== undefined ? opts.chance : 0.35,
+  });
+  if (!verdict.fire) return { fired: false, reason: verdict.reason };
+
+  if (!runner) return { fired: false, reason: 'no runner' };
+
+  let ok = false;
+  try {
+    ok = await runner({ prompt: prompt, uid: uid, goal: null });
+  } catch (e) {
+    console.warn('[presence] proactiveWithTiming runner 抛错:', e && e.message ? e.message : e);
+    ok = false;
+  }
+  if (ok) writeLedger(uid, proactive.markUsed(ledger, today, now));
+  return { fired: ok, reason: ok ? '说出来了' : 'runner failed' };
+}
+
 module.exports = {
-  setPresenceRunner, setFocusProvider, tickPresence, tickProactive,
+  setPresenceRunner, setFocusProvider, tickPresence, tickProactive, proactiveWithTiming,
   ensureJob, outreachToday, readLedger, writeLedger, PRESENCE_JOB_ID,
 };
