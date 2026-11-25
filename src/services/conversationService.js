@@ -304,12 +304,13 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 只对主人本人的会话注入（scene.isOwner === true）：块里的时间戳来自主人视角，
     // 对朋友/群聊注入等于把主人视角安到别人头上（分人识别的边界，不能破）。
     // 读不到状态就返回空串，绝不阻塞。
+    let presenceState = null;
     try {
       if (scene && scene.isOwner === true) {
         const presenceEngine = require('./presence/presenceEngine');
         const { loadOrInitPresenceState } = require('./presence/stateStore');
         const now = Date.now();
-        const presenceState = loadOrInitPresenceState(now, aiContext.userid);
+        presenceState = loadOrInitPresenceState(now, aiContext.userid);
         let presenceBlock = presenceEngine.buildPresenceBlock(presenceState, now);
         // 闲时活动（如「正在刷B站」）：低优先级、可被中断；她被问「在干嘛」时能如实回答。
         try {
@@ -383,6 +384,7 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
     // 长期记忆：按当前场合可见的记忆池做联想检索，注入少量高相关条目。
     // 这是「换个对话也认得你」的落点——记忆不挂在 sessionId 上，而是挂
     // self/person/scene/global 分层的 subject 上；可见性由 memory.js 强制过滤。
+    let memoryBlock = '';
     try {
       const memCtx = {
         sessionId,
@@ -397,7 +399,8 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
         platform: scene && scene.platform ? String(scene.platform) : null,
       };
       const mem = await memory.buildMemoryBlock(memCtx, text || '');
-      if (mem.block) systemPrompt += mem.block;
+      memoryBlock = mem.block || '';
+      if (memoryBlock) systemPrompt += memoryBlock;
     } catch (e) {
       console.warn('[aiReply] 记忆注入失败（已忽略）:', e?.message || e);
     }
@@ -413,6 +416,32 @@ async function getReply({ aiContext, content = '', images = [], sessionId, clien
       '\n记的时候 scope 想清楚：关于主人本人的长期事实 → self；关于此刻这个人 → person；' +
       '关于这个群/这个场合大家的事 → scene；通用约定与常识 → global。' +
       '\n不确定要不要记就先别记；记错了比没记更麻烦。对方说「忘了这件事」时用 action=forget。';
+
+    // ── 此刻的说话欲望 + 返场提醒（2026-11-25 分层改造的收尾两段）──────────────
+    // 顺序：先给「这一轮该多说还是少说」的档位，最后用「返场提醒」把口吻钉回人格。
+    // 为什么放在最末：system 的前九成是准则、清单、记忆、状态，模型读到最后只看得到
+    // 「不许／上限／不要」；这两段用最后的位置把「她是谁」和「有没有得说」拉回来。
+    // 失败静默降级——提示词缺一段不该阻断对话。
+    try {
+      const presenceEngine = require('./presence/presenceEngine');
+      const { computeSpeakingDesire, buildDesireBlock } = require('./reply/speakingDesire');
+      const { buildPersonaEcho } = require('./reply/persona');
+      const now = Date.now();
+      const hour = new Date(now).getHours();
+      const desire = computeSpeakingDesire({
+        energy: presenceEngine.energyAt(hour),
+        mood: presenceState ? presenceState.mood : null,
+        drives: presenceState ? presenceEngine.effectiveDrives(presenceState, now) : undefined,
+        gapMs: presenceState ? Math.max(0, now - presenceState.lastUserAt) : undefined,
+        text: text || '',
+        knowledge: { kbHit: !!kbBlock, memHit: !!memoryBlock },
+        isGroup: scene ? 'group' === String(scene.chatType || '') : false,
+      });
+      systemPrompt += '\n\n' + buildDesireBlock(desire);
+      systemPrompt += '\n\n' + buildPersonaEcho(persona);
+    } catch (e) {
+      console.warn('[aiReply] 说话欲望/人格回响注入失败（已忽略）:', e && e.message ? e.message : e);
+    }
 
     // 阶段 D：SKILL.md 渐进披露——system 里只放「name: description」目录摘要，
     // 模型需要时用 load_skill(name) 才加载正文（装十个技能也不再全量吃 token）。

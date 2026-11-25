@@ -398,20 +398,56 @@ function setProfilePatch(patch) {
     writeRaw(next);
 }
 
-// ── 人格（与桌宠版 PersonaSettings 同一份 basePersona 字段）─────────────
+// ── 人格 ────────────────────────────────────────────────────────────────
+//
+// 2026-11-25 用户拍板：人格从 config.json 搬到独立文件 ~/.kirari/persona.md。
+// 原因：4000 字上限写不细、和模型密钥一损俱损、没法当明文编辑。
+//
+// 但**读入口的签名不变**（仍然叫 getBasePersona 返回字符串），
+// 因为它在两端有十几个调用点；改签名等于把一次文件搬家变成一次跨仓库重构。
+// 真正的读写都在 services/personaFile.js 里，这里只做转发 + 兼容回退。
 
-/** 读自定义人格。空串 = 未自定义，聊天内核会回退到 DEFAULT_PERSONA。 */
-function getBasePersona() {
+/** 读 config.json 里的原始 basePersona（**不**查 persona.md）。仅供迁移与回退用。 */
+function getRawBasePersona() {
     ensureInitialized();
     return typeof config.basePersona === 'string' ? config.basePersona : '';
 }
 
-/** 写自定义人格。传空串 = 「恢复预设」（显式清空，不是留空）。 */
+/** 读自定义人格。优先 persona.md；没有再回退 config.json 的老字段；都空 = 未自定义。 */
+function getBasePersona() {
+    ensureInitialized();
+    try {
+        const { resolvePersona } = require('./personaFile');
+        const r = resolvePersona();
+        if (r.text) return r.text;
+    } catch (e) {
+        // persona.md 读写异常不能让人格变成空：继续走下面的老字段
+        console.warn('[model-config] 读 persona.md 失败，回退 config.json:', e && e.message ? e.message : e);
+    }
+    return typeof config.basePersona === 'string' ? config.basePersona : '';
+}
+
+/**
+ * 写自定义人格。传空串 = 「恢复预设」（删掉 persona.md，真正回到内置预设）。
+ *
+ * 同时**清空 config.json 里的老字段**：不清的话回退链会立刻把它读回来，
+ * 用户点「恢复预设」看起来毫无反应 —— 这是这类双层存储最典型的坑。
+ */
 function setBasePersona(value) {
     ensureInitialized();
     const v = typeof value === 'string' ? value : '';
-    writeRaw({ ...config, basePersona: v.slice(0, 4000) });
-    return v.slice(0, 4000);
+    let saved = '';
+    try {
+        const { writePersonaFile } = require('./personaFile');
+        const w = writePersonaFile(v);
+        if (w.truncated) console.warn('[model-config] 人格超过上限，已截断到', w.saved.length, '字');
+        saved = w.saved;
+    } catch (e) {
+        console.warn('[model-config] 写 persona.md 失败:', e && e.message ? e.message : e);
+    }
+    // 老字段跟着清（不留旧值，否则回退链会把刚删掉的人格读回来）
+    writeRaw({ ...config, basePersona: '' });
+    return saved;
 }
 
 // ── 思考模式（self_ops 可改；存 config.json 的 thinking.mode）──────────
@@ -491,6 +527,7 @@ module.exports = {
     getProfileSnapshot,
     setProfilePatch,
     getBasePersona,
+    getRawBasePersona,
     setBasePersona,
     setAgentProfilePatch,
     getThinking,
